@@ -1,20 +1,22 @@
-import { useEffect, useState } from 'react';
-import { useAuthStore, useWalletStore, useMatrixStore, usePinStore, useOtpStore } from '@/store';
+﻿import { useEffect, useState } from 'react';
+import { useAuthStore, useWalletStore, useMatrixStore, useOtpStore } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { 
-  TrendingUp, Users, ArrowUpRight, ArrowDownLeft, 
+import {
+  TrendingUp, Users, ArrowUpRight, ArrowDownLeft,
   Copy, CheckCircle, RefreshCw,
   DollarSign, UserPlus, BarChart3, PlusCircle, LogOut, Shield,
-  Ticket, Plane, Globe, Heart, Award, UserCog, IdCard, PhoneCall, ShoppingBag
+  Ticket, Plane, Globe, Heart, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Headphones, Mail
 } from 'lucide-react';
 import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText } from '@/utils/helpers';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import MobileBottomNav from '@/components/MobileBottomNav';
+import BrandLogo from '@/components/BrandLogo';
 import { toast } from 'sonner';
 import Database from '@/db';
 
@@ -23,9 +25,8 @@ export default function Dashboard() {
   const { user, isAuthenticated, logout, impersonatedUser, endImpersonation, verifyTransactionPassword } = useAuthStore();
   const { wallet, transactions, loadWallet, transferFunds, withdraw } = useWalletStore();
   const { loadUserDownline, getDownlineStats } = useMatrixStore();
-  const { unusedPins, loadPins } = usePinStore();
   const { sendOtp, verifyOtp } = useOtpStore();
-  
+
   const [isLoading, setIsLoading] = useState(false);
   const [showTransferDialog, setShowTransferDialog] = useState(false);
   const [showWithdrawDialog, setShowWithdrawDialog] = useState(false);
@@ -49,13 +50,12 @@ export default function Dashboard() {
       navigate('/login');
       return;
     }
-    
+
     if (displayUser) {
       loadWallet(displayUser.id);
       loadUserDownline(displayUser.userId);
-      loadPins(displayUser.id);
     }
-  }, [isAuthenticated, displayUser, navigate, loadWallet, loadUserDownline, loadPins]);
+  }, [isAuthenticated, displayUser, navigate, loadWallet, loadUserDownline]);
 
   const handleTransfer = async () => {
     if (!displayUser) return;
@@ -73,7 +73,7 @@ export default function Dashboard() {
     setIsLoading(true);
     const result = await transferFunds(displayUser.id, transferData.userId, amount);
     setIsLoading(false);
-    
+
     if (result.success) {
       toast.success(result.message);
       setShowTransferDialog(false);
@@ -109,7 +109,7 @@ export default function Dashboard() {
     setIsLoading(true);
     const result = await withdraw(displayUser.id, amount, withdrawData.address);
     setIsLoading(false);
-    
+
     if (result.success) {
       toast.success(result.message);
       setShowWithdrawDialog(false);
@@ -144,6 +144,58 @@ export default function Dashboard() {
     toast.success('Referral link copied!');
   };
 
+  const getReferralLink = () => {
+    if (!displayUser) return '';
+    return `${window.location.origin}/register?sponsor=${displayUser.userId}`;
+  };
+
+  const getReferralShareMessage = () => {
+    const link = getReferralLink();
+    return [
+      '*New Earning Opportunity !*',
+      '',
+      '*ReferNex* = Smart Shopping + Helping System + Referral Income.',
+      '',
+      'Simple process, Transparent system, Real growth.',
+      '',
+      '*Join here :*',
+      link,
+      '',
+      '*Note :* A valid *Activation Pin* is required to complete registration.'
+    ].join('\n');
+  };
+
+  const shareReferralOnWhatsApp = () => {
+    const message = getReferralShareMessage();
+    const url = `https://wa.me/?text=${encodeURIComponent(message)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  const shareReferral = async () => {
+    const link = getReferralLink();
+    const message = getReferralShareMessage();
+
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: 'ReferNex - New Earning Opportunity',
+          text: message,
+          url: link
+        });
+        return;
+      }
+    } catch {
+      // User may cancel share dialog. Continue with clipboard fallback.
+    }
+
+    try {
+      await navigator.clipboard.writeText(message);
+      toast.success('Referral message copied. You can paste and share it.');
+    } catch {
+      toast.error('Share not supported on this device/browser.');
+    }
+  };
+
   const handleLogout = () => {
     if (impersonatedUser) {
       endImpersonation();
@@ -159,8 +211,8 @@ export default function Dashboard() {
   const sponsorUser = displayUser?.sponsorId ? Database.getUserByUserId(displayUser.sponsorId) : null;
   const directReferralUsers = displayUser
     ? Database.getUsers()
-        .filter(u => u.sponsorId === displayUser.userId)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .filter(u => u.sponsorId === displayUser.userId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     : [];
   const filteredDirectReferrals = directReferralUsers.filter((u) =>
     u.userId.includes(directReferralSearch.trim()) ||
@@ -183,28 +235,28 @@ export default function Dashboard() {
 
   // Check achievements
   const achievements = [
-    { 
-      key: 'nationalTour', 
-      label: 'National Tour', 
-      level: 5, 
+    {
+      key: 'nationalTour',
+      label: 'National Tour',
+      level: 3,
       icon: Plane,
       achieved: displayUser.achievements?.nationalTour,
       color: 'text-blue-400',
       bgColor: 'bg-blue-500/20'
     },
-    { 
-      key: 'internationalTour', 
-      label: 'International Tour', 
-      level: 7, 
+    {
+      key: 'internationalTour',
+      label: 'International Tour',
+      level: 4,
       icon: Globe,
       achieved: displayUser.achievements?.internationalTour,
       color: 'text-purple-400',
       bgColor: 'bg-purple-500/20'
     },
-    { 
-      key: 'familyTour', 
-      label: 'Family International Tour', 
-      level: 10, 
+    {
+      key: 'familyTour',
+      label: 'Family International Tour',
+      level: 5,
       icon: Heart,
       achieved: displayUser.achievements?.familyTour,
       color: 'text-pink-400',
@@ -213,21 +265,19 @@ export default function Dashboard() {
   ];
 
   return (
-    <div className="min-h-screen bg-[#0a0e17]">
+    <div className="dashboard-page min-h-screen bg-slate-50 pb-24 dark:bg-[#0a0e17] md:pb-0">
       {/* Header */}
-      <header className="glass sticky top-0 z-50 border-b border-white/5">
+      <header className="glass sticky top-0 z-50 border-b border-slate-200/80 dark:border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between min-h-16 py-2 sm:py-0 gap-2">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#118bdd] to-[#004e9a] flex items-center justify-center">
-                <Users className="w-5 h-5 text-white" />
-              </div>
+              <BrandLogo className="h-10 w-10 rounded-xl" />
               <div>
-                <span className="text-base sm:text-xl font-bold text-white">ReferNex</span>
-                <span className="text-xs text-white/50 hidden sm:block">ID: {displayUser.userId}</span>
+                <span className="text-base sm:text-xl font-bold text-slate-900 dark:text-white">ReferNex</span>
+                <span className="text-xs text-slate-500 hidden sm:block dark:text-white/50">ID: {displayUser.userId}</span>
               </div>
             </div>
-            
+
             <div className="flex items-center gap-2 sm:gap-4">
               {/* Impersonation Indicator */}
               {impersonatedUser && (
@@ -238,8 +288,8 @@ export default function Dashboard() {
 
               {/* Admin Panel Button - Only for admins */}
               {user?.isAdmin && !impersonatedUser && (
-                <Button 
-                  variant="outline" 
+                <Button
+                  variant="outline"
                   size="sm"
                   onClick={() => navigate('/admin')}
                   className="hidden sm:inline-flex border-purple-500/50 text-purple-400 hover:bg-purple-500/10"
@@ -248,23 +298,23 @@ export default function Dashboard() {
                   Admin Panel
                 </Button>
               )}
-              
+
               <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold ${generateAvatarColor(displayUser.userId)}`}>
+                <div className={`dashboard-avatar w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold ${generateAvatarColor(displayUser.userId)}`}>
                   {getInitials(displayUser.fullName)}
                 </div>
                 <div className="hidden sm:block">
-                  <p className="text-sm font-medium text-white">{displayUser.fullName}</p>
-                  <p className="text-xs text-white/50">{displayUser.isActive ? 'Active' : 'Inactive'}</p>
+                  <p className="text-sm font-medium text-slate-900 dark:text-white">{displayUser.fullName}</p>
+                  <p className="text-xs text-slate-500 dark:text-white/50">{displayUser.isActive ? 'Active' : 'Inactive'}</p>
                 </div>
               </div>
-              
+
               {/* Logout Button */}
-              <Button 
-                variant="ghost" 
+              <Button
+                variant="ghost"
                 size="icon"
                 onClick={handleLogout}
-                className="text-white/60 hover:text-red-400"
+                className="text-slate-500 hover:text-red-500 dark:text-white/60 dark:hover:text-red-400"
               >
                 <LogOut className="w-5 h-5" />
               </Button>
@@ -276,59 +326,68 @@ export default function Dashboard() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         {/* Welcome Section */}
         <div className="mb-8">
-          <h1 className="text-2xl sm:text-3xl font-bold text-white mb-2">
+          <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 dark:text-white mb-2">
             Welcome back, <span className="gradient-text">{displayUser.fullName.split(' ')[0]}</span>
           </h1>
-          <p className="text-white/60">
+          <p className="text-slate-600 dark:text-white/60">
             Here is an overview of your referral network, shopping rewards, and earnings.
           </p>
         </div>
 
-        {sponsorUser && (
-          <Card className="glass border-white/10 mb-8">
-            <CardContent className="p-5 flex flex-col md:flex-row items-center justify-between gap-4">
+        {/* Sponsor Detail & Affiliate MarketPlace */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+          {/* Sponsor Detail */}
+          {sponsorUser && (
+            <Card className="glass border-slate-200/80 dark:border-white/10">
+              <CardContent className="p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm text-slate-500 dark:text-white/50 flex items-center gap-2">
+                    <Users className="w-4 h-4 text-[#118bdd]" />
+                    Sponsor Details
+                  </p>
+                  <p className="text-lg font-semibold text-slate-900 dark:text-white mt-1">{sponsorUser.fullName}</p>
+                  <p className="text-sm text-slate-600 dark:text-white/60">ID: {sponsorUser.userId}</p>
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    if (!sponsorUser.phone) {
+                      toast.error('Sponsor mobile number not available');
+                      return;
+                    }
+                    window.location.href = `tel:${sponsorUser.phone}`;
+                  }}
+                  className="border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400"
+                >
+                  <PhoneCall className="w-4 h-4 mr-2" />
+                  Call Sponsor
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Affiliate MarketPlace */}
+          <Card className="glass border-emerald-500/30 bg-gradient-to-r from-emerald-500/10 to-transparent dark:from-emerald-900/20">
+            <CardContent className="p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
-                <p className="text-sm text-white/50">Sponsor Details</p>
-                <p className="text-lg font-semibold text-white">{sponsorUser.fullName}</p>
-                <p className="text-sm text-white/60">ID: {sponsorUser.userId} | Mobile: {sponsorUser.phone || '-'}</p>
+                <p className="text-sm text-slate-500 dark:text-white/50 flex items-center gap-2">
+                  <ShoppingBag className="w-4 h-4 text-emerald-500" />
+                  Affiliate MarketPlace
+                </p>
+                <p className="text-sm text-slate-600 dark:text-white/60 mt-1">
+                  Products and services from leading global brands are available.
+                </p>
               </div>
               <Button
-                variant="outline"
-                onClick={() => {
-                  if (!sponsorUser.phone) {
-                    toast.error('Sponsor mobile number not available');
-                    return;
-                  }
-                  window.location.href = `tel:${sponsorUser.phone}`;
-                }}
-                className="border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+                onClick={() => navigate('/e-commerce')}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white"
               >
-                <PhoneCall className="w-4 h-4 mr-2" />
-                Call Sponsor
+                <ShoppingBag className="w-4 h-4 mr-2" />
+                Click & Visit MarketPlace
               </Button>
             </CardContent>
           </Card>
-        )}
-
-        {/* Separate Module: E-Commerce */}
-        <Card className="glass border-emerald-500/30 mb-8 bg-gradient-to-r from-emerald-900/20 to-transparent">
-          <CardContent className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-emerald-300">Separate Module</p>
-              <h3 className="text-white text-lg font-bold mt-1">E-Commerce Offers</h3>
-              <p className="text-white/60 text-sm mt-1">
-                This section is kept separate from your referral-network workflow.
-              </p>
-            </div>
-            <Button
-              onClick={() => navigate('/e-commerce')}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white"
-            >
-              <ShoppingBag className="w-4 h-4 mr-2" />
-              Open E-Commerce
-            </Button>
-          </CardContent>
-        </Card>
+        </div>
 
         {/* Three Wallet System */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
@@ -341,20 +400,20 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.depositWallet || 0)}</p>
-              <p className="text-xs text-white/50 mt-1">Add fund balance for PIN requests and P2P fund transfer</p>
+              <p className="text-xs text-white/50 mt-1">Add fund for PIN requests and P2P fund transfer</p>
             </CardContent>
           </Card>
 
           <Card className="wallet-card">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-white/60 flex items-center gap-2">
-                <Ticket className="w-4 h-4 text-[#118bdd]" />
-                PIN Wallet
+                <BarChart3 className="w-4 h-4 text-cyan-400" />
+                Total Earnings
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-3xl font-bold text-white">{unusedPins.length} PINs</p>
-              <p className="text-xs text-white/50 mt-1">Value: {formatCurrency(unusedPins.length * 11)}</p>
+              <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.totalReceived || 0)}</p>
+              <p className="text-xs text-white/50 mt-1">Lifetime earnings credited to your account</p>
             </CardContent>
           </Card>
 
@@ -362,12 +421,12 @@ export default function Dashboard() {
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-medium text-white/60 flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-purple-500" />
-                Income Wallet
+                Available Income
               </CardTitle>
             </CardHeader>
             <CardContent>
               <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.incomeWallet || 0)}</p>
-              <p className="text-xs text-white/50 mt-1">Earnings & commissions</p>
+              <p className="text-xs text-white/50 mt-1">Available funds for transfer and withdrawals</p>
             </CardContent>
           </Card>
 
@@ -376,7 +435,7 @@ export default function Dashboard() {
               <div className="flex items-center justify-between gap-2">
                 <CardTitle className="text-sm font-medium text-white/60 flex items-center gap-2">
                   <Shield className="w-4 h-4 text-amber-500" />
-                  Locked Income
+                  Locked Receive Help
                 </CardTitle>
                 <Button
                   size="sm"
@@ -397,7 +456,7 @@ export default function Dashboard() {
 
         {/* Achievements Section */}
         <div className="mb-8">
-          <h2 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+          <h2 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
             <Award className="w-5 h-5 text-amber-400" />
             Tour Achievements
           </h2>
@@ -405,31 +464,30 @@ export default function Dashboard() {
             {achievements.map((achievement) => {
               const Icon = achievement.icon;
               return (
-                <div 
+                <div
                   key={achievement.key}
-                  className={`p-4 rounded-xl border ${
-                    achievement.achieved 
-                      ? `${achievement.bgColor} ${
-                          achievement.key === 'nationalTour'
-                            ? 'border-blue-500/50'
-                            : achievement.key === 'internationalTour'
-                              ? 'border-purple-500/50'
-                              : 'border-pink-500/50'
-                        }`
-                      : 'border-white/10 bg-[#1f2937]/50'
-                  }`}
+                  className={`p-4 rounded-xl border ${achievement.achieved
+                    ? `${achievement.bgColor} ${achievement.key === 'nationalTour'
+                      ? 'border-blue-500/50'
+                      : achievement.key === 'internationalTour'
+                        ? 'border-purple-500/50'
+                        : 'border-pink-500/50'
+                    }`
+                    : 'border-slate-200 bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50'
+                    }`}
                 >
                   <div className="flex items-center gap-3">
-                    <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${
-                      achievement.achieved ? achievement.bgColor : 'bg-white/10'
-                    }`}>
-                      <Icon className={`w-6 h-6 ${achievement.achieved ? achievement.color : 'text-white/40'}`} />
+                    <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${achievement.achieved ? achievement.bgColor : 'bg-white/10'
+                      }`}>
+                      <Icon className={`w-6 h-6 ${achievement.achieved ? achievement.color : 'text-slate-400 dark:text-white/40'}`} />
                     </div>
                     <div>
-                      <p className={`font-medium ${achievement.achieved ? 'text-white' : 'text-white/60'}`}>
-                        {achievement.label}
+                      <p className={`font-medium ${achievement.achieved ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-white/60'}`}>
+                        {achievement.label} — <span className="text-xs font-normal text-slate-500 dark:text-white/50">Complete Level {achievement.level}</span>
                       </p>
-                      <p className="text-xs text-white/50">Complete Level {achievement.level}</p>
+                      <p className="text-xs text-slate-400 dark:text-white/40 mt-1">
+                        You must receive help from all users in your Level {achievement.level} to be considered Level {achievement.level} qualified.
+                      </p>
                     </div>
                   </div>
                   {achievement.achieved && (
@@ -446,49 +504,49 @@ export default function Dashboard() {
 
         {/* Quick Actions */}
         <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-4 mb-8">
-          <Button 
-            variant="outline" 
-            className="h-auto py-4 flex flex-col items-center gap-2 border-white/10 bg-[#1f2937]/50 hover:bg-[#1f2937]"
+          <Button
+            variant="outline"
+            className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
             onClick={() => navigate('/deposit')}
           >
             <PlusCircle className="w-5 h-5 text-emerald-500" />
             <span className="text-sm">Deposit</span>
           </Button>
-          <Button 
-            variant="outline" 
-            className="h-auto py-4 flex flex-col items-center gap-2 border-white/10 bg-[#1f2937]/50 hover:bg-[#1f2937]"
+          <Button
+            variant="outline"
+            className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
             onClick={() => setShowTransferDialog(true)}
           >
             <ArrowUpRight className="w-5 h-5 text-[#118bdd]" />
             <span className="text-sm">Fund Transfer</span>
           </Button>
-          <Button 
-            variant="outline" 
-            className="h-auto py-4 flex flex-col items-center gap-2 border-white/10 bg-[#1f2937]/50 hover:bg-[#1f2937]"
+          <Button
+            variant="outline"
+            className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
             onClick={() => setShowWithdrawDialog(true)}
           >
             <DollarSign className="w-5 h-5 text-amber-500" />
             <span className="text-sm">Withdraw</span>
           </Button>
-          <Button 
-            variant="outline" 
-            className="h-auto py-4 flex flex-col items-center gap-2 border-white/10 bg-[#1f2937]/50 hover:bg-[#1f2937]"
+          <Button
+            variant="outline"
+            className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
             onClick={() => navigate('/pin-wallet')}
           >
             <Ticket className="w-5 h-5 text-purple-500" />
             <span className="text-sm">PIN Wallet</span>
           </Button>
-          <Button 
-            variant="outline" 
-            className="h-auto py-4 flex flex-col items-center gap-2 border-white/10 bg-[#1f2937]/50 hover:bg-[#1f2937]"
+          <Button
+            variant="outline"
+            className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
             onClick={() => navigate('/matrix')}
           >
             <Users className="w-5 h-5 text-orange-500" />
             <span className="text-sm">My Network</span>
           </Button>
-          <Button 
-            variant="outline" 
-            className="h-auto py-4 flex flex-col items-center gap-2 border-white/10 bg-[#1f2937]/50 hover:bg-[#1f2937]"
+          <Button
+            variant="outline"
+            className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
             onClick={copyReferralLink}
           >
             <UserPlus className="w-5 h-5 text-pink-500" />
@@ -496,7 +554,7 @@ export default function Dashboard() {
           </Button>
           <Button
             variant="outline"
-            className="h-auto py-4 flex flex-col items-center gap-2 border-white/10 bg-[#1f2937]/50 hover:bg-[#1f2937]"
+            className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
             onClick={() => navigate('/create-id')}
           >
             <IdCard className="w-5 h-5 text-cyan-500" />
@@ -504,7 +562,7 @@ export default function Dashboard() {
           </Button>
           <Button
             variant="outline"
-            className="h-auto py-4 flex flex-col items-center gap-2 border-white/10 bg-[#1f2937]/50 hover:bg-[#1f2937]"
+            className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
             onClick={() => navigate('/profile')}
           >
             <UserCog className="w-5 h-5 text-indigo-400" />
@@ -515,52 +573,52 @@ export default function Dashboard() {
         {/* Stats Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
           {/* Network Stats */}
-          <Card className="glass border-white/10">
+          <Card className="glass border-slate-200/80 dark:border-white/10">
             <CardHeader>
-              <CardTitle className="text-white flex items-center gap-2">
+              <CardTitle className="text-slate-900 dark:text-white flex items-center gap-2">
                 <BarChart3 className="w-5 h-5 text-[#118bdd]" />
                 Network Statistics
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="p-4 rounded-lg bg-[#1f2937]/50">
-                  <p className="text-sm text-white/50 mb-1">Left Team</p>
-                  <p className="text-2xl font-bold text-white">{formatNumber(downlineStats.left)}</p>
+                <div className="p-4 rounded-lg bg-slate-100 dark:bg-[#1f2937]/50">
+                  <p className="text-sm text-slate-500 dark:text-white/50 mb-1">Left Team</p>
+                  <p className="text-2xl font-bold text-slate-900 dark:text-white">{formatNumber(downlineStats.left)}</p>
                   <p className="text-xs text-emerald-400">{downlineStats.leftActive} Active</p>
                 </div>
-                <div className="p-4 rounded-lg bg-[#1f2937]/50">
-                  <p className="text-sm text-white/50 mb-1">Right Team</p>
-                  <p className="text-2xl font-bold text-white">{formatNumber(downlineStats.right)}</p>
+                <div className="p-4 rounded-lg bg-slate-100 dark:bg-[#1f2937]/50">
+                  <p className="text-sm text-slate-500 dark:text-white/50 mb-1">Right Team</p>
+                  <p className="text-2xl font-bold text-slate-900 dark:text-white">{formatNumber(downlineStats.right)}</p>
                   <p className="text-xs text-emerald-400">{downlineStats.rightActive} Active</p>
                 </div>
               </div>
 
-		              <div>
-		                <div className="flex items-center justify-between mb-2">
-		                  <span className="text-sm text-white/60">Direct Referrals</span>
-		                  <div className="flex items-center gap-3">
-		                    <span className="text-sm font-medium text-white">{displayUser.directCount}</span>
-		                    <Button
-		                      type="button"
-		                      variant="outline"
-		                      size="sm"
-		                      onClick={() => setShowDirectReferralsDialog(true)}
-		                      className="h-7 px-2 border-[#118bdd]/40 text-[#118bdd] hover:bg-[#118bdd]/10"
-		                    >
-		                      View
-		                    </Button>
-		                  </div>
-		                </div>
-		                <Progress value={Math.min(displayUser.directCount * 10, 100)} className="h-2" />
-		                <p className="text-xs text-white/40 mt-2">
-		                  Click `View` to see referral IDs and member details.
-		                </p>
-		              </div>
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm text-slate-600 dark:text-white/60">Direct Referrals</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-sm font-medium text-slate-900 dark:text-white">{displayUser.directCount}</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setShowDirectReferralsDialog(true)}
+                      className="h-7 px-2 border-[#118bdd]/40 text-[#118bdd] hover:bg-[#118bdd]/10"
+                    >
+                      View
+                    </Button>
+                  </div>
+                </div>
+                <Progress value={Math.min(displayUser.directCount * 10, 100)} className="h-2" />
+                <p className="text-xs text-slate-500 dark:text-white/40 mt-2">
+                  Click `View` to see referral IDs and member details.
+                </p>
+              </div>
 
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-white/60">Current Level</span>
+                  <span className="text-sm text-slate-600 dark:text-white/60">Current Level</span>
                   <Badge variant="outline" className="border-[#118bdd] text-[#118bdd]">
                     Level {currentLevelDisplay}
                   </Badge>
@@ -571,16 +629,16 @@ export default function Dashboard() {
           </Card>
 
           {/* Recent Transactions */}
-          <Card className="glass border-white/10">
+          <Card className="glass border-slate-200/80 dark:border-white/10">
             <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle className="text-white flex items-center gap-2">
+              <CardTitle className="text-slate-900 dark:text-white flex items-center gap-2">
                 <RefreshCw className="w-5 h-5 text-[#118bdd]" />
                 My Transactions
               </CardTitle>
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                className="text-[#118bdd]" 
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-[#118bdd]"
                 onClick={() => navigate('/transactions')}
               >
                 View All
@@ -591,11 +649,10 @@ export default function Dashboard() {
                 {transactions.slice(0, 5).map((tx) => {
                   const isOutflow = isOutflowTransaction(tx);
                   return (
-                    <div key={tx.id} className="flex items-center justify-between gap-3 p-3 rounded-lg bg-[#1f2937]/50">
+                    <div key={tx.id} className="flex items-center justify-between gap-3 p-3 rounded-lg bg-slate-100 dark:bg-[#1f2937]/50">
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                          isOutflow ? 'bg-red-500/20' : 'bg-emerald-500/20'
-                        }`}>
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isOutflow ? 'bg-red-500/20' : 'bg-emerald-500/20'
+                          }`}>
                           {!isOutflow ? (
                             <ArrowDownLeft className="w-4 h-4 text-emerald-500" />
                           ) : (
@@ -603,17 +660,17 @@ export default function Dashboard() {
                           )}
                         </div>
                         <div>
-                          <p className="text-sm font-medium text-white capitalize">
+                          <p className="text-sm font-medium text-slate-900 dark:text-white capitalize">
                             {tx.type.replace('_', ' ')}
                           </p>
-                          <p className="text-xs text-white/50 truncate">{truncateText(tx.description, 30)}</p>
+                          <p className="text-xs text-slate-500 dark:text-white/50 truncate">{truncateText(tx.description, 30)}</p>
                         </div>
                       </div>
                       <div className="text-right">
                         <p className={`text-sm font-bold ${isOutflow ? 'text-red-400' : 'text-emerald-400'}`}>
                           {getDisplayAmount(tx)}
                         </p>
-                        <p className="text-xs text-white/40">
+                        <p className="text-xs text-slate-500 dark:text-white/40">
                           {new Date(tx.createdAt).toLocaleDateString()}
                         </p>
                       </div>
@@ -621,37 +678,94 @@ export default function Dashboard() {
                   );
                 })}
                 {transactions.length === 0 && (
-                  <p className="text-center text-white/50 py-8">No transactions yet</p>
+                  <p className="text-center text-slate-500 dark:text-white/50 py-8">No transactions yet</p>
                 )}
               </div>
             </CardContent>
           </Card>
         </div>
 
-        {/* Referral Section */}
-        <Card className="glass border-white/10">
-          <CardContent className="p-6">
-            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-bold text-white mb-1">Referral Program</h3>
-                <p className="text-white/60 text-sm">Invite friends and earn $5 for each activation</p>
+        {/* Referral & Support Section */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Referral Section */}
+          <Card className="glass border-slate-200/80 dark:border-white/10">
+            <CardContent className="p-6">
+              <div className="flex flex-col gap-4">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-1 flex items-center gap-2">
+                    <UserPlus className="w-5 h-5 text-[#118bdd]" />
+                    Referral Program
+                  </h3>
+                  <p className="text-slate-600 dark:text-white/60 text-sm">Invite friends and earn $5 for each activation</p>
+                </div>
+                <div className="flex items-center gap-3 w-fit">
+                  <code className="px-3 py-2 bg-slate-100 dark:bg-[#1f2937] rounded-lg text-xs sm:text-sm text-slate-700 dark:text-white/80 break-all">
+                    {getReferralLink()}
+                  </code>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={copyReferralLink}
+                    className="border-slate-300 hover:bg-slate-100 dark:border-white/20 dark:hover:bg-white/10 shrink-0"
+                  >
+                    {copied ? <CheckCircle className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                  </Button>
+                </div>
               </div>
-              <div className="flex w-full md:w-auto items-center gap-3">
-                <code className="flex-1 md:flex-initial px-3 py-2 bg-[#1f2937] rounded-lg text-xs sm:text-sm text-white/80 break-all">
-                  {window.location.origin}/register?sponsor={displayUser.userId}
-                </code>
-                <Button 
-                  variant="outline" 
-                  size="icon"
-                  onClick={copyReferralLink}
-                  className="border-white/20 hover:bg-white/10"
+              <div className="mt-4 flex flex-col sm:flex-row gap-2">
+                <Button
+                  variant="outline"
+                  onClick={shareReferralOnWhatsApp}
+                  className="border-emerald-500/40 text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-500/10"
                 >
-                  {copied ? <CheckCircle className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                  <MessageCircle className="w-4 h-4 mr-2" />
+                  Share on WhatsApp
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => void shareReferral()}
+                  className="border-[#118bdd]/40 text-[#0a6fbe] hover:bg-[#118bdd]/10 dark:text-[#7dd3fc] dark:hover:bg-[#118bdd]/10"
+                >
+                  <Share2 className="w-4 h-4 mr-2" />
+                  Share
                 </Button>
               </div>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+
+          {/* Dedicated Support */}
+          <Card className="glass border-slate-200/80 dark:border-white/10">
+            <CardContent className="p-6">
+              <div className="flex flex-col gap-4">
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-1 flex items-center gap-2">
+                    <Headphones className="w-5 h-5 text-purple-500" />
+                    Dedicated Support
+                  </h3>
+                  <p className="text-slate-600 dark:text-white/60 text-sm">Need help? Our support team is here for you.</p>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => window.open('mailto:support@refernex.com', '_blank')}
+                    className="border-purple-500/40 text-purple-700 hover:bg-purple-50 dark:text-purple-300 dark:hover:bg-purple-500/10"
+                  >
+                    <Mail className="w-4 h-4 mr-2" />
+                    Email Support
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => window.open('https://wa.me/919999999999', '_blank', 'noopener,noreferrer')}
+                    className="border-emerald-500/40 text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-500/10"
+                  >
+                    <MessageCircle className="w-4 h-4 mr-2" />
+                    WhatsApp Support
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </main>
 
       {/* Transfer Dialog */}
@@ -692,14 +806,14 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex gap-3">
-            <Button 
-              variant="outline" 
+            <Button
+              variant="outline"
               onClick={() => setShowTransferDialog(false)}
               className="flex-1 border-white/20 text-white hover:bg-white/10"
             >
               Cancel
             </Button>
-            <Button 
+            <Button
               onClick={handleTransfer}
               disabled={isLoading || transferData.userId.length !== 7}
               className="flex-1 btn-primary"
@@ -794,8 +908,8 @@ export default function Dashboard() {
             )}
           </div>
           <div className="flex gap-3">
-            <Button 
-              variant="outline" 
+            <Button
+              variant="outline"
               onClick={() => {
                 setShowWithdrawDialog(false);
                 setWithdrawTransactionPassword('');
@@ -806,7 +920,7 @@ export default function Dashboard() {
             >
               Cancel
             </Button>
-            <Button 
+            <Button
               onClick={handleWithdraw}
               disabled={isLoading || !withdrawTransactionPassword || (settings.requireOtpForTransactions && !withdrawOtp)}
               className="flex-1 btn-primary"
@@ -905,6 +1019,7 @@ export default function Dashboard() {
           </div>
         </DialogContent>
       </Dialog>
+      <MobileBottomNav />
     </div>
   );
 }

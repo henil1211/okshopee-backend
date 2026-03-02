@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import MobileBottomNav from '@/components/MobileBottomNav';
 import { ArrowLeft, CheckCircle, Loader2, UserPlus } from 'lucide-react';
 
 export default function CreateId() {
@@ -124,7 +125,7 @@ export default function CreateId() {
   if (!displayUser) return null;
 
   return (
-    <div className="min-h-screen bg-[#0a0e17] p-3 sm:p-4">
+    <div className="createid-page min-h-screen bg-[#0a0e17] p-3 pb-24 sm:p-4 md:pb-4">
       <div className="max-w-2xl mx-auto">
         <div className="flex items-center gap-3 mb-6">
           <Button
@@ -304,6 +305,7 @@ export default function CreateId() {
           </CardContent>
         </Card>
       </div>
+      <MobileBottomNav />
     </div>
   );
 }

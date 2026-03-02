@@ -255,6 +255,8 @@ class Database {
   private static remoteSyncTimer: ReturnType<typeof setTimeout> | null = null;
   private static remoteSyncInFlight = false;
   private static remoteSyncQueued = false;
+  private static remoteSyncSuspendDepth = 0;
+  private static remoteSyncPending = false;
   // When true, createTransaction/addToSafetyPool become no-ops to save memory
   static _bulkRebuildMode = false;
   private static _bulkSafetyPoolTotal = 0;
@@ -351,6 +353,11 @@ class Database {
       return;
     }
 
+    if (this.remoteSyncSuspendDepth > 0) {
+      this.remoteSyncPending = true;
+      return;
+    }
+
     if (this.remoteSyncTimer) {
       clearTimeout(this.remoteSyncTimer);
     }
@@ -362,6 +369,11 @@ class Database {
   }
 
   private static async flushRemoteSync(): Promise<void> {
+    if (this.remoteSyncSuspendDepth > 0) {
+      this.remoteSyncPending = true;
+      return;
+    }
+
     if (this.remoteSyncInFlight) {
       this.remoteSyncQueued = true;
       return;
@@ -381,10 +393,45 @@ class Database {
       console.warn('[DB Sync] Failed to push local state to backend. App will continue locally.');
     } finally {
       this.remoteSyncInFlight = false;
+      if (this.remoteSyncSuspendDepth > 0) {
+        this.remoteSyncPending = this.remoteSyncPending || this.remoteSyncQueued;
+        this.remoteSyncQueued = false;
+        return;
+      }
       if (this.remoteSyncQueued) {
         this.remoteSyncQueued = false;
         void this.flushRemoteSync();
       }
+    }
+  }
+
+  static pauseRemoteSync(): void {
+    this.remoteSyncSuspendDepth += 1;
+    if (this.remoteSyncTimer) {
+      clearTimeout(this.remoteSyncTimer);
+      this.remoteSyncTimer = null;
+      this.remoteSyncPending = true;
+    }
+  }
+
+  static resumeRemoteSync(flushPending: boolean = true): void {
+    if (this.remoteSyncSuspendDepth <= 0) {
+      this.remoteSyncSuspendDepth = 0;
+      return;
+    }
+    this.remoteSyncSuspendDepth -= 1;
+    if (this.remoteSyncSuspendDepth === 0 && flushPending && this.remoteSyncPending) {
+      this.remoteSyncPending = false;
+      this.scheduleRemoteSync();
+    }
+  }
+
+  static async runWithRemoteSyncPaused<T>(work: () => Promise<T> | T): Promise<T> {
+    this.pauseRemoteSync();
+    try {
+      return await work();
+    } finally {
+      this.resumeRemoteSync(true);
     }
   }
 
@@ -394,7 +441,17 @@ class Database {
     }
 
     try {
-      const response = await fetch(this.getRemoteSyncEndpoint(), { method: 'GET' });
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timeout = setTimeout(() => controller?.abort(), 5000);
+      let response: Response;
+      try {
+        response = await fetch(this.getRemoteSyncEndpoint(), {
+          method: 'GET',
+          signal: controller?.signal
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
       if (!response.ok) {
         console.warn(`[DB Sync] Failed to load state from backend (HTTP ${response.status}). Using local browser state.`);
         return;
@@ -417,12 +474,21 @@ class Database {
         return;
       }
 
+      // Server has no state yet. Seed it from local browser state if available.
       if (this.hasLocalPersistedData()) {
-        const pushResponse = await fetch(this.getRemoteSyncEndpoint(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ state: this.getPersistedSnapshot() })
-        });
+        const pushController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const pushTimeout = setTimeout(() => pushController?.abort(), 5000);
+        let pushResponse: Response;
+        try {
+          pushResponse = await fetch(this.getRemoteSyncEndpoint(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ state: this.getPersistedSnapshot() }),
+            signal: pushController?.signal
+          });
+        } finally {
+          clearTimeout(pushTimeout);
+        }
         if (!pushResponse.ok) {
           console.warn(`[DB Sync] Failed to seed backend from local state (HTTP ${pushResponse.status}).`);
         }
@@ -1294,17 +1360,17 @@ class Database {
     const now = new Date().toISOString();
     let changed = false;
 
-    if (!next.nationalTour && this.isLevelCompleteForTracker(tracker, 5)) {
+    if (!next.nationalTour && this.isLevelCompleteForTracker(tracker, 3)) {
       next.nationalTour = true;
       next.nationalTourDate = now;
       changed = true;
     }
-    if (!next.internationalTour && this.isLevelCompleteForTracker(tracker, 7)) {
+    if (!next.internationalTour && this.isLevelCompleteForTracker(tracker, 4)) {
       next.internationalTour = true;
       next.internationalTourDate = now;
       changed = true;
     }
-    if (!next.familyTour && this.isLevelCompleteForTracker(tracker, 10)) {
+    if (!next.familyTour && this.isLevelCompleteForTracker(tracker, 5)) {
       next.familyTour = true;
       next.familyTourDate = now;
       changed = true;
@@ -2439,183 +2505,182 @@ class Database {
   static async activateUsersAndRebuildMatrixLogic(
     onProgress?: (done: number, total: number) => void
   ): Promise<MatrixLogicRebuildReport> {
-    const users = this.getUsers();
-    const matrix = this.getMatrix();
+    return this.runWithRemoteSyncPaused(async () => {
+      const users = this.getUsers();
+      const matrix = this.getMatrix();
 
-    const report: MatrixLogicRebuildReport = {
-      activatedUsers: 0,
-      activatedMatrixNodes: 0,
-      repositionedMatrixNodes: 0,
-      directCountsUpdated: 0,
-      removedMatrixTransactions: 0,
-      removedMatrixSafetyPoolEntries: 0,
-      trackersReset: 0,
-      replayedMembers: 0,
-      backfilledActivationUsers: 0,
-      backfilledDirectIncomeEntries: 0,
-      backfilledAdminFeeEntries: 0,
-      reconciliation: {
-        scannedTrackers: 0,
-        createdTrackers: 0,
-        removedTrackers: 0,
-        repairedLevels: 0,
-        repairedQueueItems: 0,
-        walletSyncs: 0,
-        issues: []
-      }
-    };
-
-    const directCountsBySponsor = new Map<string, number>();
-    for (const member of users) {
-      if (!member.sponsorId) continue;
-      directCountsBySponsor.set(member.sponsorId, (directCountsBySponsor.get(member.sponsorId) || 0) + 1);
-    }
-
-    const normalizedUsers = users.map((u) => {
-      const next: User = { ...u };
-      const computedDirect = directCountsBySponsor.get(u.userId) || 0;
-      if ((next.directCount || 0) !== computedDirect) {
-        next.directCount = computedDirect;
-        report.directCountsUpdated += 1;
-      }
-
-      const shouldAutoActivate = !next.isAdmin && next.accountStatus !== 'temp_blocked' && next.accountStatus !== 'permanent_blocked';
-      if (shouldAutoActivate) {
-        const wasInactive = !next.isActive || next.accountStatus !== 'active';
-        if (wasInactive) {
-          report.activatedUsers += 1;
+      const report: MatrixLogicRebuildReport = {
+        activatedUsers: 0,
+        activatedMatrixNodes: 0,
+        repositionedMatrixNodes: 0,
+        directCountsUpdated: 0,
+        removedMatrixTransactions: 0,
+        removedMatrixSafetyPoolEntries: 0,
+        trackersReset: 0,
+        replayedMembers: 0,
+        backfilledActivationUsers: 0,
+        backfilledDirectIncomeEntries: 0,
+        backfilledAdminFeeEntries: 0,
+        reconciliation: {
+          scannedTrackers: 0,
+          createdTrackers: 0,
+          removedTrackers: 0,
+          repairedLevels: 0,
+          repairedQueueItems: 0,
+          walletSyncs: 0,
+          issues: []
         }
-        next.isActive = true;
-        next.accountStatus = 'active';
-        if (!next.activatedAt) {
-          next.activatedAt = new Date().toISOString();
+      };
+
+      const directCountsBySponsor = new Map<string, number>();
+      for (const member of users) {
+        if (!member.sponsorId) continue;
+        directCountsBySponsor.set(member.sponsorId, (directCountsBySponsor.get(member.sponsorId) || 0) + 1);
+      }
+
+      const normalizedUsers = users.map((u) => {
+        const next: User = { ...u };
+        const computedDirect = directCountsBySponsor.get(u.userId) || 0;
+        if ((next.directCount || 0) !== computedDirect) {
+          next.directCount = computedDirect;
+          report.directCountsUpdated += 1;
         }
-      }
 
-      return next;
-    });
-    const rebuiltTopology = this.rebuildMatrixTopology(normalizedUsers);
-    report.repositionedMatrixNodes = rebuiltTopology.repositionedMatrixNodes;
-    const normalizedUsersWithTopology = rebuiltTopology.users;
-    this.saveUsers(normalizedUsersWithTopology);
+        const shouldAutoActivate = !next.isAdmin && next.accountStatus !== 'temp_blocked' && next.accountStatus !== 'permanent_blocked';
+        if (shouldAutoActivate) {
+          const wasInactive = !next.isActive || next.accountStatus !== 'active';
+          if (wasInactive) {
+            report.activatedUsers += 1;
+          }
+          next.isActive = true;
+          next.accountStatus = 'active';
+          if (!next.activatedAt) {
+            next.activatedAt = new Date().toISOString();
+          }
+        }
 
-    const backfill = this.backfillMissingActivationEffects(normalizedUsersWithTopology);
-    report.backfilledActivationUsers = backfill.users;
-    report.backfilledDirectIncomeEntries = backfill.sponsorCredits;
-    report.backfilledAdminFeeEntries = backfill.adminFees;
+        return next;
+      });
+      const rebuiltTopology = this.rebuildMatrixTopology(normalizedUsers);
+      report.repositionedMatrixNodes = rebuiltTopology.repositionedMatrixNodes;
+      const normalizedUsersWithTopology = rebuiltTopology.users;
+      this.saveUsers(normalizedUsersWithTopology);
 
-    const userByUserId = new Map(normalizedUsersWithTopology.map((u) => [u.userId, u]));
-    const previousNodeByUserId = new Map(matrix.map((node) => [node.userId, node]));
-    const normalizedMatrix = rebuiltTopology.matrix.map((node) => {
-      const owner = userByUserId.get(node.userId);
-      if (!owner) return node;
-      const shouldNodeBeActive = owner.isActive && owner.accountStatus === 'active';
-      if (node.isActive !== shouldNodeBeActive) {
-        return { ...node, isActive: shouldNodeBeActive };
-      }
-      return node;
-    });
-    for (const node of normalizedMatrix) {
-      const previous = previousNodeByUserId.get(node.userId);
-      if (previous && previous.isActive !== node.isActive) {
-        report.activatedMatrixNodes += 1;
-      }
-    }
-    this.saveMatrix(normalizedMatrix);
+      const backfill = this.backfillMissingActivationEffects(normalizedUsersWithTopology);
+      report.backfilledActivationUsers = backfill.users;
+      report.backfilledDirectIncomeEntries = backfill.sponsorCredits;
+      report.backfilledAdminFeeEntries = backfill.adminFees;
 
-    const transactions = this.getTransactions();
-    const keptTransactions: Transaction[] = [];
-    for (const tx of transactions) {
-      if (!this.isMatrixTransactionForRebuild(tx)) {
-        keptTransactions.push(tx);
-        continue;
-      }
-      report.removedMatrixTransactions += 1;
-    }
-    this.saveTransactions(keptTransactions);
-
-    // Rebuild baseline wallets deterministically from non-matrix ledger.
-    const wallets = this.getWallets();
-    for (const wallet of wallets) {
-      const computed = this.computeIncomeLedgerFromTransactions(wallet.userId);
-      wallet.incomeWallet = computed.incomeWallet;
-      wallet.matrixWallet = computed.matrixWallet;
-      wallet.totalReceived = computed.totalReceived;
-      wallet.totalGiven = computed.totalGiven;
-      wallet.giveHelpLocked = 0;
-      wallet.lockedIncomeWallet = 0;
-    }
-    this.saveWallets(wallets);
-
-    const pool = this.getSafetyPool();
-    const keptPoolTx = pool.transactions.filter((tx) => !this.isMatrixSafetyPoolReasonForRebuild(tx.reason));
-    report.removedMatrixSafetyPoolEntries = pool.transactions.length - keptPoolTx.length;
-    const rebuiltPoolTotal = keptPoolTx.reduce((sum, tx) => sum + tx.amount, 0);
-    this.saveSafetyPool({
-      totalAmount: rebuiltPoolTotal,
-      transactions: keptPoolTx
-    });
-
-    const resetTrackers: UserHelpTracker[] = normalizedUsersWithTopology.map((u) => ({
-      userId: u.id,
-      levels: {},
-      lockedQueue: []
-    }));
-    this.saveHelpTrackers(resetTrackers);
-    this.savePendingMatrixContributions([]);
-    report.trackersReset = resetTrackers.length;
-
-    const nodeMap = new Map(normalizedMatrix.map((node) => [node.userId, node]));
-    const replayUsers = [...normalizedUsersWithTopology]
-      .filter((u) => !u.isAdmin)
-      .sort((a, b) => this.compareUsersByJoinOrder(a, b));
-
-    // Yield to browser every BATCH_SIZE users to prevent "page unresponsive"
-    const BATCH_SIZE = 50;
-    const yieldToUI = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-    // Enable bulk rebuild mode: skip creating transaction records to save memory
-    this._bulkRebuildMode = true;
-    this._bulkSafetyPoolTotal = 0;
-    try {
-
-      for (let i = 0; i < replayUsers.length; i++) {
-        const replayUser = replayUsers[i];
-        const replayNode = nodeMap.get(replayUser.userId);
-        if (!replayNode?.parentId) continue;
-        this.processMatrixHelpForNewMember(replayUser.userId, replayUser.id);
-        report.replayedMembers += 1;
-
-        // Yield to browser periodically so the page stays responsive
-        if ((i + 1) % BATCH_SIZE === 0) {
-          if (onProgress) onProgress(i + 1, replayUsers.length);
-          await yieldToUI();
+      const userByUserId = new Map(normalizedUsersWithTopology.map((u) => [u.userId, u]));
+      const previousNodeByUserId = new Map(matrix.map((node) => [node.userId, node]));
+      const normalizedMatrix = rebuiltTopology.matrix.map((node) => {
+        const owner = userByUserId.get(node.userId);
+        if (!owner) return node;
+        const shouldNodeBeActive = owner.isActive && owner.accountStatus === 'active';
+        if (node.isActive !== shouldNodeBeActive) {
+          return { ...node, isActive: shouldNodeBeActive };
+        }
+        return node;
+      });
+      for (const node of normalizedMatrix) {
+        const previous = previousNodeByUserId.get(node.userId);
+        if (previous && previous.isActive !== node.isActive) {
+          report.activatedMatrixNodes += 1;
         }
       }
-      if (onProgress) onProgress(replayUsers.length, replayUsers.length);
+      this.saveMatrix(normalizedMatrix);
 
-    } finally {
-      // Disable bulk rebuild mode
-      this._bulkRebuildMode = false;
-    }
+      const transactions = this.getTransactions();
+      const keptTransactions: Transaction[] = [];
+      for (const tx of transactions) {
+        if (!this.isMatrixTransactionForRebuild(tx)) {
+          keptTransactions.push(tx);
+          continue;
+        }
+        report.removedMatrixTransactions += 1;
+      }
+      this.saveTransactions(keptTransactions);
 
-    // Write the accumulated safety pool total
-    const currentPool = this.getSafetyPool();
-    currentPool.totalAmount += this._bulkSafetyPoolTotal;
-    this.saveSafetyPool(currentPool);
+      // Rebuild baseline wallets deterministically from non-matrix ledger.
+      const wallets = this.getWallets();
+      for (const wallet of wallets) {
+        const computed = this.computeIncomeLedgerFromTransactions(wallet.userId);
+        wallet.incomeWallet = computed.incomeWallet;
+        wallet.matrixWallet = computed.matrixWallet;
+        wallet.totalReceived = computed.totalReceived;
+        wallet.totalGiven = computed.totalGiven;
+        wallet.giveHelpLocked = 0;
+        wallet.lockedIncomeWallet = 0;
+      }
+      this.saveWallets(wallets);
 
-    report.reconciliation = this.reconcileHelpTrackers();
-    const finalPool = this.getSafetyPool();
-    const finalPoolTotal = finalPool.transactions.reduce((sum, tx) => sum + tx.amount, 0) + this._bulkSafetyPoolTotal;
-    this.saveSafetyPool({
-      totalAmount: finalPoolTotal,
-      transactions: finalPool.transactions
+      const pool = this.getSafetyPool();
+      const keptPoolTx = pool.transactions.filter((tx) => !this.isMatrixSafetyPoolReasonForRebuild(tx.reason));
+      report.removedMatrixSafetyPoolEntries = pool.transactions.length - keptPoolTx.length;
+      const rebuiltPoolTotal = keptPoolTx.reduce((sum, tx) => sum + tx.amount, 0);
+      this.saveSafetyPool({
+        totalAmount: rebuiltPoolTotal,
+        transactions: keptPoolTx
+      });
+
+      const resetTrackers: UserHelpTracker[] = normalizedUsersWithTopology.map((u) => ({
+        userId: u.id,
+        levels: {},
+        lockedQueue: []
+      }));
+      this.saveHelpTrackers(resetTrackers);
+      this.savePendingMatrixContributions([]);
+      report.trackersReset = resetTrackers.length;
+
+      const nodeMap = new Map(normalizedMatrix.map((node) => [node.userId, node]));
+      const replayUsers = [...normalizedUsersWithTopology]
+        .filter((u) => !u.isAdmin)
+        .sort((a, b) => this.compareUsersByJoinOrder(a, b));
+
+      // Yield to browser every BATCH_SIZE users to prevent "page unresponsive"
+      const BATCH_SIZE = 50;
+      const yieldToUI = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      // Enable bulk rebuild mode: skip creating transaction records to save memory
+      this._bulkRebuildMode = true;
+      this._bulkSafetyPoolTotal = 0;
+      try {
+
+        for (let i = 0; i < replayUsers.length; i++) {
+          const replayUser = replayUsers[i];
+          const replayNode = nodeMap.get(replayUser.userId);
+          if (!replayNode?.parentId) continue;
+          this.processMatrixHelpForNewMember(replayUser.userId, replayUser.id);
+          report.replayedMembers += 1;
+
+          // Yield to browser periodically so the page stays responsive
+          if ((i + 1) % BATCH_SIZE === 0) {
+            if (onProgress) onProgress(i + 1, replayUsers.length);
+            await yieldToUI();
+          }
+        }
+        if (onProgress) onProgress(replayUsers.length, replayUsers.length);
+
+      } finally {
+        // Disable bulk rebuild mode
+        this._bulkRebuildMode = false;
+      }
+
+      // Write the accumulated safety pool total
+      const currentPool = this.getSafetyPool();
+      currentPool.totalAmount += this._bulkSafetyPoolTotal;
+      this.saveSafetyPool(currentPool);
+
+      report.reconciliation = this.reconcileHelpTrackers();
+      const finalPool = this.getSafetyPool();
+      const finalPoolTotal = finalPool.transactions.reduce((sum, tx) => sum + tx.amount, 0) + this._bulkSafetyPoolTotal;
+      this.saveSafetyPool({
+        totalAmount: finalPoolTotal,
+        transactions: finalPool.transactions
+      });
+
+      return report;
     });
-
-    // Single sync at the end (instead of thousands during rebuild)
-    this.scheduleRemoteSync();
-
-    return report;
   }
 
   static reconcileHelpTrackers(): HelpTrackerReconciliationReport {
@@ -3460,6 +3525,17 @@ class Database {
 
   static addMatrixNode(node: MatrixNode): MatrixNode {
     const matrix = this.getMatrix();
+    if (node.parentId) {
+      const parentNode = matrix.find((m) => m.userId === node.parentId);
+      if (parentNode) {
+        if (node.position === 0 && !parentNode.leftChild) {
+          parentNode.leftChild = node.userId;
+        }
+        if (node.position === 1 && !parentNode.rightChild) {
+          parentNode.rightChild = node.userId;
+        }
+      }
+    }
     matrix.push(node);
     this.saveMatrix(matrix);
     return node;

@@ -3,6 +3,7 @@ import { useAuthStore } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Check, Copy, ExternalLink, LogOut, Search, ShoppingBag } from 'lucide-react';
 import { copyToClipboard } from '@/utils/helpers';
+import MobileBottomNav from '@/components/MobileBottomNav';
 import { toast } from 'sonner';
 
 type AffiliatePartner = {
@@ -168,7 +169,7 @@ export default function Ecommerce() {
   if (!user) return null;
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: '#0a0e17', forcedColorAdjust: 'none' }}>
+    <div className="min-h-screen pb-24 md:pb-0" style={{ backgroundColor: '#0a0e17', forcedColorAdjust: 'none' }}>
       <header className="sticky top-0 z-40" style={{ borderBottom: '1px solid rgba(255,255,255,0.1)', backgroundColor: '#07132d', forcedColorAdjust: 'none' }}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 min-h-16 py-2 sm:py-0 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -350,6 +351,7 @@ export default function Ecommerce() {
           </div>
         </div>
       </main>
+      <MobileBottomNav />
     </div>
   );
 }

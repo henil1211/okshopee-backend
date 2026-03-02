@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowLeft, Network } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 
+import BrandLogo from '@/components/BrandLogo';
 import PublicFooter from '@/components/PublicFooter';
 
 type StaticPageLayoutProps = {
@@ -17,9 +18,7 @@ export default function StaticPageLayout({ title, subtitle, updatedOn, children 
       <header className="fixed inset-x-0 top-0 z-40 glass border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2.5">
-            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-primary text-white">
-              <Network className="h-4 w-4" />
-            </span>
+            <BrandLogo className="h-9 w-9 rounded-lg" />
             <span className="font-heading text-lg font-semibold text-white">ReferNex</span>
           </Link>
 

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import MobileBottomNav from '@/components/MobileBottomNav';
 import { ArrowLeft, UserCog, Mail, Phone, Shield, Key, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -184,7 +185,7 @@ export default function Profile() {
   if (!displayUser) return null;
 
   return (
-    <div className="min-h-screen bg-[#0a0e17]">
+    <div className="profile-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
       <header className="glass sticky top-0 z-50 border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="min-h-16 py-2 sm:py-0 flex items-center justify-between">
@@ -395,6 +396,7 @@ export default function Profile() {
           </CardContent>
         </Card>
       </main>
+      <MobileBottomNav />
     </div>
   );
 }

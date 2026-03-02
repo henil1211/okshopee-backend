@@ -4,9 +4,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import MobileBottomNav from '@/components/MobileBottomNav';
 import { 
   Copy, Check, Send, Ticket, History, Download, 
-  MessageCircle, AlertTriangle,
+  MessageCircle, Share2, AlertTriangle,
   RefreshCw, User, Upload, QrCode
 } from 'lucide-react';
 import Database from '@/db';
@@ -73,9 +74,44 @@ export default function PinWallet() {
     }
   };
 
+  const getPinShareMessage = (pinCode: string) => [
+    '*Your Exclusive Activation Details:*',
+    '',
+    `*Activation PIN : ${pinCode}*`,
+    '',
+    'Use this PIN to create your account and become part of the *ReferNex* network.',
+    '',
+    '*Important :* This PIN is valid for one-time use only, so please keep it safe and do not share it publicly.'
+  ].join('\n');
+
   const handleShareWhatsApp = (pinCode: string) => {
-    const text = `Here is your PIN for Matrix Helping MLM registration: ${pinCode}`;
+    const text = getPinShareMessage(pinCode);
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+  };
+
+  const handleShareAnywhere = async (pinCode: string) => {
+    const text = getPinShareMessage(pinCode);
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'ReferNex Activation Details',
+          text
+        });
+        return;
+      } catch (error: unknown) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          return;
+        }
+      }
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success('PIN message copied. Paste it anywhere to share.');
+    } catch {
+      toast.error('Unable to share this PIN on your device');
+    }
   };
 
   const checkTargetUser = (value: string) => {
@@ -299,6 +335,14 @@ export default function PinWallet() {
                 <Button
                   variant="outline"
                   size="sm"
+                  onClick={() => handleShareAnywhere(pin.pinCode)}
+                  className="flex-1 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10"
+                >
+                  <Share2 className="w-4 h-4 mr-1" /> Share
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => initiateTransfer(pin.id)}
                   className="flex-1 border-[#118bdd]/30 text-[#118bdd] hover:bg-[#118bdd]/10"
                 >
@@ -402,6 +446,38 @@ export default function PinWallet() {
                 <p className="text-xs text-white/40">
                   Received: {pin.transferredAt ? new Date(pin.transferredAt).toLocaleDateString() : '-'}
                 </p>
+                {pin.status === 'unused' && (
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleCopyPin(pin.pinCode)}
+                      className="flex-1 border-white/20 text-white hover:bg-white/10"
+                    >
+                      {copiedPin === pin.pinCode ? (
+                        <><Check className="w-4 h-4 mr-1" /> Copied</>
+                      ) : (
+                        <><Copy className="w-4 h-4 mr-1" /> Copy</>
+                      )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleShareWhatsApp(pin.pinCode)}
+                      className="flex-1 border-green-500/30 text-green-400 hover:bg-green-500/10"
+                    >
+                      <MessageCircle className="w-4 h-4 mr-1" /> WhatsApp
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleShareAnywhere(pin.pinCode)}
+                      className="flex-1 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10"
+                    >
+                      <Share2 className="w-4 h-4 mr-1" /> Share
+                    </Button>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -614,7 +690,7 @@ export default function PinWallet() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="pin-wallet-page min-h-screen bg-[#0a0e17] px-4 py-6 pb-24 sm:px-6 lg:px-8 md:pb-6 space-y-6">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
@@ -896,6 +972,7 @@ export default function PinWallet() {
           </Card>
         </div>
       )}
+      <MobileBottomNav />
     </div>
   );
 }

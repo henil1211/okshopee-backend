@@ -1,5 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { ThemeProvider } from 'next-themes'
 import './index.css'
 import App from './App.tsx'
 import Database from './db'
@@ -105,14 +106,23 @@ async function bootstrap() {
     return;
   }
 
-  await Database.hydrateFromServer()
-  Database.initializeDemoData()
-
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <App />
+      <ThemeProvider
+        attribute="class"
+        defaultTheme="dark"
+        enableSystem={false}
+        storageKey="refernex-theme"
+      >
+        <App />
+      </ThemeProvider>
     </StrictMode>,
   )
+
+  // Hydrate from backend first, then seed defaults only if still needed.
+  void Database.hydrateFromServer().then(() => {
+    Database.initializeDemoData()
+  })
 }
 
 void bootstrap()
