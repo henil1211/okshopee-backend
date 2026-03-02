@@ -1156,180 +1156,174 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const yieldToMainThread = async () => new Promise<void>((resolve) => setTimeout(resolve, 0));
     let sponsorIncomeCredits = 0;
 
-    for (let i = 0; i < quantity; i += 1) {
-      try {
-        const placement = Database.findNextPosition(sponsor.userId);
-        if (!placement) {
-          failed.push(`Row ${i + 1}: matrix placement not available`);
-          continue;
-        }
-
-        const parentId = placement.parentId;
-        const position = placement.position;
-        const matrixDepthLevel = parentId ? (Database.getMatrixNode(parentId)?.level || 0) + 1 : 0;
-        const newUserId = Database.generateUniqueUserId();
-        const phoneSeed = `${Date.now()}${i}${Math.floor(Math.random() * 1000)}`.replace(/\D/g, '');
-        const phone = phoneSeed.slice(-10).padStart(10, '9');
-        const fullName = `${params.namePrefix.trim()} ${String(i + 1).padStart(3, '0')}`;
-        const email = `admin.bulk.${sponsor.userId}.${seed}.${i}@auto.local`;
-
-        const newUser: User = {
-          id: `user_${Date.now()}_${i}`,
-          userId: newUserId,
-          email,
-          password: params.password,
-          fullName,
-          phone,
-          country: params.country.trim(),
-          isActive: true,
-          isAdmin: false,
-          accountStatus: 'active',
-          blockedAt: null,
-          blockedUntil: null,
-          blockedReason: null,
-          createdAt: new Date().toISOString(),
-          activatedAt: new Date().toISOString(),
-          gracePeriodEnd: null,
-          sponsorId: sponsor.userId,
-          parentId,
-          position,
-          level: 0,
-          directCount: 0,
-          totalEarnings: 0,
-          isCapped: false,
-          capLevel: 0,
-          reEntryCount: 0,
-          cycleCount: 0,
-          requiredDirectForNextLevel: 2,
-          completedDirectForCurrentLevel: 0,
-          transactionPassword: params.transactionPassword,
-          emailVerified: false,
-          achievements: {
-            nationalTour: false,
-            internationalTour: false,
-            familyTour: false
+    Database.pauseRemoteSync();
+    try {
+      for (let i = 0; i < quantity; i += 1) {
+        try {
+          const placement = Database.findNextPosition(sponsor.userId);
+          if (!placement) {
+            failed.push(`Row ${i + 1}: matrix placement not available`);
+            continue;
           }
-        };
 
-        Database.createUser(newUser);
+          const parentId = placement.parentId;
+          const position = placement.position;
+          const matrixDepthLevel = parentId ? (Database.getMatrixNode(parentId)?.level || 0) + 1 : 0;
+          const newUserId = Database.generateUniqueUserId();
+          const phoneSeed = `${Date.now()}${i}${Math.floor(Math.random() * 1000)}`.replace(/\D/g, '');
+          const phone = phoneSeed.slice(-10).padStart(10, '9');
+          const fullName = `${params.namePrefix.trim()} ${String(i + 1).padStart(3, '0')}`;
+          const email = `admin.bulk.${sponsor.userId}.${seed}.${i}@auto.local`;
 
-        const matrixNode: MatrixNode = {
-          userId: newUserId,
-          username: fullName,
-          level: matrixDepthLevel,
-          position: position === 'left' ? 0 : 1,
-          parentId: parentId || undefined,
-          isActive: true
-        };
-        Database.addMatrixNode(matrixNode);
+          const newUser: User = {
+            id: `user_${Date.now()}_${i}`,
+            userId: newUserId,
+            email,
+            password: params.password,
+            fullName,
+            phone,
+            country: params.country.trim(),
+            isActive: true,
+            isAdmin: false,
+            accountStatus: 'active',
+            blockedAt: null,
+            blockedUntil: null,
+            blockedReason: null,
+            createdAt: new Date().toISOString(),
+            activatedAt: new Date().toISOString(),
+            gracePeriodEnd: null,
+            sponsorId: sponsor.userId,
+            parentId,
+            position,
+            level: 0,
+            directCount: 0,
+            totalEarnings: 0,
+            isCapped: false,
+            capLevel: 0,
+            reEntryCount: 0,
+            cycleCount: 0,
+            requiredDirectForNextLevel: 2,
+            completedDirectForCurrentLevel: 0,
+            transactionPassword: params.transactionPassword,
+            emailVerified: false,
+            achievements: {
+              nationalTour: false,
+              internationalTour: false,
+              familyTour: false
+            }
+          };
 
-        const matrix = Database.getMatrix();
-        const parentNode = matrix.find(m => m.userId === parentId);
-        if (parentNode) {
-          if (position === 'left') {
-            parentNode.leftChild = newUserId;
-          } else {
-            parentNode.rightChild = newUserId;
-          }
-          Database.saveMatrix(matrix);
-        }
+          Database.createUser(newUser);
 
-        deferredTransactions.push({
-          id: `tx_${Date.now()}_admin_activation_${i}`,
-          userId: newUser.id,
-          type: 'activation',
-          amount: 11,
-          status: 'completed',
-          description: 'Account activation by admin without PIN',
-          createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString()
-        });
+          const matrixNode: MatrixNode = {
+            userId: newUserId,
+            username: fullName,
+            level: matrixDepthLevel,
+            position: position === 'left' ? 0 : 1,
+            parentId: parentId || undefined,
+            isActive: true
+          };
+          Database.addMatrixNode(matrixNode);
 
-        const latestSponsorAfterCount = Database.getUserByUserId(sponsor.userId);
-        if (latestSponsorAfterCount) {
-          sponsorIncomeCredits += directIncome;
           deferredTransactions.push({
-            id: `tx_${Date.now()}_admin_bulk_sponsor_${i}`,
-            userId: latestSponsorAfterCount.id,
-            type: 'direct_income',
-            amount: directIncome,
-            fromUserId: newUser.id,
+            id: `tx_${Date.now()}_admin_activation_${i}`,
+            userId: newUser.id,
+            type: 'activation',
+            amount: 11,
             status: 'completed',
-            description: `Direct sponsor income from ${newUser.fullName} (${newUser.userId})`,
+            description: 'Account activation by admin without PIN',
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
-        } else {
-          Database.addToSafetyPool(directIncome, newUser.id, 'No sponsor - direct income');
-        }
 
-        Database.addToSafetyPool(adminFee, newUser.id, 'Admin fee');
-        Database.processMatrixHelpForNewMember(newUserId, newUser.id);
+          const latestSponsorAfterCount = Database.getUserByUserId(sponsor.userId);
+          if (latestSponsorAfterCount) {
+            sponsorIncomeCredits += directIncome;
+            deferredTransactions.push({
+              id: `tx_${Date.now()}_admin_bulk_sponsor_${i}`,
+              userId: latestSponsorAfterCount.id,
+              type: 'direct_income',
+              amount: directIncome,
+              fromUserId: newUser.id,
+              status: 'completed',
+              description: `Direct sponsor income from ${newUser.fullName} (${newUser.userId})`,
+              createdAt: new Date().toISOString(),
+              completedAt: new Date().toISOString()
+            });
+          } else {
+            Database.addToSafetyPool(directIncome, newUser.id, 'No sponsor - direct income');
+          }
 
-        deferredNotifications.push({
-          id: `notif_${Date.now()}_bulk_admin_${i}`,
-          userId: newUser.id,
-          title: 'Welcome to Matrix Helping MLM!',
-          message: `Your account has been created by admin. Your User ID is ${newUserId}. Transaction Password: ${params.transactionPassword}`,
-          type: 'success',
-          isRead: false,
-          createdAt: new Date().toISOString()
-        });
+          Database.addToSafetyPool(adminFee, newUser.id, 'Admin fee');
+          Database.processMatrixHelpForNewMember(newUserId, newUser.id);
 
-        createdUserIds.push(newUserId);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : 'unknown error';
-        failed.push(`Row ${i + 1}: ${message}`);
-      }
-
-      if ((i + 1) % yieldEvery === 0) {
-        await yieldToMainThread();
-      }
-    }
-
-    if (deferredTransactions.length > 0) {
-      const tx = Database.getTransactions();
-      tx.push(...deferredTransactions);
-      Database.saveTransactions(tx);
-    }
-
-    if (deferredNotifications.length > 0) {
-      const notifications = Database.getNotifications();
-      notifications.push(...deferredNotifications);
-      Database.saveNotifications(notifications);
-    }
-
-    const latestSponsor = Database.getUserByUserId(sponsor.userId);
-    if (latestSponsor && createdUserIds.length > 0) {
-      Database.updateUser(latestSponsor.id, {
-        directCount: (latestSponsor.directCount || 0) + createdUserIds.length
-      });
-      if (sponsorIncomeCredits > 0) {
-        const sponsorWallet = Database.getWallet(latestSponsor.id);
-        if (sponsorWallet) {
-          Database.updateWallet(latestSponsor.id, {
-            incomeWallet: sponsorWallet.incomeWallet + sponsorIncomeCredits,
-            totalReceived: sponsorWallet.totalReceived + sponsorIncomeCredits
+          deferredNotifications.push({
+            id: `notif_${Date.now()}_bulk_admin_${i}`,
+            userId: newUser.id,
+            title: 'Welcome to Matrix Helping MLM!',
+            message: `Your account has been created by admin. Your User ID is ${newUserId}. Transaction Password: ${params.transactionPassword}`,
+            type: 'success',
+            isRead: false,
+            createdAt: new Date().toISOString()
           });
+
+          createdUserIds.push(newUserId);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : 'unknown error';
+          failed.push(`Row ${i + 1}: ${message}`);
+        }
+
+        if ((i + 1) % yieldEvery === 0) {
+          await yieldToMainThread();
         }
       }
-      Database.releaseLockedGiveHelp(latestSponsor.id);
-      Database.releaseLockedReceiveHelp(latestSponsor.id);
+
+      if (deferredTransactions.length > 0) {
+        const tx = Database.getTransactions();
+        tx.push(...deferredTransactions);
+        Database.saveTransactions(tx);
+      }
+
+      if (deferredNotifications.length > 0) {
+        const notifications = Database.getNotifications();
+        notifications.push(...deferredNotifications);
+        Database.saveNotifications(notifications);
+      }
+
+      const latestSponsor = Database.getUserByUserId(sponsor.userId);
+      if (latestSponsor && createdUserIds.length > 0) {
+        Database.updateUser(latestSponsor.id, {
+          directCount: (latestSponsor.directCount || 0) + createdUserIds.length
+        });
+        if (sponsorIncomeCredits > 0) {
+          const sponsorWallet = Database.getWallet(latestSponsor.id);
+          if (sponsorWallet) {
+            Database.updateWallet(latestSponsor.id, {
+              incomeWallet: sponsorWallet.incomeWallet + sponsorIncomeCredits,
+              totalReceived: sponsorWallet.totalReceived + sponsorIncomeCredits
+            });
+          }
+        }
+        Database.releaseLockedGiveHelp(latestSponsor.id);
+        Database.releaseLockedReceiveHelp(latestSponsor.id);
+      }
+
+      get().loadAllUsers();
+      get().loadAllTransactions();
+      get().loadStats();
+
+      if (createdUserIds.length === 0) {
+        return { success: false, message: 'No IDs created', createdUserIds, failed };
+      }
+
+      const message = failed.length > 0
+        ? `Created ${createdUserIds.length} ID(s), failed ${failed.length}`
+        : `Created ${createdUserIds.length} ID(s) without PIN`;
+
+      return { success: true, message, createdUserIds, failed };
+    } finally {
+      Database.resumeRemoteSync(true);
     }
-
-    get().loadAllUsers();
-    get().loadAllTransactions();
-    get().loadStats();
-
-    if (createdUserIds.length === 0) {
-      return { success: false, message: 'No IDs created', createdUserIds, failed };
-    }
-
-    const message = failed.length > 0
-      ? `Created ${createdUserIds.length} ID(s), failed ${failed.length}`
-      : `Created ${createdUserIds.length} ID(s) without PIN`;
-
-    return { success: true, message, createdUserIds, failed };
   },
 
   getLevelWiseReport: (level?: number, startDate?: string, endDate?: string) => {

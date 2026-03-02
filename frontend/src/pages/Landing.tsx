@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowRight, BadgeCheck, Network, Sparkles } from 'lucide-react';
+import { ArrowRight, BadgeCheck, Menu, Sparkles, X } from 'lucide-react';
 
+import BrandLogo from '@/components/BrandLogo';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import PublicFooter from '@/components/PublicFooter';
@@ -82,16 +84,15 @@ const commitmentPoints = [
 
 export default function Landing() {
   const navigate = useNavigate();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const containerClass = 'max-w-7xl mx-auto px-4 sm:px-6 lg:px-8';
 
   return (
-    <div className="min-h-screen bg-[#0a0e17] text-white">
+    <div className="landing-page min-h-screen bg-[#0a0e17] text-white">
       <header className="fixed inset-x-0 top-0 z-50 glass border-b border-white/5">
         <div className={`${containerClass} flex h-16 items-center justify-between`}>
           <a href="#top" className="flex items-center gap-2.5">
-            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-primary">
-              <Network className="h-5 w-5 text-white" />
-            </span>
+            <BrandLogo className="h-10 w-10 rounded-xl" />
             <span className="font-heading text-xl font-bold text-white">ReferNex</span>
           </a>
 
@@ -111,14 +112,68 @@ export default function Landing() {
           </nav>
 
           <div className="flex items-center gap-2 sm:gap-3">
-            <Button variant="ghost" className="text-sm text-white/70 hover:bg-white/10 hover:text-white" onClick={() => navigate('/login')}>
+            <Button variant="ghost" className="hidden text-sm text-white/70 hover:bg-white/10 hover:text-white sm:inline-flex" onClick={() => navigate('/login')}>
               Sign In
             </Button>
-            <Button className="btn-primary rounded-full px-5 text-sm" onClick={() => navigate('/register')}>
+            <Button className="hidden btn-primary rounded-full px-5 text-sm sm:inline-flex" onClick={() => navigate('/register')}>
               Create Account
+            </Button>
+            <Button variant="ghost" className="text-sm text-white/70 hover:bg-white/10 hover:text-white sm:hidden" onClick={() => navigate('/login')}>
+              Sign In
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="text-white/80 hover:bg-white/10 hover:text-white md:hidden"
+              aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+              onClick={() => setMobileMenuOpen((prev) => !prev)}
+            >
+              {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
             </Button>
           </div>
         </div>
+        {mobileMenuOpen && (
+          <div className="border-t border-white/10 bg-[#0a1424]/95 md:hidden">
+            <div className={`${containerClass} py-4`}>
+              <div className="grid gap-2 text-sm font-semibold">
+                <a href="#why" className="rounded-lg px-3 py-2 text-white/75 transition-colors hover:bg-white/10 hover:text-white" onClick={() => setMobileMenuOpen(false)}>
+                  Why ReferNex
+                </a>
+                <a href="#how" className="rounded-lg px-3 py-2 text-white/75 transition-colors hover:bg-white/10 hover:text-white" onClick={() => setMobileMenuOpen(false)}>
+                  How It Works
+                </a>
+                <a href="#faq" className="rounded-lg px-3 py-2 text-white/75 transition-colors hover:bg-white/10 hover:text-white" onClick={() => setMobileMenuOpen(false)}>
+                  FAQ
+                </a>
+                <a href="#commitment" className="rounded-lg px-3 py-2 text-white/75 transition-colors hover:bg-white/10 hover:text-white" onClick={() => setMobileMenuOpen(false)}>
+                  Commitment
+                </a>
+              </div>
+              <div className="mt-4 grid gap-2">
+                <Button
+                  variant="outline"
+                  className="h-10 border-white/20 bg-transparent text-white hover:bg-white/10"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    navigate('/login');
+                  }}
+                >
+                  Sign In
+                </Button>
+                <Button
+                  className="btn-primary h-10"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    navigate('/register');
+                  }}
+                >
+                  Create Account
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </header>
 
       <main id="top" className="pt-16">

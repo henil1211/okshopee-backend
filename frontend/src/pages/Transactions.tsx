@@ -10,6 +10,7 @@ import {
 import { formatCurrency, formatDate } from '@/utils/helpers';
 import Database from '@/db';
 import type { Transaction } from '@/types';
+import MobileBottomNav from '@/components/MobileBottomNav';
 import { toast } from 'sonner';
 
 export default function Transactions() {
@@ -225,7 +226,7 @@ export default function Transactions() {
   if (!user) return null;
 
   return (
-    <div className="min-h-screen bg-[#0a0e17]">
+    <div className="transactions-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
       {/* Header */}
       <header className="glass sticky top-0 z-50 border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -303,7 +304,43 @@ export default function Transactions() {
 	            </div>
           </CardHeader>
           <CardContent>
-            <div className="overflow-x-auto">
+            <div className="space-y-3 sm:hidden">
+              {filteredTransactions.map((tx) => {
+                const isOutflow = isOutflowTransaction(tx);
+                return (
+                  <div key={tx.id} className="rounded-xl border border-white/10 bg-[#1f2937]/55 p-3">
+                    <div className="mb-2 flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs text-white/50">{getTransactionDateLabel(tx)}</p>
+                        <div className="mt-1 flex items-center gap-2">
+                          <Badge variant="outline" className="border-white/20 text-white/80 capitalize">
+                            {tx.type.replace('_', ' ')}
+                          </Badge>
+                          {lockedIncomeStateByTxId.get(tx.id) === 'locked' && (
+                            <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30">
+                              Locked
+                            </Badge>
+                          )}
+                          {lockedIncomeStateByTxId.get(tx.id) === 'unlocked' && (
+                            <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
+                              Unlocked
+                            </Badge>
+                          )}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className={`text-sm font-bold ${isOutflow ? 'text-red-400' : 'text-emerald-400'}`}>
+                          {getDisplayAmount(tx)}
+                        </p>
+                        {getStatusBadge(tx.status)}
+                      </div>
+                    </div>
+                    <p className="text-sm text-white/65 break-words">{tx.description || '-'}</p>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="hidden overflow-x-auto sm:block">
               <table className="w-full min-w-[700px]">
                 <thead>
                   <tr className="border-b border-white/10">
@@ -362,18 +399,19 @@ export default function Transactions() {
 	                    </tr>
 	                  );
                     })}
-	                </tbody>
+                </tbody>
               </table>
-	              {filteredTransactions.length === 0 && (
-	                <div className="text-center py-12">
-	                  <RefreshCw className="w-12 h-12 text-white/20 mx-auto mb-4" />
-	                  <p className="text-white/50">No transactions for selected filter</p>
-	                </div>
-	              )}
             </div>
+            {filteredTransactions.length === 0 && (
+              <div className="text-center py-12">
+                <RefreshCw className="w-12 h-12 text-white/20 mx-auto mb-4" />
+                <p className="text-white/50">No transactions for selected filter</p>
+              </div>
+            )}
           </CardContent>
         </Card>
       </main>
+      <MobileBottomNav />
     </div>
   );
 }

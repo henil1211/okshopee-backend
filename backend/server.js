@@ -34,7 +34,7 @@ function extractDbNameFromMongoUri(uri) {
 }
 
 const DB_FROM_URI = extractDbNameFromMongoUri(MONGODB_URI);
-const MONGODB_DB = process.env.MONGODB_DB || DB_FROM_URI || 'matrixmlm';
+const MONGODB_DB = process.env.MONGODB_DB || DB_FROM_URI || 'okshopee24';
 const MONGODB_DB_SOURCE = process.env.MONGODB_DB ? 'env' : DB_FROM_URI ? 'uri' : 'default';
 
 const STATE_COLLECTIONS = {
@@ -96,6 +96,13 @@ function sanitizeIncomingState(input) {
     }
   }
   return out;
+}
+
+function getStateArrayLength(state, key) {
+  const raw = state?.[key];
+  if (typeof raw !== 'string') return null;
+  const parsed = safeParseJSON(raw);
+  return Array.isArray(parsed) ? parsed.length : null;
 }
 
 function hashObject(value) {
@@ -620,7 +627,22 @@ const server = createServer(async (req, res) => {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
       const incomingState = sanitizeIncomingState(parsed?.state);
-      const saved = await writeStateToCollections(incomingState);
+      const currentSnapshot = await readStateFromCollections();
+      const currentUsersCount = getStateArrayLength(currentSnapshot.state, 'mlm_users');
+      const incomingUsersCount = getStateArrayLength(incomingState, 'mlm_users');
+      const forceWrite = url.searchParams.get('force') === '1';
+
+      if (!forceWrite && incomingUsersCount === 0 && (currentUsersCount || 0) > 0) {
+        sendJson(res, 409, {
+          ok: false,
+          error: 'Rejected empty users snapshot to protect existing server data. Retry with ?force=1 only if this is intentional.'
+        });
+        return;
+      }
+
+      // Preserve existing keys when client sends partial state payload.
+      const mergedState = { ...currentSnapshot.state, ...incomingState };
+      const saved = await writeStateToCollections(mergedState);
       sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt });
     } catch (error) {
       sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'Invalid request body' });

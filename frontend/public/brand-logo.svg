@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="ReferNex logo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#04132d" />
+      <stop offset="100%" stop-color="#060b1c" />
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7dd3fc" />
+      <stop offset="100%" stop-color="#4f46e5" />
+    </linearGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#a78bfa" />
+      <stop offset="100%" stop-color="#ec4899" />
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3.5" result="b" />
+      <feMerge>
+        <feMergeNode in="b" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="96" fill="url(#bg)" />
+
+  <g fill="none" stroke="url(#line)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+    <path d="M128 224 256 104l128 120v80" />
+    <path d="M256 132v92" />
+    <path d="M256 224 188 278m68-54 68 54" />
+    <path d="M188 278 164 302m160-24 24 24" />
+    <path d="M164 210 188 182m160 28-24-28" />
+    <circle cx="256" cy="252" r="28" />
+    <circle cx="256" cy="132" r="22" />
+    <circle cx="164" cy="210" r="16" />
+    <circle cx="188" cy="182" r="16" />
+    <circle cx="348" cy="210" r="16" />
+    <circle cx="324" cy="182" r="16" />
+    <circle cx="164" cy="302" r="18" />
+    <circle cx="348" cy="302" r="18" />
+  </g>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+    <path d="M210 352 256 314l46 38v28" stroke="#67e8f9" stroke-width="11" />
+    <path d="M210 412 256 374l46 38v24" stroke="url(#arrow)" stroke-width="11" />
+  </g>
+</svg>

@@ -38,9 +38,9 @@ export interface User {
 
 // User Achievements for Tours
 export interface UserAchievements {
-  nationalTour: boolean;      // Level 5 completion
-  internationalTour: boolean; // Level 7 completion
-  familyTour: boolean;        // Level 10 completion
+  nationalTour: boolean;      // Level 3 completion
+  internationalTour: boolean; // Level 4 completion
+  familyTour: boolean;        // Level 5 completion
   nationalTourDate?: string;
   internationalTourDate?: string;
   familyTourDate?: string;
@@ -107,15 +107,15 @@ export interface Wallet {
 }
 
 // Transaction Types - Updated
-export type TransactionType = 
-  | 'activation' 
-  | 'direct_income' 
-  | 'level_income' 
-  | 'give_help' 
-  | 'get_help' 
-  | 'p2p_transfer' 
-  | 'withdrawal' 
-  | 'reentry' 
+export type TransactionType =
+  | 'activation'
+  | 'direct_income'
+  | 'level_income'
+  | 'give_help'
+  | 'get_help'
+  | 'p2p_transfer'
+  | 'withdrawal'
+  | 'reentry'
   | 'safety_pool'
   | 'deposit'
   | 'pin_purchase'

@@ -11,6 +11,7 @@ import {
 import { formatCurrency, getInitials, generateAvatarColor } from '@/utils/helpers';
 import Database from '@/db';
 import type { MatrixNode } from '@/types';
+import MobileBottomNav from '@/components/MobileBottomNav';
 
 interface TreeNodeProps {
   node: MatrixNode | null;
@@ -204,7 +205,7 @@ export default function Matrix() {
   if (!user) return null;
 
   return (
-    <div className="min-h-screen bg-[#0a0e17]">
+    <div className="matrix-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
       {/* Header */}
       <header className="glass sticky top-0 z-50 border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -511,6 +512,7 @@ export default function Matrix() {
           </Card>
         </div>
       )}
+      <MobileBottomNav />
     </div>
   );
 }

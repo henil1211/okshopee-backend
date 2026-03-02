@@ -15,6 +15,7 @@ import {
 import { formatCurrency, copyToClipboard } from '@/utils/helpers';
 import Database from '@/db';
 import type { PaymentMethod, Payment } from '@/types';
+import MobileBottomNav from '@/components/MobileBottomNav';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
@@ -160,7 +161,7 @@ export default function Deposit() {
   if (!user) return null;
 
   return (
-    <div className="min-h-screen bg-[#0a0e17]">
+    <div className="deposit-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
       {/* Header */}
       <header className="glass sticky top-0 z-50 border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -390,7 +391,22 @@ export default function Deposit() {
                 <CardTitle className="text-white">Deposit History</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="overflow-x-auto">
+                <div className="space-y-3 sm:hidden">
+                  {userPayments.map((payment) => (
+                    <div key={payment.id} className="rounded-xl border border-white/10 bg-[#1f2937]/55 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-medium text-white">{payment.methodName}</p>
+                          <p className="text-xs text-white/55">{new Date(payment.createdAt).toLocaleDateString()}</p>
+                        </div>
+                        {getStatusBadge(payment.status)}
+                      </div>
+                      <p className="mt-2 text-base font-semibold text-white">{formatCurrency(payment.amount)}</p>
+                      <p className="mt-1 text-xs text-white/60 break-words">{payment.adminNotes || payment.notes || '-'}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="hidden overflow-x-auto sm:block">
                   <table className="w-full min-w-[680px]">
                     <thead>
                       <tr className="border-b border-white/10">
@@ -426,13 +442,13 @@ export default function Deposit() {
                       ))}
                     </tbody>
                   </table>
-                  {userPayments.length === 0 && (
-                    <div className="text-center py-12">
-                      <Clock className="w-12 h-12 text-white/20 mx-auto mb-4" />
-                      <p className="text-white/50">No deposit history yet</p>
-                    </div>
-                  )}
                 </div>
+                {userPayments.length === 0 && (
+                  <div className="text-center py-12">
+                    <Clock className="w-12 h-12 text-white/20 mx-auto mb-4" />
+                    <p className="text-white/50">No deposit history yet</p>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -473,6 +489,7 @@ export default function Deposit() {
           </Button>
         </DialogContent>
       </Dialog>
+      <MobileBottomNav />
     </div>
   );
 }

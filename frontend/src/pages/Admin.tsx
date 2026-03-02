@@ -11,13 +11,14 @@ import {
   Users, ArrowLeft, TrendingUp, Wallet, Shield,
   Settings, DollarSign, Search, CheckCircle, RefreshCw, Download,
   CreditCard, XCircle, Eye, LogOut, IdCard, Ticket, UserCog,
-  BarChart3, Copy, Check, Ban, UserCheck, ArrowUp, ArrowDown
+  BarChart3, Copy, Check, Ban, UserCheck, ArrowUp, ArrowDown, MessageCircle, Share2
 } from 'lucide-react';
 import { formatCurrency, formatNumber, formatDate, getInitials, generateAvatarColor } from '@/utils/helpers';
 import { toast } from 'sonner';
 import Database from '@/db';
 import { helpDistributionTable } from '@/db';
 import type { Payment, PaymentMethod, Pin } from '@/types';
+import MobileBottomNav from '@/components/MobileBottomNav';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
 interface MemberReportRow {
@@ -367,6 +368,46 @@ export default function Admin() {
     setCopiedPin(pinCode);
     setTimeout(() => setCopiedPin(null), 2000);
     toast.success('PIN copied!');
+  };
+
+  const getPinShareMessage = (pinCode: string) => [
+    '*Your Exclusive Activation Details:*',
+    '',
+    `*Activation PIN : ${pinCode}*`,
+    '',
+    'Use this PIN to create your account and become part of the *ReferNex* network.',
+    '',
+    '*Important :* This PIN is valid for one-time use only, so please keep it safe and do not share it publicly.'
+  ].join('\n');
+
+  const sharePinOnWhatsApp = (pinCode: string) => {
+    const message = getPinShareMessage(pinCode);
+    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank');
+  };
+
+  const sharePinAnywhere = async (pinCode: string) => {
+    const message = getPinShareMessage(pinCode);
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'ReferNex Activation Details',
+          text: message
+        });
+        return;
+      } catch (error: unknown) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          return;
+        }
+      }
+    }
+
+    try {
+      await navigator.clipboard.writeText(message);
+      toast.success('PIN message copied. Paste it anywhere to share.');
+    } catch {
+      toast.error('Unable to share this PIN on your device');
+    }
   };
 
   const handleImpersonateUser = async () => {
@@ -902,7 +943,7 @@ export default function Admin() {
   if (!user?.isAdmin) return null;
 
   return (
-    <div className="min-h-screen bg-[#0a0e17]">
+    <div className="admin-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
       {/* Header */}
       <header className="glass sticky top-0 z-50 border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -1028,7 +1069,7 @@ export default function Admin() {
 
         {/* Main Content Tabs */}
         <Tabs defaultValue="users" className="space-y-6">
-          <TabsList className="bg-[#1f2937] border border-white/10 flex-wrap h-auto">
+          <TabsList className="mobile-bottom-scroll bg-[#1f2937] border border-white/10 h-auto w-full justify-start gap-1 overflow-x-auto whitespace-nowrap">
             <TabsTrigger value="users" className="data-[state=active]:bg-[#118bdd]">Users</TabsTrigger>
             <TabsTrigger value="pins" className="data-[state=active]:bg-[#118bdd]">PIN Management</TabsTrigger>
             <TabsTrigger value="payments" className="data-[state=active]:bg-[#118bdd]">
@@ -2767,16 +2808,38 @@ export default function Admin() {
           </DialogHeader>
           <div className="space-y-3 py-4">
             {generatedPins.map((pin) => (
-              <div key={pin.id} className="flex items-center justify-between p-3 rounded-lg bg-[#1f2937]">
-                <span className="font-mono text-lg text-white">{pin.pinCode}</span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => copyPin(pin.pinCode)}
-                  className="border-white/20 text-white hover:bg-white/10"
-                >
-                  {copiedPin === pin.pinCode ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                </Button>
+              <div key={pin.id} className="p-3 rounded-lg bg-[#1f2937] space-y-3">
+                <span className="font-mono text-lg text-white block">{pin.pinCode}</span>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => copyPin(pin.pinCode)}
+                    className="flex-1 border-white/20 text-white hover:bg-white/10"
+                  >
+                    {copiedPin === pin.pinCode ? (
+                      <><Check className="w-4 h-4 mr-1" /> Copied</>
+                    ) : (
+                      <><Copy className="w-4 h-4 mr-1" /> Copy</>
+                    )}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => sharePinOnWhatsApp(pin.pinCode)}
+                    className="flex-1 border-green-500/30 text-green-400 hover:bg-green-500/10"
+                  >
+                    <MessageCircle className="w-4 h-4 mr-1" /> WhatsApp
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void sharePinAnywhere(pin.pinCode)}
+                    className="flex-1 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10"
+                  >
+                    <Share2 className="w-4 h-4 mr-1" /> Share
+                  </Button>
+                </div>
               </div>
             ))}
           </div>
@@ -2880,6 +2943,7 @@ export default function Admin() {
           )}
         </DialogContent>
       </Dialog>
+      <MobileBottomNav />
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuthStore } from '@/store';
+import { useTheme } from 'next-themes';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -11,11 +12,14 @@ import {
   Shield, Users, TrendingUp, Wallet, IdCard
 } from 'lucide-react';
 import Database from '@/db';
+import BrandLogo from '@/components/BrandLogo';
 import PublicFooter from '@/components/PublicFooter';
 
 export default function Login() {
   const navigate = useNavigate();
   const { login } = useAuthStore();
+  const { resolvedTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
   const [formData, setFormData] = useState({
     userId: '',
     password: ''
@@ -27,7 +31,10 @@ export default function Login() {
   // Initialize demo data on first load
   useEffect(() => {
     Database.initializeDemoData();
+    setMounted(true);
   }, []);
+
+  const isDarkMode = mounted ? resolvedTheme === 'dark' : true;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,28 +78,32 @@ export default function Login() {
     <div className="min-h-svh bg-[#0a0e17] text-white flex flex-col">
       <div className="flex-1 lg:grid lg:grid-cols-2">
       {/* Left Side - Features */}
-      <div className="relative hidden overflow-hidden lg:flex">
-        <div className="absolute inset-0 bg-gradient-to-br from-[#004e9a] via-[#118bdd] to-[#0a0e17]">
-          <div className="absolute inset-0 network-bg opacity-30" />
+      <div className="login-feature-panel relative hidden overflow-hidden lg:flex">
+        <div className={`absolute inset-0 bg-gradient-to-br ${isDarkMode ? 'from-[#03162d] via-[#0a3d6f] to-[#020617]' : 'from-[#e6f2ff] via-[#c9e5ff] to-[#f7fbff]'}`}>
+          <div className={`absolute inset-0 network-bg ${isDarkMode ? 'opacity-30' : 'opacity-40'}`} />
+          {isDarkMode && <div className="absolute inset-0 bg-[#020617]/45" />}
           
           {/* Animated Circles */}
-          <div className="absolute top-20 left-20 w-64 h-64 bg-white/10 rounded-full blur-3xl animate-pulse" />
-          <div className="absolute bottom-20 right-20 w-96 h-96 bg-[#118bdd]/20 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '1s' }} />
+          <div className={`absolute top-20 left-20 w-64 h-64 rounded-full blur-3xl animate-pulse ${isDarkMode ? 'bg-white/10' : 'bg-[#118bdd]/20'}`} />
+          <div
+            className={`absolute bottom-20 right-20 w-96 h-96 rounded-full blur-3xl animate-pulse ${isDarkMode ? 'bg-[#118bdd]/20' : 'bg-[#118bdd]/25'}`}
+            style={{ animationDelay: '1s' }}
+          />
         </div>
         
         <div className="relative z-10 mx-auto flex w-full max-w-2xl flex-col justify-center px-10 py-16 xl:px-16">
           <div className="mb-8">
             <div className="flex items-center gap-3 mb-6">
-              <div className="w-12 h-12 rounded-xl bg-white/20 backdrop-blur flex items-center justify-center">
-                <Users className="w-6 h-6 text-white" />
+              <div className={`w-12 h-12 rounded-xl backdrop-blur p-0.5 ${isDarkMode ? 'bg-[#0d2b48]/75' : 'bg-white/70'}`}>
+                <BrandLogo className="h-full w-full rounded-[10px]" />
               </div>
-              <span className="text-2xl font-bold text-white">ReferNex</span>
+              <span className={`text-2xl font-bold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>ReferNex</span>
             </div>
-            <h1 className="text-4xl font-bold text-white mb-4">
+            <h1 className={`text-4xl font-bold mb-4 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
               Welcome to the Future of<br />
-              <span className="text-[#38bdf5]">Smart Shopping and Referral Rewards</span>
+              <span className={isDarkMode ? 'text-[#bfe6ff]' : 'text-[#0a5c9d]'}>Smart Shopping and Referral Rewards</span>
             </h1>
-            <p className="text-white/70 text-lg max-w-md">
+            <p className={`text-lg max-w-md ${isDarkMode ? 'text-white/85' : 'text-slate-700'}`}>
               ReferNex helps you shop smarter, earn smarter, and grow through a community-driven referral network.
             </p>
           </div>
@@ -101,12 +112,16 @@ export default function Login() {
             {features.map((feature, index) => (
               <div 
                 key={index}
-                className="flex items-center gap-4 p-4 rounded-xl bg-white/10 backdrop-blur-sm border border-white/10"
+                className={`flex items-center gap-4 p-4 rounded-xl backdrop-blur-sm border ${
+                  isDarkMode
+                    ? 'bg-[#0a223d]/72 border-[#7cc9ff]/30'
+                    : 'bg-white/70 border-[#118bdd]/20'
+                }`}
               >
-                <div className="w-10 h-10 rounded-lg bg-white/20 flex items-center justify-center">
-                  <feature.icon className="w-5 h-5 text-white" />
+                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${isDarkMode ? 'bg-[#113459]' : 'bg-[#118bdd]/15'}`}>
+                  <feature.icon className={`w-5 h-5 ${isDarkMode ? 'text-[#c8ebff]' : 'text-[#0a5c9d]'}`} />
                 </div>
-                <span className="text-white font-medium">{feature.text}</span>
+                <span className={`font-medium ${isDarkMode ? 'text-white/95' : 'text-slate-800'}`}>{feature.text}</span>
               </div>
             ))}
           </div>
@@ -118,9 +133,7 @@ export default function Login() {
         <div className="w-full max-w-md">
           {/* Mobile Logo */}
           <div className="mb-6 flex items-center justify-center gap-3 lg:hidden">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#118bdd] to-[#004e9a] flex items-center justify-center">
-              <Users className="w-5 h-5 text-white" />
-            </div>
+            <BrandLogo className="h-10 w-10 rounded-xl" />
             <span className="text-xl font-bold text-white">ReferNex</span>
           </div>
 

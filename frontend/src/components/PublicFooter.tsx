@@ -1,5 +1,7 @@
 import { Link } from 'react-router-dom';
-import { Globe, Network, ShieldCheck } from 'lucide-react';
+import { Globe, ShieldCheck } from 'lucide-react';
+
+import BrandLogo from '@/components/BrandLogo';
 
 export default function PublicFooter() {
   const year = new Date().getFullYear();
@@ -10,9 +12,7 @@ export default function PublicFooter() {
         <div className="grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-4">
           <div>
             <div className="flex items-center gap-2">
-              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-primary text-white">
-                <Network className="h-4 w-4" />
-              </span>
+              <BrandLogo className="h-9 w-9 rounded-lg" />
               <p className="font-heading text-lg font-semibold text-white">ReferNex</p>
             </div>
             <p className="mt-3 text-sm text-white/60">
@@ -68,7 +68,7 @@ export default function PublicFooter() {
           </div>
         </div>
 
-        <div className="mt-8 border-t border-white/5 pt-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="mt-8 flex flex-col gap-2 border-t border-white/5 pt-6 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-white/50">© {year} ReferNex. All rights reserved.</p>
           <p className="text-xs text-white/40">Performance-based rewards. Terms apply.</p>
         </div>
