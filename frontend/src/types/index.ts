@@ -1,0 +1,458 @@
+// User Types
+export interface User {
+  id: string;
+  userId: string; // 7-digit unique ID
+  email: string;
+  password: string;
+  fullName: string;
+  phone: string;
+  country: string;
+  isActive: boolean;
+  isAdmin: boolean;
+  accountStatus?: 'active' | 'temp_blocked' | 'permanent_blocked';
+  blockedAt?: string | null;
+  blockedUntil?: string | null;
+  blockedReason?: string | null;
+  createdAt: string;
+  activatedAt: string | null;
+  gracePeriodEnd: string | null;
+  sponsorId: string | null; // 7-digit sponsor ID
+  parentId: string | null;
+  position: 'left' | 'right' | null;
+  level: number;
+  directCount: number;
+  totalEarnings: number;
+  isCapped: boolean;
+  capLevel: number;
+  reEntryCount: number;
+  cycleCount: number;
+  // New fields for qualification
+  requiredDirectForNextLevel: number;
+  completedDirectForCurrentLevel: number;
+  usdtAddress?: string;
+  transactionPassword?: string; // Required for PIN transfers and sensitive operations
+  emailVerified: boolean;
+  // Offer achievements tracking
+  achievements: UserAchievements;
+}
+
+// User Achievements for Tours
+export interface UserAchievements {
+  nationalTour: boolean;      // Level 5 completion
+  internationalTour: boolean; // Level 7 completion
+  familyTour: boolean;        // Level 10 completion
+  nationalTourDate?: string;
+  internationalTourDate?: string;
+  familyTourDate?: string;
+}
+
+// PIN Types
+export type PinStatus = 'unused' | 'used' | 'transferred' | 'suspended';
+
+export interface Pin {
+  id: string;
+  pinCode: string; // 7-digit or alphanumeric PIN code
+  amount: number;  // $11 default
+  status: PinStatus;
+  ownerId: string; // User who currently owns the PIN
+  createdBy: string; // Admin who generated the PIN
+  createdAt: string;
+  usedAt?: string;
+  usedById?: string; // User who used this PIN to register
+  transferredFrom?: string; // Previous owner if transferred
+  transferredAt?: string;
+  registrationUserId?: string; // User ID created using this PIN
+  suspendedAt?: string;
+  suspendedBy?: string;
+  suspensionReason?: string;
+}
+
+// PIN Wallet - Tracks user's PIN inventory
+export interface PinWallet {
+  userId: string;
+  unusedPins: Pin[];      // Available PINs to use or transfer
+  usedPins: Pin[];        // PINs that have been used for registration
+  receivedPins: Pin[];    // PINs received from upline/downline
+  transferredPins: Pin[]; // PINs transferred to others
+}
+
+// PIN Transfer Record
+export interface PinTransfer {
+  id: string;
+  pinId: string;
+  pinCode: string;
+  fromUserId: string;
+  fromUserName: string;
+  toUserId: string;
+  toUserName: string;
+  transferredAt: string;
+  notes?: string;
+}
+
+// Updated Wallet Types - Three wallet system
+export interface Wallet {
+  userId: string;
+  // Three main wallets
+  depositWallet: number;    // For deposits and withdrawals
+  pinWallet: number;        // For PIN purchases (tracks PIN value)
+  incomeWallet: number;     // For earnings and income
+  matrixWallet: number;     // Matrix-earned balance used for matrix give-help
+  lockedIncomeWallet: number; // Unqualified level income locked until direct-referral requirement is met
+  // Legacy fields (kept for compatibility)
+  fundWallet: number;
+  getHelpWallet: number;
+  giveHelpLocked: number;
+  totalReceived: number;
+  totalGiven: number;
+}
+
+// Transaction Types - Updated
+export type TransactionType = 
+  | 'activation' 
+  | 'direct_income' 
+  | 'level_income' 
+  | 'give_help' 
+  | 'get_help' 
+  | 'p2p_transfer' 
+  | 'withdrawal' 
+  | 'reentry' 
+  | 'safety_pool'
+  | 'deposit'
+  | 'pin_purchase'
+  | 'pin_transfer'
+  | 'pin_used'
+  | 'admin_credit'
+  | 'admin_debit';
+
+export type TransactionStatus = 'pending' | 'completed' | 'failed' | 'cancelled';
+
+export interface Transaction {
+  id: string;
+  userId: string;
+  type: TransactionType;
+  amount: number;
+  fromUserId?: string;
+  toUserId?: string;
+  level?: number;
+  status: TransactionStatus;
+  description: string;
+  createdAt: string;
+  completedAt?: string;
+  // PIN related
+  pinCode?: string;
+  pinId?: string;
+  // Security
+  requiresTransactionPassword?: boolean;
+  otpVerified?: boolean;
+}
+
+// Matrix Types
+export interface MatrixNode {
+  userId: string; // 7-digit ID
+  username: string; // Display name (fullName)
+  level: number;
+  position: number; // 0 = left, 1 = right
+  leftChild?: string; // 7-digit ID
+  rightChild?: string; // 7-digit ID
+  parentId?: string; // 7-digit ID
+  isActive: boolean;
+}
+
+export interface MatrixTree {
+  rootId: string;
+  levels: MatrixLevel[];
+  totalNodes: number;
+}
+
+export interface MatrixLevel {
+  level: number;
+  users: MatrixNode[];
+  maxUsers: number;
+}
+
+// Updated Help Distribution Table - New Logic
+export interface HelpDistribution {
+  level: number;
+  users: number;
+  perUserHelp: number;
+  totalGetHelp: number;
+  giveHelp: number;
+  netBalance: number;
+  directRequired: number;
+  // New fields for qualification
+  qualifiedGetHelp: number;    // Amount for qualified users
+  unqualifiedCarryForward: number; // Amount carried forward for unqualified
+}
+
+// Safety Pool Types
+export interface SafetyPool {
+  totalAmount: number;
+  transactions: SafetyPoolTransaction[];
+}
+
+export interface SafetyPoolTransaction {
+  id: string;
+  amount: number;
+  fromUserId: string;
+  reason: string;
+  createdAt: string;
+}
+
+// Grace Period Types
+export interface GracePeriod {
+  userId: string;
+  type: 'activation' | 'direct_sponsor';
+  startTime: string;
+  endTime: string;
+  isCompleted: boolean;
+  warningSent: boolean;
+}
+
+// Re-Entry Types
+export interface ReEntry {
+  id: string;
+  userId: string;
+  previousCycleId: string;
+  newCycleId: string;
+  reEntryDate: string;
+  activationAmount: number;
+  previousEarnings: number;
+}
+
+// Stats Types
+export interface DashboardStats {
+  totalUsers: number;
+  activeUsers: number;
+  totalHelpDistributed: number;
+  totalInSafetyPool: number;
+  averageEarnings: number;
+  topEarners: TopEarner[];
+}
+
+export interface TopEarner {
+  userId: string;
+  username: string;
+  fullName: string;
+  totalEarnings: number;
+  avatar?: string;
+}
+
+// Auth Types
+export interface LoginCredentials {
+  userId: string; // 7-digit ID
+  password: string;
+}
+
+// Updated Register Data with PIN
+export interface RegisterData {
+  fullName: string;
+  email: string;
+  password: string;
+  transactionPassword: string; // Required for sensitive operations
+  phone: string;
+  country: string;
+  sponsorId?: string; // 7-digit sponsor ID
+  pinCode: string; // PIN for activation (mandatory)
+}
+
+// OTP Types for Email Verification
+export interface OtpRecord {
+  id: string;
+  userId: string;
+  email: string;
+  otp: string;
+  purpose: 'registration' | 'transaction' | 'withdrawal' | 'profile_update';
+  createdAt: string;
+  expiresAt: string;
+  isUsed: boolean;
+}
+
+export interface EmailLog {
+  id: string;
+  to: string;
+  subject: string;
+  body: string;
+  purpose: 'otp' | 'welcome' | 'system';
+  provider: 'api' | 'local';
+  status: 'queued' | 'sent' | 'failed';
+  error?: string;
+  createdAt: string;
+  metadata?: Record<string, string>;
+}
+
+// Notification Types
+export interface Notification {
+  id: string;
+  userId: string;
+  title: string;
+  message: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+  isRead: boolean;
+  createdAt: string;
+}
+
+// Admin Types
+export interface AdminSettings {
+  activationAmount: number;
+  pinAmount: number; // $11 default
+  directIncomePercent: number;
+  helpingAmountPercent: number;
+  adminFeePercent: number;
+  withdrawalFeePercent: number;
+  gracePeriodHours: number;
+  maxLevels: number;
+  reEntryEnabled: boolean;
+  safetyPoolEnabled: boolean;
+  activationDeadlineDays: number;
+  directReferralDeadlineDays: number;
+  // Security settings
+  requireOtpForTransactions: boolean;
+  masterPassword: string; // For admin to login as any user
+  matrixViewMaxLevels: number;
+}
+
+// Network Types
+export interface NetworkNode {
+  id: string;
+  userId: string;
+  fullName: string;
+  isActive: boolean;
+  level: number;
+  children: NetworkNode[];
+  leftCount: number;
+  rightCount: number;
+  leftActive: number;
+  rightActive: number;
+}
+
+// P2P Transfer
+export interface P2PTransfer {
+  id: string;
+  fromUserId: string;
+  toUserId: string;
+  amount: number;
+  status: TransactionStatus;
+  createdAt: string;
+  completedAt?: string;
+}
+
+// Withdrawal Request
+export interface WithdrawalRequest {
+  id: string;
+  userId: string;
+  amount: number;
+  fee: number;
+  netAmount: number;
+  walletAddress: string;
+  status: TransactionStatus;
+  createdAt: string;
+  processedAt?: string;
+  transactionPasswordVerified: boolean;
+}
+
+// Payment Method Types
+export type PaymentMethodType = 'crypto' | 'bank_transfer' | 'upi' | 'paypal' | 'stripe';
+
+export interface PaymentMethod {
+  id: string;
+  name: string;
+  type: PaymentMethodType;
+  icon: string;
+  description: string;
+  instructions: string;
+  walletAddress?: string;
+  accountNumber?: string;
+  accountName?: string;
+  bankName?: string;
+  upiId?: string;
+  qrCode?: string;
+  isActive: boolean;
+  minAmount: number;
+  maxAmount: number;
+  processingFee: number;
+  processingTime: string;
+}
+
+// Payment Types
+export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'cancelled' | 'under_review';
+
+export interface Payment {
+  id: string;
+  userId: string;
+  amount: number;
+  method: PaymentMethodType;
+  methodName: string;
+  status: PaymentStatus;
+  txHash?: string;
+  screenshot?: string;
+  notes?: string;
+  adminNotes?: string;
+  createdAt: string;
+  verifiedAt?: string;
+  verifiedBy?: string;
+}
+
+// User Level Progress
+export interface UserLevelProgress {
+  currentLevel: number;
+  requiredDirect: number;
+  completedDirect: number;
+  remainingDirect: number;
+  totalGetHelpAtLevel: number;
+  giveHelpAtLevel: number;
+  netBalanceAtLevel: number;
+  isQualified: boolean;
+}
+
+// Daily/Report Stats
+export interface DailyStats {
+  date: string;
+  newUsers: number;
+  newActivations: number;
+  totalDeposits: number;
+  totalWithdrawals: number;
+  helpDistributed: number;
+}
+
+// Level-wise Report
+export interface LevelWiseReport {
+  level: number;
+  userId: string;
+  fullName: string;
+  sponsorId: string;
+  getHelpAmount: number;
+  giveHelpAmount: number;
+  netAmount: number;
+  isQualified: boolean;
+  directCount: number;
+  date: string;
+}
+
+// PIN Purchase Request
+export interface PinPurchaseRequest {
+  id: string;
+  userId: string;
+  quantity: number;
+  amount: number; // quantity * $11
+  status: PaymentStatus;
+  purchaseType?: 'request' | 'direct';
+  paymentMethod?: PaymentMethodType;
+  paymentProof?: string;
+  paymentTxHash?: string;
+  paidFromWallet?: boolean;
+  adminNotes?: string;
+  createdAt: string;
+  processedAt?: string;
+  processedBy?: string;
+  pinsGenerated?: string[]; // List of PIN codes generated
+}
+
+// Admin Impersonation Session
+export interface ImpersonationSession {
+  adminId: string;
+  adminUserId: string;
+  targetUserId: string;
+  targetUserName: string;
+  startedAt: string;
+  isActive: boolean;
+}
