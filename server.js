@@ -1,0 +1,740 @@
+import { createServer } from 'node:http';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import dotenv from 'dotenv';
+import { MongoClient } from 'mongodb';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load backend env files first, then root env files as fallback.
+dotenv.config({ path: path.join(__dirname, '.env.local') });
+dotenv.config({ path: path.join(__dirname, '.env') });
+dotenv.config({ path: path.join(process.cwd(), '.env.local') });
+dotenv.config({ path: path.join(process.cwd(), '.env') });
+
+const PORT = Number(process.env.PORT || 4000);
+const HOST = process.env.HOST || '0.0.0.0';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
+const MONGODB_LEGACY_SNAPSHOT_COLLECTION =
+  process.env.MONGODB_LEGACY_SNAPSHOT_COLLECTION || 'app_state';
+const STATE_DOC_ID = 'singleton';
+const LEGACY_STATE_FILE = path.join(__dirname, 'data', 'app-state.json');
+
+function extractDbNameFromMongoUri(uri) {
+  try {
+    const parsed = new URL(uri);
+    const dbName = parsed.pathname.replace(/^\/+/, '');
+    return dbName || null;
+  } catch {
+    return null;
+  }
+}
+
+const DB_FROM_URI = extractDbNameFromMongoUri(MONGODB_URI);
+const MONGODB_DB = process.env.MONGODB_DB || DB_FROM_URI || 'matrixmlm';
+const MONGODB_DB_SOURCE = process.env.MONGODB_DB ? 'env' : DB_FROM_URI ? 'uri' : 'default';
+
+const STATE_COLLECTIONS = {
+  mlm_users: { collection: 'users', kind: 'array', idField: 'id' },
+  mlm_wallets: { collection: 'wallets', kind: 'array', idField: 'userId' },
+  mlm_transactions: { collection: 'transactions', kind: 'array', idField: 'id' },
+  mlm_matrix: { collection: 'matrix', kind: 'array', idField: 'userId' },
+  mlm_safety_pool: { collection: 'safety_pool', kind: 'object' },
+  mlm_grace_periods: { collection: 'grace_periods', kind: 'array', idField: 'userId' },
+  mlm_reentries: { collection: 'reentries', kind: 'array', idField: 'id' },
+  mlm_notifications: { collection: 'notifications', kind: 'array', idField: 'id' },
+  mlm_settings: { collection: 'settings', kind: 'object' },
+  mlm_payment_methods: { collection: 'payment_methods', kind: 'array', idField: 'id' },
+  mlm_payments: { collection: 'payments', kind: 'array', idField: 'id' },
+  mlm_pins: { collection: 'pins', kind: 'array', idField: 'id' },
+  mlm_pin_transfers: { collection: 'pin_transfers', kind: 'array', idField: 'id' },
+  mlm_pin_purchase_requests: { collection: 'pin_purchase_requests', kind: 'array', idField: 'id' },
+  mlm_otp_records: { collection: 'otp_records', kind: 'array', idField: 'id' },
+  mlm_email_logs: { collection: 'email_logs', kind: 'array', idField: 'id' },
+  mlm_impersonation: { collection: 'impersonation', kind: 'array', idField: 'id' },
+  mlm_help_trackers: { collection: 'help_trackers', kind: 'array', idField: 'userId' },
+  mlm_matrix_pending_contributions: { collection: 'matrix_pending_contributions', kind: 'array', idField: 'id' }
+};
+
+const DB_KEYS = Object.keys(STATE_COLLECTIONS);
+const SAFETY_POOL_STATE_KEY = 'mlm_safety_pool';
+const SAFETY_POOL_TRANSACTIONS_COLLECTION = 'safety_pool_transactions';
+
+const mongoClient = new MongoClient(MONGODB_URI);
+let mongoDb;
+
+function sendJson(res, statusCode, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  });
+  res.end(body);
+}
+
+function safeParseJSON(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function sanitizeIncomingState(input) {
+  if (!input || typeof input !== 'object') return {};
+  const out = {};
+  for (const key of DB_KEYS) {
+    const value = input[key];
+    if (typeof value === 'string') {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function hashObject(value) {
+  return createHash('sha1').update(JSON.stringify(value)).digest('hex');
+}
+
+function resolveItemId(item, idField, index) {
+  if (item && typeof item === 'object') {
+    if (idField && item[idField] !== undefined && item[idField] !== null && String(item[idField]).length > 0) {
+      return String(item[idField]);
+    }
+    for (const fallbackField of ['id', 'userId', 'email', 'pinCode', 'code']) {
+      if (item[fallbackField] !== undefined && item[fallbackField] !== null && String(item[fallbackField]).length > 0) {
+        return String(item[fallbackField]);
+      }
+    }
+  }
+  return `auto_${index}_${hashObject(item)}`;
+}
+
+function normalizeArrayItem(item, idField, resolvedId) {
+  const normalized =
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? { ...item }
+      : { value: item };
+
+  delete normalized._id;
+  delete normalized.__syncUpdatedAt;
+  delete normalized.__syncCreatedAt;
+
+  if (idField && (normalized[idField] === undefined || normalized[idField] === null || String(normalized[idField]).length === 0)) {
+    normalized[idField] = resolvedId;
+  }
+
+  return normalized;
+}
+
+function cleanupReadDoc(doc) {
+  if (!doc || typeof doc !== 'object') return doc;
+  const out = { ...doc };
+  delete out._id;
+  delete out.__syncUpdatedAt;
+  delete out.__syncCreatedAt;
+  return out;
+}
+
+async function connectMongo() {
+  await mongoClient.connect();
+  mongoDb = mongoClient.db(MONGODB_DB);
+}
+
+async function readLegacyStateFile() {
+  try {
+    const raw = await fs.readFile(LEGACY_STATE_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return {
+      state: parsed?.state && typeof parsed.state === 'object' ? parsed.state : {},
+      updatedAt: typeof parsed?.updatedAt === 'string' ? parsed.updatedAt : null
+    };
+  } catch {
+    return { state: {}, updatedAt: null };
+  }
+}
+
+async function readLegacySnapshotCollection() {
+  try {
+    const collection = mongoDb.collection(MONGODB_LEGACY_SNAPSHOT_COLLECTION);
+    const doc = await collection.findOne({ _id: STATE_DOC_ID }, { projection: { state: 1, updatedAt: 1 } });
+    if (!doc || !doc.state || typeof doc.state !== 'object') {
+      return { state: {}, updatedAt: null };
+    }
+    return {
+      state: sanitizeIncomingState(doc.state),
+      updatedAt: typeof doc.updatedAt === 'string' ? doc.updatedAt : null
+    };
+  } catch {
+    return { state: {}, updatedAt: null };
+  }
+}
+
+async function readArrayState(collectionName, idField) {
+  const collection = mongoDb.collection(collectionName);
+  const docs = await collection.find({ _id: { $ne: STATE_DOC_ID } }).toArray();
+  if (docs.length > 0) {
+    let latestUpdatedAt = null;
+    const value = docs.map((doc) => {
+      const item = cleanupReadDoc(doc);
+      if (idField && (item[idField] === undefined || item[idField] === null || String(item[idField]).length === 0)) {
+        item[idField] = String(doc._id);
+      }
+      if (typeof doc.__syncUpdatedAt === 'string' && (!latestUpdatedAt || doc.__syncUpdatedAt > latestUpdatedAt)) {
+        latestUpdatedAt = doc.__syncUpdatedAt;
+      }
+      return item;
+    });
+    return { found: true, value, updatedAt: latestUpdatedAt };
+  }
+
+  const legacyDoc = await collection.findOne({ _id: STATE_DOC_ID }, { projection: { value: 1, updatedAt: 1 } });
+  if (legacyDoc && Array.isArray(legacyDoc.value)) {
+    return {
+      found: true,
+      value: legacyDoc.value,
+      updatedAt: typeof legacyDoc.updatedAt === 'string' ? legacyDoc.updatedAt : null
+    };
+  }
+
+  return { found: false, value: [], updatedAt: null };
+}
+
+async function readObjectState(collectionName) {
+  const collection = mongoDb.collection(collectionName);
+  const doc = await collection.findOne({ _id: STATE_DOC_ID }, { projection: { value: 1, updatedAt: 1 } });
+  if (!doc || !Object.prototype.hasOwnProperty.call(doc, 'value')) {
+    return { found: false, value: null, updatedAt: null };
+  }
+  return {
+    found: true,
+    value: doc.value,
+    updatedAt: typeof doc.updatedAt === 'string' ? doc.updatedAt : null
+  };
+}
+
+async function readStateFromCollections() {
+  const state = {};
+  let latestUpdatedAt = null;
+
+  for (const [stateKey, config] of Object.entries(STATE_COLLECTIONS)) {
+    if (config.kind === 'array') {
+      const result = await readArrayState(config.collection, config.idField);
+      if (!result.found) continue;
+      state[stateKey] = JSON.stringify(result.value);
+      if (result.updatedAt && (!latestUpdatedAt || result.updatedAt > latestUpdatedAt)) {
+        latestUpdatedAt = result.updatedAt;
+      }
+      continue;
+    }
+
+    const result = await readObjectState(config.collection);
+    if (!result.found) continue;
+    state[stateKey] = JSON.stringify(result.value);
+    if (result.updatedAt && (!latestUpdatedAt || result.updatedAt > latestUpdatedAt)) {
+      latestUpdatedAt = result.updatedAt;
+    }
+  }
+
+  return { state, updatedAt: latestUpdatedAt };
+}
+
+async function writeArrayState(collectionName, idField, rawValue, now) {
+  const collection = mongoDb.collection(collectionName);
+  const parsed = safeParseJSON(rawValue);
+  const items = Array.isArray(parsed) ? parsed : [];
+
+  if (items.length === 0) {
+    await collection.deleteMany({});
+    return;
+  }
+
+  const operations = [];
+  const ids = [];
+
+  items.forEach((item, index) => {
+    const resolvedId = resolveItemId(item, idField, index);
+    ids.push(resolvedId);
+
+    const normalized = normalizeArrayItem(item, idField, resolvedId);
+    operations.push({
+      replaceOne: {
+        filter: { _id: resolvedId },
+        replacement: {
+          _id: resolvedId,
+          ...normalized,
+          __syncUpdatedAt: now,
+          __syncCreatedAt: now
+        },
+        upsert: true
+      }
+    });
+  });
+
+  if (operations.length > 0) {
+    await collection.bulkWrite(operations, { ordered: false });
+  }
+
+  await collection.deleteMany({ _id: { $nin: ids } });
+}
+
+async function writeObjectState(collectionName, rawValue, now) {
+  const collection = mongoDb.collection(collectionName);
+  const parsed = safeParseJSON(rawValue);
+
+  if (parsed === undefined) {
+    await collection.deleteOne({ _id: STATE_DOC_ID });
+    return;
+  }
+
+  await collection.updateOne(
+    { _id: STATE_DOC_ID },
+    {
+      $set: {
+        value: parsed,
+        updatedAt: now,
+        __syncUpdatedAt: now
+      },
+      $setOnInsert: {
+        createdAt: now,
+        __syncCreatedAt: now
+      }
+    },
+    { upsert: true }
+  );
+}
+
+async function writeSafetyPoolTransactionsMirror(rawValue, now) {
+  const parsed = safeParseJSON(rawValue);
+  const pool =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : { totalAmount: 0, transactions: [] };
+  const transactions = Array.isArray(pool.transactions) ? pool.transactions : [];
+  const collection = mongoDb.collection(SAFETY_POOL_TRANSACTIONS_COLLECTION);
+
+  if (transactions.length === 0) {
+    await collection.deleteMany({});
+    return;
+  }
+
+  const operations = [];
+  const ids = [];
+  const seenIds = new Map();
+
+  transactions.forEach((item, index) => {
+    let resolvedId = resolveItemId(item, 'id', index);
+    const seenCount = (seenIds.get(resolvedId) || 0) + 1;
+    seenIds.set(resolvedId, seenCount);
+    if (seenCount > 1) {
+      resolvedId = `${resolvedId}__dup_${index}`;
+    }
+
+    ids.push(resolvedId);
+    const normalized = normalizeArrayItem(item, 'id', resolvedId);
+    operations.push({
+      replaceOne: {
+        filter: { _id: resolvedId },
+        replacement: {
+          _id: resolvedId,
+          ...normalized,
+          __syncUpdatedAt: now,
+          __syncCreatedAt: now
+        },
+        upsert: true
+      }
+    });
+  });
+
+  if (operations.length > 0) {
+    await collection.bulkWrite(operations, { ordered: false });
+  }
+
+  await collection.deleteMany({ _id: { $nin: ids } });
+}
+
+async function writeStateToCollections(nextState) {
+  const now = new Date().toISOString();
+  const tasks = [];
+
+  for (const [stateKey, config] of Object.entries(STATE_COLLECTIONS)) {
+    const rawValue = nextState[stateKey];
+    if (typeof rawValue !== 'string') {
+      if (config.kind === 'array') {
+        tasks.push(mongoDb.collection(config.collection).deleteMany({}));
+      } else {
+        tasks.push(mongoDb.collection(config.collection).deleteOne({ _id: STATE_DOC_ID }));
+        if (stateKey === SAFETY_POOL_STATE_KEY) {
+          tasks.push(mongoDb.collection(SAFETY_POOL_TRANSACTIONS_COLLECTION).deleteMany({}));
+        }
+      }
+      continue;
+    }
+
+    if (config.kind === 'array') {
+      tasks.push(writeArrayState(config.collection, config.idField, rawValue, now));
+    } else {
+      tasks.push(writeObjectState(config.collection, rawValue, now));
+      if (stateKey === SAFETY_POOL_STATE_KEY) {
+        tasks.push(writeSafetyPoolTransactionsMirror(rawValue, now));
+      }
+    }
+  }
+
+  await Promise.all(tasks);
+  return { updatedAt: now };
+}
+
+async function hasAnyCollectionState() {
+  for (const config of Object.values(STATE_COLLECTIONS)) {
+    const exists = await mongoDb.collection(config.collection).findOne({}, { projection: { _id: 1 } });
+    if (exists) return true;
+  }
+  return false;
+}
+
+async function migrateArraySingletonToItemDocs(collectionName, idField) {
+  const collection = mongoDb.collection(collectionName);
+  const singleton = await collection.findOne({ _id: STATE_DOC_ID }, { projection: { value: 1, updatedAt: 1 } });
+  if (!singleton || !Array.isArray(singleton.value)) {
+    return false;
+  }
+
+  const existingCount = await collection.countDocuments({ _id: { $ne: STATE_DOC_ID } });
+  if (existingCount > 0) {
+    return false;
+  }
+
+  const now = typeof singleton.updatedAt === 'string' ? singleton.updatedAt : new Date().toISOString();
+  const items = singleton.value;
+  if (items.length > 0) {
+    const operations = items.map((item, index) => {
+      const resolvedId = resolveItemId(item, idField, index);
+      const normalized = normalizeArrayItem(item, idField, resolvedId);
+      return {
+        replaceOne: {
+          filter: { _id: resolvedId },
+          replacement: {
+            _id: resolvedId,
+            ...normalized,
+            __syncUpdatedAt: now,
+            __syncCreatedAt: now
+          },
+          upsert: true
+        }
+      };
+    });
+    await collection.bulkWrite(operations, { ordered: false });
+  }
+
+  await collection.deleteOne({ _id: STATE_DOC_ID });
+  return true;
+}
+
+async function migrateLegacyStateIfNeeded() {
+  const hasState = await hasAnyCollectionState();
+  if (hasState) return;
+
+  const legacyFromCollection = await readLegacySnapshotCollection();
+  if (Object.keys(legacyFromCollection.state).length > 0) {
+    await writeStateToCollections(legacyFromCollection.state);
+    return;
+  }
+
+  const legacyFromFile = await readLegacyStateFile();
+  if (Object.keys(legacyFromFile.state).length > 0) {
+    await writeStateToCollections(sanitizeIncomingState(legacyFromFile.state));
+  }
+}
+
+async function migrateExistingSingletonArrayCollections() {
+  for (const config of Object.values(STATE_COLLECTIONS)) {
+    if (config.kind !== 'array') continue;
+    await migrateArraySingletonToItemDocs(config.collection, config.idField);
+  }
+}
+
+async function backfillSafetyPoolTransactionsMirror() {
+  const stateKeyConfig = STATE_COLLECTIONS[SAFETY_POOL_STATE_KEY];
+  if (!stateKeyConfig || stateKeyConfig.kind !== 'object') return;
+
+  const mirrorCollection = mongoDb.collection(SAFETY_POOL_TRANSACTIONS_COLLECTION);
+  const existingCount = await mirrorCollection.countDocuments();
+  if (existingCount > 0) return;
+
+  const objectState = await readObjectState(stateKeyConfig.collection);
+  if (!objectState.found) return;
+
+  const rawValue = JSON.stringify(objectState.value ?? { totalAmount: 0, transactions: [] });
+  const now = objectState.updatedAt || new Date().toISOString();
+  await writeSafetyPoolTransactionsMirror(rawValue, now);
+}
+
+async function buildAdminAuditReport() {
+  const generatedAt = new Date().toISOString();
+  const collectionCounts = {};
+
+  for (const config of Object.values(STATE_COLLECTIONS)) {
+    collectionCounts[config.collection] = await mongoDb.collection(config.collection).countDocuments();
+  }
+  collectionCounts[SAFETY_POOL_TRANSACTIONS_COLLECTION] =
+    await mongoDb.collection(SAFETY_POOL_TRANSACTIONS_COLLECTION).countDocuments();
+
+  const snapshot = await readStateFromCollections();
+  const presentStateKeys = Object.keys(snapshot.state).sort();
+  const missingStateKeys = DB_KEYS.filter((key) => !presentStateKeys.includes(key));
+
+  const users = await mongoDb.collection('users').find({}, { projection: { id: 1, userId: 1, email: 1, password: 1, isAdmin: 1, isActive: 1, accountStatus: 1 } }).toArray();
+  const wallets = await mongoDb.collection('wallets').find({}, { projection: { userId: 1 } }).toArray();
+  const matrix = await mongoDb.collection('matrix').find({}, { projection: { userId: 1, parentId: 1, leftChild: 1, rightChild: 1 } }).toArray();
+  const safetyPoolTransactions = await mongoDb.collection(SAFETY_POOL_TRANSACTIONS_COLLECTION).countDocuments();
+
+  const userIdSet = new Set(users.map((u) => u.id).filter((id) => typeof id === 'string' && id.length > 0));
+  const userUserIdSet = new Set(users.map((u) => u.userId).filter((id) => typeof id === 'string' && id.length > 0));
+
+  const orphanWalletUserIds = wallets
+    .filter((w) => !userIdSet.has(w.userId))
+    .map((w) => w.userId)
+    .slice(0, 50);
+
+  const orphanMatrixUserIds = matrix
+    .filter((m) => !userUserIdSet.has(m.userId))
+    .map((m) => m.userId)
+    .slice(0, 50);
+
+  const danglingMatrixParents = matrix
+    .filter((m) => m.parentId && !userUserIdSet.has(m.parentId))
+    .map((m) => ({ userId: m.userId, parentId: m.parentId }))
+    .slice(0, 50);
+
+  const danglingMatrixChildren = [];
+  for (const node of matrix) {
+    if (node.leftChild && !userUserIdSet.has(node.leftChild)) {
+      danglingMatrixChildren.push({ userId: node.userId, child: node.leftChild, side: 'left' });
+    }
+    if (node.rightChild && !userUserIdSet.has(node.rightChild)) {
+      danglingMatrixChildren.push({ userId: node.userId, child: node.rightChild, side: 'right' });
+    }
+  }
+
+  const adminAccount = users.find((u) => u.userId === '1000001');
+
+  return {
+    generatedAt,
+    database: MONGODB_DB,
+    dbSource: MONGODB_DB_SOURCE,
+    storageMode: 'multi_collection_documents',
+    collectionCounts,
+    stateCoverage: {
+      expectedStateKeys: DB_KEYS,
+      presentStateKeys,
+      missingStateKeys
+    },
+    integrity: {
+      userCount: users.length,
+      walletCount: wallets.length,
+      matrixNodeCount: matrix.length,
+      safetyPoolTransactionCount: safetyPoolTransactions,
+      orphanWalletCount: orphanWalletUserIds.length,
+      orphanWalletUserIds,
+      orphanMatrixNodeCount: orphanMatrixUserIds.length,
+      orphanMatrixUserIds,
+      danglingMatrixParentCount: danglingMatrixParents.length,
+      danglingMatrixParents,
+      danglingMatrixChildCount: danglingMatrixChildren.length,
+      danglingMatrixChildren: danglingMatrixChildren.slice(0, 50)
+    },
+    adminAccount: adminAccount
+      ? {
+        exists: true,
+        userId: adminAccount.userId,
+        id: adminAccount.id,
+        email: adminAccount.email,
+        isAdmin: !!adminAccount.isAdmin,
+        isActive: !!adminAccount.isActive,
+        accountStatus: adminAccount.accountStatus,
+        hasPassword: typeof adminAccount.password === 'string' && adminAccount.password.length > 0
+      }
+      : {
+        exists: false
+      }
+  };
+}
+
+function getRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk) => {
+      data += chunk;
+      if (data.length > 5 * 1024 * 1024) {
+        reject(new Error('Payload too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url || '/', `http://${req.headers.host || `localhost:${PORT}`}`);
+
+  if (req.method === 'OPTIONS') {
+    sendJson(res, 204, {});
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/health') {
+    sendJson(res, 200, {
+      ok: true,
+      timestamp: new Date().toISOString(),
+      storage: 'mongodb',
+      mode: 'multi_collection_documents',
+      database: MONGODB_DB,
+      dbSource: MONGODB_DB_SOURCE,
+      collections: Object.values(STATE_COLLECTIONS).map((c) => c.collection),
+      derivedCollections: [SAFETY_POOL_TRANSACTIONS_COLLECTION],
+      legacySnapshotCollection: MONGODB_LEGACY_SNAPSHOT_COLLECTION
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/state') {
+    try {
+      const snapshot = await readStateFromCollections();
+      sendJson(res, 200, snapshot);
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to read state' });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/state') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const incomingState = sanitizeIncomingState(parsed?.state);
+      const saved = await writeStateToCollections(incomingState);
+      sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt });
+    } catch (error) {
+      sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'Invalid request body' });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/admin-audit') {
+    try {
+      const report = await buildAdminAuditReport();
+      sendJson(res, 200, { ok: true, report });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to build admin audit report' });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/cleanup-for-rebuild') {
+    try {
+      // Clear only the heavy regenerable data - keep users, matrix, pins
+      const now = new Date().toISOString();
+
+      // 1. Clear transactions (the biggest memory hog)
+      await mongoDb.collection('transactions').deleteMany({});
+
+      // 2. Clear help trackers (regenerated during rebuild)
+      await mongoDb.collection('help_trackers').deleteMany({});
+
+      // 3. Clear safety pool and its transactions mirror
+      await mongoDb.collection('safety_pool').deleteMany({});
+      await mongoDb.collection('safety_pool_transactions').deleteMany({});
+      // Write empty safety pool
+      await mongoDb.collection('safety_pool').updateOne(
+        { _id: STATE_DOC_ID },
+        {
+          $set: { value: { totalAmount: 0, transactions: [] }, updatedAt: now, __syncUpdatedAt: now },
+          $setOnInsert: { createdAt: now, __syncCreatedAt: now }
+        },
+        { upsert: true }
+      );
+
+      // 4. Clear pending matrix contributions
+      await mongoDb.collection('matrix_pending_contributions').deleteMany({});
+
+      // 5. Reset all wallet balances to 0 (rebuild will recalculate)
+      const wallets = await mongoDb.collection('wallets').find({}).toArray();
+      if (wallets.length > 0) {
+        const walletOps = wallets.map(w => ({
+          updateOne: {
+            filter: { _id: w._id },
+            update: {
+              $set: {
+                incomeWallet: 0, matrixWallet: 0, totalReceived: 0, totalGiven: 0,
+                giveHelpLocked: 0, lockedIncomeWallet: 0,
+                __syncUpdatedAt: now
+              }
+            }
+          }
+        }));
+        await mongoDb.collection('wallets').bulkWrite(walletOps, { ordered: false });
+      }
+
+      // Count what was kept
+      const keptUsers = await mongoDb.collection('users').countDocuments();
+      const keptMatrix = await mongoDb.collection('matrix').countDocuments();
+      const keptPins = await mongoDb.collection('pins').countDocuments();
+
+      sendJson(res, 200, {
+        ok: true,
+        message: `Cleanup complete. Kept: ${keptUsers} users, ${keptMatrix} matrix nodes, ${keptPins} pins. Cleared: transactions, help trackers, safety pool. Wallet balances reset to $0. Now do Activate + Rebuild Matrix.`,
+        kept: { users: keptUsers, matrix: keptMatrix, pins: keptPins },
+        cleared: ['transactions', 'help_trackers', 'safety_pool', 'safety_pool_transactions', 'matrix_pending_contributions'],
+        walletsReset: wallets.length
+      });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Cleanup failed' });
+    }
+    return;
+  }
+
+  sendJson(res, 404, { ok: false, error: 'Not found' });
+});
+
+async function start() {
+  await connectMongo();
+  await migrateLegacyStateIfNeeded();
+  await migrateExistingSingletonArrayCollections();
+  await backfillSafetyPoolTransactionsMirror();
+
+  server.listen(PORT, HOST, () => {
+    console.log(`Backend listening on http://${HOST}:${PORT}`);
+    console.log(`MongoDB URI: ${MONGODB_URI}`);
+    console.log(`MongoDB DB (${MONGODB_DB_SOURCE}): ${MONGODB_DB}`);
+    console.log(`MongoDB collections: ${Object.values(STATE_COLLECTIONS).map((c) => c.collection).join(', ')}`);
+    console.log(`MongoDB derived collections: ${SAFETY_POOL_TRANSACTIONS_COLLECTION}`);
+    console.log(`Legacy snapshot collection: ${MONGODB_LEGACY_SNAPSHOT_COLLECTION}`);
+    if (process.env.MONGODB_DB && DB_FROM_URI && process.env.MONGODB_DB !== DB_FROM_URI) {
+      console.warn(`Mongo DB mismatch: URI path is "${DB_FROM_URI}" but MONGODB_DB is "${process.env.MONGODB_DB}".`);
+    }
+  });
+}
+
+function shutdown(signal) {
+  console.log(`Received ${signal}. Closing backend...`);
+  server.close(async () => {
+    await mongoClient.close();
+    process.exit(0);
+  });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+start().catch((error) => {
+  console.error('Failed to start backend:', error);
+  process.exit(1);
+});
