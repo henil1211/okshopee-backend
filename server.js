@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
+import nodemailer from 'nodemailer';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,8 +21,21 @@ const HOST = process.env.HOST || '0.0.0.0';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
 const MONGODB_LEGACY_SNAPSHOT_COLLECTION =
   process.env.MONGODB_LEGACY_SNAPSHOT_COLLECTION || 'app_state';
+const SMTP_HOST = process.env.SMTP_HOST || '';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = process.env.SMTP_SECURE ? process.env.SMTP_SECURE === 'true' : SMTP_PORT === 465;
+const SMTP_IGNORE_TLS = process.env.SMTP_IGNORE_TLS === 'true';
+const SMTP_REQUIRE_TLS = process.env.SMTP_REQUIRE_TLS === 'true';
+const SMTP_TLS_REJECT_UNAUTHORIZED =
+  process.env.SMTP_TLS_REJECT_UNAUTHORIZED
+    ? process.env.SMTP_TLS_REJECT_UNAUTHORIZED === 'true'
+    : true;
+const SMTP_USER = process.env.SMTP_USER || '';
+const SMTP_PASS = process.env.SMTP_PASS || '';
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || '';
 const STATE_DOC_ID = 'singleton';
 const LEGACY_STATE_FILE = path.join(__dirname, 'data', 'app-state.json');
+let smtpTransporter;
 
 function extractDbNameFromMongoUri(uri) {
   try {
@@ -73,7 +87,10 @@ function sendJson(res, statusCode, payload) {
     'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0'
   });
   res.end(body);
 }
@@ -84,6 +101,59 @@ function safeParseJSON(value) {
   } catch {
     return value;
   }
+}
+
+function normalizeEmailRecipients(value) {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (!Array.isArray(value)) {
+    return '';
+  }
+  const recipients = value
+    .filter((item) => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  return recipients.join(', ');
+}
+
+function getSmtpConfigErrors() {
+  const errors = [];
+  if (!SMTP_HOST) errors.push('SMTP_HOST');
+  if (!Number.isFinite(SMTP_PORT) || SMTP_PORT <= 0) errors.push('SMTP_PORT');
+  if (!SMTP_FROM) errors.push('SMTP_FROM');
+  if ((SMTP_USER && !SMTP_PASS) || (!SMTP_USER && SMTP_PASS)) {
+    errors.push('SMTP_USER and SMTP_PASS must both be set together');
+  }
+  return errors;
+}
+
+function getSmtpTransporter() {
+  if (!smtpTransporter) {
+    const transportConfig = {
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_SECURE,
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      ignoreTLS: SMTP_IGNORE_TLS,
+      requireTLS: SMTP_REQUIRE_TLS,
+      tls: {
+        rejectUnauthorized: SMTP_TLS_REJECT_UNAUTHORIZED
+      }
+    };
+
+    if (SMTP_USER && SMTP_PASS) {
+      transportConfig.auth = {
+        user: SMTP_USER,
+        pass: SMTP_PASS
+      };
+    }
+
+    smtpTransporter = nodemailer.createTransport(transportConfig);
+  }
+
+  return smtpTransporter;
 }
 
 function sanitizeIncomingState(input) {
@@ -252,13 +322,15 @@ async function readStateFromCollections() {
   return { state, updatedAt: latestUpdatedAt };
 }
 
-async function writeArrayState(collectionName, idField, rawValue, now) {
+async function writeArrayState(collectionName, idField, rawValue, now, destructive = false) {
   const collection = mongoDb.collection(collectionName);
   const parsed = safeParseJSON(rawValue);
   const items = Array.isArray(parsed) ? parsed : [];
 
   if (items.length === 0) {
-    await collection.deleteMany({});
+    if (destructive) {
+      await collection.deleteMany({});
+    }
     return;
   }
 
@@ -288,7 +360,9 @@ async function writeArrayState(collectionName, idField, rawValue, now) {
     await collection.bulkWrite(operations, { ordered: false });
   }
 
-  await collection.deleteMany({ _id: { $nin: ids } });
+  if (destructive) {
+    await collection.deleteMany({ _id: { $nin: ids } });
+  }
 }
 
 async function writeObjectState(collectionName, rawValue, now) {
@@ -366,7 +440,7 @@ async function writeSafetyPoolTransactionsMirror(rawValue, now) {
   await collection.deleteMany({ _id: { $nin: ids } });
 }
 
-async function writeStateToCollections(nextState) {
+async function writeStateToCollections(nextState, destructive = false) {
   const now = new Date().toISOString();
   const tasks = [];
 
@@ -385,7 +459,7 @@ async function writeStateToCollections(nextState) {
     }
 
     if (config.kind === 'array') {
-      tasks.push(writeArrayState(config.collection, config.idField, rawValue, now));
+      tasks.push(writeArrayState(config.collection, config.idField, rawValue, now, destructive));
     } else {
       tasks.push(writeObjectState(config.collection, rawValue, now));
       if (stateKey === SAFETY_POOL_STATE_KEY) {
@@ -660,6 +734,72 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/send-mail') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+
+      const to = normalizeEmailRecipients(parsed?.to);
+      const subject = typeof parsed?.subject === 'string' ? parsed.subject.trim() : '';
+      const text = typeof parsed?.text === 'string' ? parsed.text : '';
+      const html = typeof parsed?.html === 'string' ? parsed.html : '';
+      const from = typeof parsed?.from === 'string' && parsed.from.trim().length > 0 ? parsed.from.trim() : SMTP_FROM;
+
+      if (!to) {
+        sendJson(res, 400, { ok: false, error: 'Missing required field: to' });
+        return;
+      }
+      if (!subject) {
+        sendJson(res, 400, { ok: false, error: 'Missing required field: subject' });
+        return;
+      }
+      if (!text && !html) {
+        sendJson(res, 400, { ok: false, error: 'Provide at least one of: text or html' });
+        return;
+      }
+
+      const smtpErrors = getSmtpConfigErrors();
+      if (smtpErrors.length > 0) {
+        sendJson(res, 500, {
+          ok: false,
+          error: `SMTP is not configured. Missing/invalid env values: ${smtpErrors.join(', ')}`
+        });
+        return;
+      }
+
+      const info = await getSmtpTransporter().sendMail({
+        from,
+        to,
+        subject,
+        text: text || undefined,
+        html: html || undefined
+      });
+
+      sendJson(res, 200, {
+        ok: true,
+        messageId: info.messageId,
+        accepted: info.accepted,
+        rejected: info.rejected
+      });
+    } catch (error) {
+      const isJsonError = error instanceof SyntaxError;
+      const baseError = isJsonError
+        ? 'Invalid JSON request body'
+        : error instanceof Error
+          ? error.message
+          : 'Failed to send email';
+      const friendlyError =
+        typeof baseError === 'string' && baseError.toLowerCase().includes('greeting never received')
+          ? `${baseError}. Check SMTP host/port reachability or force plain SMTP with SMTP_SECURE=false, SMTP_PORT=25, SMTP_IGNORE_TLS=true.`
+          : baseError;
+      sendJson(res, isJsonError ? 400 : 500, {
+        ok: false,
+        error: friendlyError
+      });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/cleanup-for-rebuild') {
     try {
       // Clear only the heavy regenerable data - keep users, matrix, pins
@@ -739,6 +879,14 @@ async function start() {
     console.log(`MongoDB collections: ${Object.values(STATE_COLLECTIONS).map((c) => c.collection).join(', ')}`);
     console.log(`MongoDB derived collections: ${SAFETY_POOL_TRANSACTIONS_COLLECTION}`);
     console.log(`Legacy snapshot collection: ${MONGODB_LEGACY_SNAPSHOT_COLLECTION}`);
+    const smtpErrors = getSmtpConfigErrors();
+    if (smtpErrors.length === 0) {
+      console.log(
+        `SMTP ready: host=${SMTP_HOST} port=${SMTP_PORT} secure=${SMTP_SECURE} ignoreTLS=${SMTP_IGNORE_TLS} requireTLS=${SMTP_REQUIRE_TLS} from=${SMTP_FROM}`
+      );
+    } else {
+      console.log(`SMTP disabled: ${smtpErrors.join(', ')}`);
+    }
     if (process.env.MONGODB_DB && DB_FROM_URI && process.env.MONGODB_DB !== DB_FROM_URI) {
       console.warn(`Mongo DB mismatch: URI path is "${DB_FROM_URI}" but MONGODB_DB is "${process.env.MONGODB_DB}".`);
     }
