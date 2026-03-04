@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { promises as fs } from 'node:fs';
+import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -10,11 +10,20 @@ import nodemailer from 'nodemailer';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load backend env files first, then root env files as fallback.
-dotenv.config({ path: path.join(__dirname, '.env.local') });
-dotenv.config({ path: path.join(__dirname, '.env') });
-dotenv.config({ path: path.join(process.cwd(), '.env.local') });
-dotenv.config({ path: path.join(process.cwd(), '.env') });
+// Load exactly one env file to avoid silent overrides between environments.
+const NODE_ENV = String(process.env.NODE_ENV || 'development').toLowerCase();
+const ENV_FILE_CANDIDATES = NODE_ENV === 'production'
+  ? [path.join(__dirname, '.env')]
+  : NODE_ENV === 'test'
+    ? [path.join(__dirname, '.env.test'), path.join(__dirname, '.env')]
+    : [path.join(__dirname, '.env.local'), path.join(__dirname, '.env')];
+const ENV_FILE_PATH = ENV_FILE_CANDIDATES.find((candidate) => existsSync(candidate));
+
+if (ENV_FILE_PATH) {
+  dotenv.config({ path: ENV_FILE_PATH });
+} else {
+  dotenv.config();
+}
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -705,6 +714,12 @@ const server = createServer(async (req, res) => {
       const currentUsersCount = getStateArrayLength(currentSnapshot.state, 'mlm_users');
       const incomingUsersCount = getStateArrayLength(incomingState, 'mlm_users');
       const forceWrite = url.searchParams.get('force') === '1';
+      const destructiveWrite = url.searchParams.get('destructive') === '1';
+      const hasBaseUpdatedAt = Object.prototype.hasOwnProperty.call(parsed, 'baseUpdatedAt');
+      const baseUpdatedAt =
+        parsed?.baseUpdatedAt === null
+          ? null
+          : (typeof parsed?.baseUpdatedAt === 'string' ? parsed.baseUpdatedAt : undefined);
 
       if (!forceWrite && incomingUsersCount === 0 && (currentUsersCount || 0) > 0) {
         sendJson(res, 409, {
@@ -714,10 +729,19 @@ const server = createServer(async (req, res) => {
         return;
       }
 
+      if (!forceWrite && hasBaseUpdatedAt && baseUpdatedAt !== (currentSnapshot.updatedAt || null)) {
+        sendJson(res, 409, {
+          ok: false,
+          error: 'Snapshot version conflict. Re-hydrate from backend and retry.',
+          currentUpdatedAt: currentSnapshot.updatedAt || null
+        });
+        return;
+      }
+
       // Preserve existing keys when client sends partial state payload.
       const mergedState = { ...currentSnapshot.state, ...incomingState };
-      const saved = await writeStateToCollections(mergedState);
-      sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt });
+      const saved = await writeStateToCollections(mergedState, destructiveWrite);
+      sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt, destructive: destructiveWrite });
     } catch (error) {
       sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'Invalid request body' });
     }
@@ -874,6 +898,7 @@ async function start() {
 
   server.listen(PORT, HOST, () => {
     console.log(`Backend listening on http://${HOST}:${PORT}`);
+    console.log(`Environment: NODE_ENV=${NODE_ENV} envFile=${ENV_FILE_PATH ? path.basename(ENV_FILE_PATH) : 'process.env'}`);
     console.log(`MongoDB URI: ${MONGODB_URI}`);
     console.log(`MongoDB DB (${MONGODB_DB_SOURCE}): ${MONGODB_DB}`);
     console.log(`MongoDB collections: ${Object.values(STATE_COLLECTIONS).map((c) => c.collection).join(', ')}`);
