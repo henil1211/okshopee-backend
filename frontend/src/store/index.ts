@@ -1307,6 +1307,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     if (!Number.isFinite(quantity) || quantity < 1) {
       return { success: false, message: 'Quantity must be at least 1' };
     }
+    // Full-state sync can time out on very large batches in production.
+    // Keep batch size bounded to improve reliability on Render/hosted networks.
+    if (quantity > 100) {
+      return { success: false, message: 'Use maximum 100 IDs per batch for reliable backend sync' };
+    }
     if (!params.namePrefix?.trim()) {
       return { success: false, message: 'Name prefix is required' };
     }
