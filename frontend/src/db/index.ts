@@ -51,6 +51,20 @@ function generateOTP(length: number = 6): string {
   return Math.floor(Math.pow(10, length - 1) + Math.random() * 9 * Math.pow(10, length - 1)).toString();
 }
 
+let eventIdCounter = 0;
+function generateEventId(prefix: string, tag?: string): string {
+  eventIdCounter = (eventIdCounter + 1) % 1000000;
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const safeTag = String(tag || '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48);
+  return safeTag
+    ? `${prefix}_${ts}_${eventIdCounter}_${rand}_${safeTag}`
+    : `${prefix}_${ts}_${eventIdCounter}_${rand}`;
+}
+
 // Initialize default admin settings
 const defaultSettings: AdminSettings = {
   activationAmount: 11,
@@ -1744,11 +1758,31 @@ class Database {
     const useLockedIncome = !!options.useLockedIncome;
     let remaining = Math.max(0, amount);
     let totalTransferred = 0;
+    const giveTxByTarget = new Map<string, {
+      amount: number;
+      level: number;
+      description: string;
+      toUserId?: string;
+    }>();
 
     const recipientLevel = Math.min(
       helpDistributionTable.length,
       Math.max(1, Math.floor(level || 1))
     );
+
+    const queueGiveTx = (
+      key: string,
+      payload: { amount: number; level: number; description: string; toUserId?: string }
+    ) => {
+      if (payload.amount <= 0.0001) return;
+      const existing = giveTxByTarget.get(key);
+      if (existing) {
+        existing.amount += payload.amount;
+        giveTxByTarget.set(key, existing);
+        return;
+      }
+      giveTxByTarget.set(key, { ...payload });
+    };
 
     while (remaining > 0.0001) {
       const senderWallet = this.getWallet(userId);
@@ -1756,8 +1790,13 @@ class Database {
 
       const senderMatrixWallet = senderWallet.matrixWallet || 0;
       const senderLockedIncomeWallet = senderWallet.lockedIncomeWallet || 0;
+      const senderTracker = useLockedIncome ? this.getUserHelpTracker(userId) : null;
+      const senderLevelState = senderTracker
+        ? this.ensureLevelTrackerState(senderTracker, recipientLevel)
+        : null;
+      const senderLevelLockedAmount = senderLevelState?.lockedAmount || 0;
       const sourceAvailable = useLockedIncome
-        ? senderLockedIncomeWallet
+        ? Math.min(senderLockedIncomeWallet, senderLevelLockedAmount)
         : Math.min(senderWallet.incomeWallet, senderMatrixWallet);
       if (sourceAvailable <= 0.0001) break;
 
@@ -1779,16 +1818,10 @@ class Database {
           });
         }
 
-        this.createTransaction({
-          id: `tx_${Date.now()}_give_help_${level}`,
-          userId,
-          type: 'give_help',
-          amount: -safetyAmount,
+        queueGiveTx('safety_pool', {
+          amount: safetyAmount,
           level,
-          status: 'completed',
-          description: `${description} to safety pool`,
-          createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString()
+          description: `${description} to safety pool`
         });
         this.addToSafetyPool(safetyAmount, userId, `No qualified upline for level ${level}`);
         totalTransferred += safetyAmount;
@@ -1816,17 +1849,11 @@ class Database {
         });
       }
 
-      this.createTransaction({
-        id: `tx_${Date.now()}_give_help_${recipientLevel}`,
-        userId,
-        type: 'give_help',
-        amount: -transferAmount,
+      queueGiveTx(`recipient:${recipient.id}`, {
+        amount: transferAmount,
         toUserId: recipient.id,
         level: recipientLevel,
-        status: 'completed',
-        description: `${description} to ${recipient.fullName} (${recipient.userId})`,
-        createdAt: new Date().toISOString(),
-        completedAt: new Date().toISOString()
+        description: `${description} to ${recipient.fullName} (${recipient.userId})`
       });
 
       const recipientWallet = this.getWallet(recipient.id);
@@ -1849,7 +1876,7 @@ class Database {
         recipientState.lockedAmount += transferAmount;
 
         this.createTransaction({
-          id: `tx_${Date.now()}_upline_help_locked_first_two_${recipientLevel}`,
+          id: generateEventId('tx', `upline_help_locked_first_two_l${recipientLevel}`),
           userId: recipient.id,
           type: 'receive_help',
           amount: transferAmount,
@@ -1891,7 +1918,7 @@ class Database {
       } else if (receiveIndex % 5 === 0) {
         this.addToSafetyPool(transferAmount, recipient.id, `Every 5th help deduction at level ${recipientLevel}`);
         this.createTransaction({
-          id: `tx_${Date.now()}_upline_help_safety_${recipientLevel}`,
+          id: generateEventId('tx', `upline_help_safety_l${recipientLevel}`),
           userId: recipient.id,
           type: 'safety_pool',
           amount: -transferAmount,
@@ -1911,7 +1938,7 @@ class Database {
         recipientState.receivedAmount += transferAmount;
 
         this.createTransaction({
-          id: `tx_${Date.now()}_upline_help_${recipientLevel}`,
+          id: generateEventId('tx', `upline_help_l${recipientLevel}`),
           userId: recipient.id,
           type: 'receive_help',
           amount: transferAmount,
@@ -1929,7 +1956,7 @@ class Database {
         recipientState.lockedReceiveAmount += transferAmount;
 
         this.createTransaction({
-          id: `tx_${Date.now()}_upline_help_locked_${recipientLevel}`,
+          id: generateEventId('tx', `upline_help_locked_l${recipientLevel}`),
           userId: recipient.id,
           type: 'receive_help',
           amount: transferAmount,
@@ -1949,6 +1976,24 @@ class Database {
 
       totalTransferred += transferAmount;
       remaining -= transferAmount;
+    }
+
+    if (giveTxByTarget.size > 0) {
+      const nowIso = new Date().toISOString();
+      for (const tx of giveTxByTarget.values()) {
+        this.createTransaction({
+          id: generateEventId('tx', `give_help_l${tx.level}`),
+          userId,
+          type: 'give_help',
+          amount: -tx.amount,
+          toUserId: tx.toUserId,
+          level: tx.level,
+          status: 'completed',
+          description: tx.description,
+          createdAt: nowIso,
+          completedAt: nowIso
+        });
+      }
     }
 
     return totalTransferred;
@@ -2003,9 +2048,9 @@ class Database {
     return created;
   }
 
-  private static consumeLockedIncomeAcrossLevels(
+  private static consumeLockedIncomeAtLevel(
     tracker: UserHelpTracker,
-    preferredLevel: number,
+    level: number,
     amount: number
   ): {
     success: boolean;
@@ -2016,34 +2061,31 @@ class Database {
     let consumedFromLockedAmount = 0;
     let consumedFromLockedReceiveAmount = 0;
 
-    const levels = Object.keys(tracker.levels)
-      .map((k) => Number(k))
-      .filter((n) => Number.isInteger(n) && n >= 1 && n <= helpDistributionTable.length)
-      .sort((a, b) => a - b);
-    const ordered = [preferredLevel, ...levels.filter((l) => l !== preferredLevel)];
-
-    for (const level of ordered) {
-      if (remaining <= 0) break;
-      const key = String(level);
-      const state = tracker.levels[key];
-      if (!state) continue;
-
-      const takeLockedReceive = Math.min(state.lockedReceiveAmount || 0, remaining);
-      if (takeLockedReceive > 0) {
-        state.lockedReceiveAmount = Math.max(0, (state.lockedReceiveAmount || 0) - takeLockedReceive);
-        consumedFromLockedReceiveAmount += takeLockedReceive;
-        remaining -= takeLockedReceive;
-      }
-
-      const takeLockedFirstTwo = Math.min(state.lockedAmount || 0, remaining);
-      if (takeLockedFirstTwo > 0) {
-        state.lockedAmount = Math.max(0, (state.lockedAmount || 0) - takeLockedFirstTwo);
-        consumedFromLockedAmount += takeLockedFirstTwo;
-        remaining -= takeLockedFirstTwo;
-      }
-
-      tracker.levels[key] = state;
+    const key = String(level);
+    const state = tracker.levels[key];
+    if (!state) {
+      return {
+        success: false,
+        consumedFromLockedAmount,
+        consumedFromLockedReceiveAmount
+      };
     }
+
+    const takeLockedReceive = Math.min(state.lockedReceiveAmount || 0, remaining);
+    if (takeLockedReceive > 0) {
+      state.lockedReceiveAmount = Math.max(0, (state.lockedReceiveAmount || 0) - takeLockedReceive);
+      consumedFromLockedReceiveAmount += takeLockedReceive;
+      remaining -= takeLockedReceive;
+    }
+
+    const takeLockedFirstTwo = Math.min(state.lockedAmount || 0, remaining);
+    if (takeLockedFirstTwo > 0) {
+      state.lockedAmount = Math.max(0, (state.lockedAmount || 0) - takeLockedFirstTwo);
+      consumedFromLockedAmount += takeLockedFirstTwo;
+      remaining -= takeLockedFirstTwo;
+    }
+
+    tracker.levels[key] = state;
 
     return {
       success: remaining <= 0.0001,
@@ -2095,7 +2137,7 @@ class Database {
         return false;
       }
 
-      const consumed = this.consumeLockedIncomeAcrossLevels(fromTracker, level, amount);
+      const consumed = this.consumeLockedIncomeAtLevel(fromTracker, level, amount);
       if (!consumed.success) {
         return false;
       }
@@ -2112,7 +2154,7 @@ class Database {
       this.saveUserHelpTracker(fromTracker);
 
       this.createTransaction({
-        id: `tx_${Date.now()}_matrix_locked_give_${level}`,
+        id: generateEventId('tx', `matrix_locked_give_l${level}`),
         userId: fromUser.id,
         type: 'give_help',
         amount: -amount,
@@ -2142,7 +2184,7 @@ class Database {
       levelState.lockedAmount += amount;
 
       this.createTransaction({
-        id: `tx_${Date.now()}_receive_help_${level}`,
+        id: generateEventId('tx', `receive_help_l${level}`),
         userId: user.id,
         type: 'receive_help',
         amount,
@@ -2202,7 +2244,7 @@ class Database {
       // Every 5th receive-help event per level is diverted to safety pool.
       // Show a receive transaction first so user sees the help came in.
       this.createTransaction({
-        id: `tx_${Date.now()}_receive_help_5th_${level}`,
+        id: generateEventId('tx', `receive_help_5th_l${level}`),
         userId: user.id,
         type: 'receive_help',
         amount,
@@ -2216,7 +2258,7 @@ class Database {
       // Then deduct to safety pool.
       this.addToSafetyPool(amount, user.id, `Every 5th help deduction at level ${level}`);
       this.createTransaction({
-        id: `tx_${Date.now()}_level_safety_${level}`,
+        id: generateEventId('tx', `level_safety_l${level}`),
         userId: user.id,
         type: 'safety_pool',
         amount: -amount,
@@ -2236,7 +2278,7 @@ class Database {
       levelState.receivedAmount += amount;
 
       this.createTransaction({
-        id: `tx_${Date.now()}_receive_help_${level}`,
+        id: generateEventId('tx', `receive_help_l${level}`),
         userId: user.id,
         type: 'receive_help',
         amount,
@@ -2257,7 +2299,7 @@ class Database {
       levelState.lockedReceiveAmount += amount;
 
       this.createTransaction({
-        id: `tx_${Date.now()}_receive_help_locked_${level}`,
+        id: generateEventId('tx', `receive_help_locked_l${level}`),
         userId: user.id,
         type: 'receive_help',
         amount,
@@ -2449,7 +2491,7 @@ class Database {
       });
 
       this.createTransaction({
-        id: `tx_${Date.now()}_release_receive_${level}`,
+        id: generateEventId('tx', `release_receive_l${level}`),
         userId,
         type: 'receive_help',
         amount: releaseAmount,
@@ -2576,7 +2618,7 @@ class Database {
       if (this.hasActivationTransaction(member.id)) continue;
 
       this.createTransaction({
-        id: `tx_${Date.now()}_backfill_activation_${member.userId}`,
+        id: generateEventId('tx', `backfill_activation_${member.userId}`),
         userId: member.id,
         type: 'activation',
         amount: 11,
@@ -2596,7 +2638,7 @@ class Database {
             totalReceived: sponsorWallet.totalReceived + 5
           });
           this.createTransaction({
-            id: `tx_${Date.now()}_backfill_direct_${member.userId}`,
+            id: generateEventId('tx', `backfill_direct_${member.userId}`),
             userId: sponsor.id,
             type: 'direct_income',
             amount: 5,
@@ -3482,7 +3524,7 @@ class Database {
 
     // Create transaction record
     this.createTransaction({
-      id: `tx_${Date.now()}_pin_purchase`,
+      id: generateEventId('tx', 'pin_purchase'),
       userId: request.userId,
       type: 'pin_purchase',
       amount: -request.amount,
@@ -3542,7 +3584,7 @@ class Database {
       });
 
       this.createTransaction({
-        id: `tx_${Date.now()}_pin_relock`,
+        id: generateEventId('tx', 'pin_relock'),
         userId: request.userId,
         type: 'admin_debit',
         amount: -request.amount,
@@ -3966,7 +4008,7 @@ class Database {
     const pool = this.getSafetyPool();
     pool.totalAmount += amount;
     pool.transactions.push({
-      id: `sp_${Date.now()}`,
+      id: generateEventId('sp', reason),
       amount,
       fromUserId,
       reason,
@@ -4111,7 +4153,7 @@ class Database {
         });
 
         this.createTransaction({
-          id: `tx_${Date.now()}_deposit`,
+          id: generateEventId('tx', 'deposit'),
           userId: payments[index].userId,
           type: 'deposit',
           amount: payments[index].amount,
