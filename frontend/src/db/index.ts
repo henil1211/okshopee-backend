@@ -484,8 +484,8 @@ class Database {
     }
 
     const strict = !!options?.strict;
-    const timeoutMs = strict ? 8000 : 5000;
-    const maxAttempts = strict ? 2 : 1;
+    const timeoutMs = strict ? 20000 : 5000;
+    const maxAttempts = strict ? 3 : 1;
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -556,7 +556,7 @@ class Database {
       } catch (error) {
         lastError = error;
         if (attempt < maxAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
+          await new Promise((resolve) => setTimeout(resolve, strict ? 1000 : 300));
         }
       }
     }
@@ -4426,7 +4426,23 @@ class Database {
       };
     }
 
-    const normalizedAdmins = adminUsers.map((u) => ({
+    // Deduplicate admins by userId to prevent multiple cloned reserved admins
+    // (e.g. repeated 1000001 records from earlier sync conflicts).
+    const dedupedAdminMap = new Map<string, User>();
+    const adminUsersSorted = [...adminUsers].sort((a, b) => {
+      const aTime = new Date(a.createdAt || 0).getTime();
+      const bTime = new Date(b.createdAt || 0).getTime();
+      return bTime - aTime;
+    });
+    for (const admin of adminUsersSorted) {
+      const key = (admin.userId || '').trim() || admin.id;
+      if (!dedupedAdminMap.has(key)) {
+        dedupedAdminMap.set(key, admin);
+      }
+    }
+    const dedupedAdmins = Array.from(dedupedAdminMap.values());
+
+    const normalizedAdmins = dedupedAdmins.map((u) => ({
       ...u,
       isAdmin: true,
       isActive: true,
