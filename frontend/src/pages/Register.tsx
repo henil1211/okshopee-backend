@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
-import { useAuthStore } from '@/store';
+import { useAuthStore, useOtpStore } from '@/store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import Database from '@/db';
 import PublicFooter from '@/components/PublicFooter';
+import { isValidPhoneNumber, normalizePhoneNumber } from '@/utils/helpers';
 
 export default function Register() {
   const navigate = useNavigate();
@@ -20,6 +21,7 @@ export default function Register() {
   const sponsorParam = searchParams.get('sponsor');
   
   const { register } = useAuthStore();
+  const { sendOtp, verifyOtp } = useOtpStore();
   const [formData, setFormData] = useState({
     fullName: '',
     email: '',
@@ -45,6 +47,11 @@ export default function Register() {
   const [registeredTransactionPassword, setRegisteredTransactionPassword] = useState('');
   const [step, setStep] = useState(1);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [otpCode, setOtpCode] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const [otpVerified, setOtpVerified] = useState(false);
+  const [isSendingOtp, setIsSendingOtp] = useState(false);
+  const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
 
   // Check sponsor ID when entered
   const handleSponsorIdChange = (value: string) => {
@@ -84,6 +91,69 @@ export default function Register() {
     }
   };
 
+  const resetOtpFlow = () => {
+    setOtpCode('');
+    setOtpSent(false);
+    setOtpVerified(false);
+    setIsSendingOtp(false);
+    setIsVerifyingOtp(false);
+  };
+
+  const handleEmailChange = (value: string) => {
+    setFormData((prev) => ({ ...prev, email: value }));
+    resetOtpFlow();
+  };
+
+  const handlePhoneChange = (value: string) => {
+    setFormData((prev) => ({ ...prev, phone: value }));
+    resetOtpFlow();
+  };
+
+  const getRegistrationOtpKey = () => `register_${formData.email.trim().toLowerCase()}`;
+
+  const handleSendOtp = async () => {
+    setError('');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
+      setError('Enter a valid email before sending OTP');
+      return;
+    }
+    if (!isValidPhoneNumber(formData.phone)) {
+      setError('Enter a valid mobile number before sending OTP');
+      return;
+    }
+
+    setIsSendingOtp(true);
+    const result = await sendOtp(getRegistrationOtpKey(), formData.email.trim(), 'registration');
+    setIsSendingOtp(false);
+
+    if (!result.success) {
+      setError(result.message);
+      return;
+    }
+
+    setOtpSent(true);
+    setOtpVerified(false);
+  };
+
+  const handleVerifyOtpCode = async () => {
+    setError('');
+    if (otpCode.trim().length !== 6) {
+      setError('Please enter a valid 6-digit OTP');
+      return;
+    }
+
+    setIsVerifyingOtp(true);
+    const valid = await verifyOtp(getRegistrationOtpKey(), otpCode.trim(), 'registration');
+    setIsVerifyingOtp(false);
+
+    if (!valid) {
+      setError('Invalid or expired OTP');
+      return;
+    }
+
+    setOtpVerified(true);
+  };
+
   const validateStep1 = () => {
     if (!formData.fullName.trim()) return 'Full name is required';
     if (!formData.email.trim()) return 'Email is required';
@@ -111,7 +181,9 @@ export default function Register() {
     if (formData.transactionPassword !== formData.confirmTransactionPassword) return 'Transaction passwords do not match';
     if (formData.transactionPassword === formData.password) return 'Transaction password should be different from login password';
     if (!formData.phone.trim()) return 'Phone number is required';
+    if (!isValidPhoneNumber(formData.phone)) return 'Enter a valid mobile number (8-15 digits)';
     if (!formData.country.trim()) return 'Country is required';
+    if (!otpVerified) return 'Verify OTP sent to your email before creating account';
     return '';
   };
 
@@ -154,7 +226,7 @@ export default function Register() {
         email: formData.email,
         password: formData.password,
         transactionPassword: formData.transactionPassword,
-        phone: formData.phone,
+        phone: normalizePhoneNumber(formData.phone),
         country: formData.country,
         sponsorId: formData.sponsorId || undefined,
         pinCode: formData.pinCode
@@ -275,6 +347,7 @@ export default function Register() {
                       sponsorId: '',
                       pinCode: ''
                     });
+                    resetOtpFlow();
                     setStep(1);
                   }}
                   className="w-full border-white/20 text-white hover:bg-white/10"
@@ -364,7 +437,7 @@ export default function Register() {
                         type="email"
                         placeholder="john@example.com"
                         value={formData.email}
-                        onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                        onChange={(e) => handleEmailChange(e.target.value)}
                         className="pl-10 bg-[#1f2937] border-white/10 text-white placeholder:text-white/40 focus:border-[#118bdd] focus:ring-[#118bdd]/20"
                       />
                     </div>
@@ -563,7 +636,7 @@ export default function Register() {
                         type="tel"
                         placeholder="+1 234 567 8900"
                         value={formData.phone}
-                        onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                        onChange={(e) => handlePhoneChange(e.target.value)}
                         className="pl-10 bg-[#1f2937] border-white/10 text-white placeholder:text-white/40 focus:border-[#118bdd] focus:ring-[#118bdd]/20"
                       />
                     </div>
@@ -589,6 +662,61 @@ export default function Register() {
                     </div>
                   </div>
 
+                  <div className="space-y-3 rounded-lg border border-white/10 bg-[#1f2937]/50 p-3">
+                    <Label className="text-white/80">Email OTP Verification</Label>
+                    <p className="text-xs text-white/50">
+                      Verify using OTP sent to <span className="text-white/70">{formData.email || 'your email'}</span>
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <Button
+                        type="button"
+                        onClick={handleSendOtp}
+                        disabled={isSendingOtp}
+                        className="w-full sm:w-auto btn-primary"
+                      >
+                        {isSendingOtp ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Sending...
+                          </>
+                        ) : otpSent ? 'Resend OTP' : 'Send OTP'}
+                      </Button>
+                      {otpVerified && (
+                        <span className="inline-flex items-center text-emerald-400 text-sm">
+                          <CheckCircle className="w-4 h-4 mr-1" />
+                          OTP Verified
+                        </span>
+                      )}
+                    </div>
+                    {otpSent && !otpVerified && (
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <Input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={otpCode}
+                          onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="Enter 6-digit OTP"
+                          className="bg-[#1f2937] border-white/10 text-white"
+                        />
+                        <Button
+                          type="button"
+                          onClick={handleVerifyOtpCode}
+                          disabled={isVerifyingOtp}
+                          variant="outline"
+                          className="border-white/20 text-white hover:bg-white/10"
+                        >
+                          {isVerifyingOtp ? (
+                            <>
+                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                              Verifying...
+                            </>
+                          ) : 'Verify OTP'}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="flex items-center gap-2 text-sm">
                     <input type="checkbox" required className="rounded border-white/20 bg-[#1f2937]" />
                     <span className="text-white/60">
@@ -608,7 +736,7 @@ export default function Register() {
                     </Button>
                     <Button
                       type="submit"
-                      disabled={isLoading}
+                      disabled={isLoading || !otpVerified}
                       className="flex-1 btn-primary h-11"
                     >
                       {isLoading ? (

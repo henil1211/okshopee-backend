@@ -277,6 +277,12 @@ export default function Matrix() {
           </Card>
           <Card className="glass border-white/10">
             <CardContent className="p-4">
+              <p className="text-sm text-white/60 mb-1">Current Level</p>
+              <p className="text-2xl font-bold text-white">{Database.getCurrentMatrixLevel(user.id)}</p>
+            </CardContent>
+          </Card>
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
               <p className="text-sm text-white/60 mb-1">Left Team</p>
               <p className="text-2xl font-bold text-white">{teamStats.left}</p>
               <p className="text-xs text-emerald-400">{teamStats.leftActive} Active</p>
@@ -287,12 +293,6 @@ export default function Matrix() {
               <p className="text-sm text-white/60 mb-1">Right Team</p>
               <p className="text-2xl font-bold text-white">{teamStats.right}</p>
               <p className="text-xs text-emerald-400">{teamStats.rightActive} Active</p>
-            </CardContent>
-          </Card>
-          <Card className="glass border-white/10">
-            <CardContent className="p-4">
-              <p className="text-sm text-white/60 mb-1">Current Level</p>
-              <p className="text-2xl font-bold text-white">{Database.getCurrentMatrixLevel(user.id)}</p>
             </CardContent>
           </Card>
         </div>

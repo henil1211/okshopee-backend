@@ -43,6 +43,27 @@ export function formatDate(dateInput: unknown): string {
   }).format(date);
 }
 
+// Normalize phone number by keeping digits and optional leading +
+export function normalizePhoneNumber(phoneInput: string): string {
+  const trimmed = phoneInput.trim();
+  if (!trimmed) return '';
+  const hasPlus = trimmed.startsWith('+');
+  const digitsOnly = trimmed.replace(/\D/g, '');
+  if (!digitsOnly) return '';
+  return hasPlus ? `+${digitsOnly}` : digitsOnly;
+}
+
+// Basic phone validation: allows E.164 (+XXXXXXXX) or 8-15 local/international digits
+export function isValidPhoneNumber(phoneInput: string): boolean {
+  const normalized = normalizePhoneNumber(phoneInput);
+  if (!normalized) return false;
+  const e164Like = /^\+[1-9]\d{7,14}$/;
+  const digitsOnly = /^\d{8,15}$/;
+  const numeric = normalized.startsWith('+') ? normalized.slice(1) : normalized;
+  if (/^(\d)\1+$/.test(numeric)) return false;
+  return e164Like.test(normalized) || digitsOnly.test(normalized);
+}
+
 // Format relative time
 export function formatRelativeTime(dateInput: unknown): string {
   const date = parseValidDate(dateInput);
@@ -229,10 +250,13 @@ export function getLevelName(level: number): string {
 export function getTransactionTypeColor(type: string): string {
   const colors: Record<string, string> = {
     activation: 'bg-blue-500',
+    income_transfer: 'bg-indigo-500',
+    pin_used: 'bg-blue-500',
     direct_income: 'bg-green-500',
     level_income: 'bg-emerald-500',
     give_help: 'bg-orange-500',
     get_help: 'bg-purple-500',
+    receive_help: 'bg-purple-500',
     p2p_transfer: 'bg-cyan-500',
     withdrawal: 'bg-red-500',
     reentry: 'bg-amber-500',
@@ -245,16 +269,46 @@ export function getTransactionTypeColor(type: string): string {
 export function getTransactionTypeIcon(type: string): string {
   const icons: Record<string, string> = {
     activation: 'Zap',
+    income_transfer: 'ArrowRightLeft',
+    pin_used: 'Zap',
     direct_income: 'UserPlus',
     level_income: 'TrendingUp',
     give_help: 'ArrowUpRight',
     get_help: 'ArrowDownLeft',
+    receive_help: 'ArrowDownLeft',
     p2p_transfer: 'Repeat',
     withdrawal: 'Wallet',
     reentry: 'RefreshCw',
     safety_pool: 'Shield'
   };
   return icons[type] || 'Circle';
+}
+
+// Get transaction type display label
+export function getTransactionTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    activation: 'Activation',
+    income_transfer: 'Income Transfer',
+    pin_used: 'Activation',
+    direct_income: 'Direct Income',
+    level_income: 'Level Income',
+    give_help: 'Give Help',
+    get_help: 'Receive Help',
+    receive_help: 'Receive Help',
+    p2p_transfer: 'P2P Transfer',
+    withdrawal: 'Withdrawal',
+    reentry: 'Reentry',
+    safety_pool: 'Safety Pool',
+    admin_credit: 'Admin Credit',
+    admin_debit: 'Admin Debit'
+  };
+
+  if (labels[type]) return labels[type];
+
+  return type
+    .split('_')
+    .map(word => (word ? word[0].toUpperCase() + word.slice(1) : word))
+    .join(' ');
 }
 
 // Calculate matrix position
@@ -338,3 +392,4 @@ export function camelToTitle(str: string): string {
     .replace(/^./, str => str.toUpperCase())
     .trim();
 }
+

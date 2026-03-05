@@ -1,4 +1,4 @@
-import { useMemo, type ComponentType } from 'react';
+import { useEffect, useMemo, type ComponentType } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { LayoutGrid, Network, Wallet, Ticket, ReceiptText, UserRound, Shield, ShoppingBag } from 'lucide-react';
 
@@ -35,6 +35,14 @@ export default function MobileBottomNav() {
     return base;
   }, [canSeeAdmin]);
 
+  // Auto-scroll active item into view
+  useEffect(() => {
+    const activeItem = document.querySelector('.mobile-nav-item.is-active');
+    if (activeItem) {
+      activeItem.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    }
+  }, [pathname]);
+
   if (!user) return null;
 
   return (
@@ -49,11 +57,10 @@ export default function MobileBottomNav() {
               key={item.to}
               type="button"
               onClick={() => navigate(item.to)}
-              className={`mobile-nav-item flex min-w-[74px] flex-1 flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 text-[11px] font-medium transition-all ${
-                isActive
-                  ? 'bg-[#dbeeff] text-[#0b1736] shadow-[inset_0_0_0_1px_rgba(17,139,221,0.35)] dark:bg-[#118bdd]/20 dark:text-white dark:shadow-[inset_0_0_0_1px_rgba(56,189,245,0.5)]'
-                  : 'text-slate-600 hover:bg-slate-100 dark:text-white/65 dark:hover:bg-white/5'
-              }`}
+              className={`mobile-nav-item flex min-w-[74px] flex-1 flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 text-[11px] font-medium transition-all ${isActive
+                ? 'is-active bg-[#dbeeff] text-[#0b1736] shadow-[inset_0_0_0_1px_rgba(17,139,221,0.35)] dark:bg-[#118bdd]/20 dark:text-white dark:shadow-[inset_0_0_0_1px_rgba(56,189,245,0.5)]'
+                : 'text-slate-600 hover:bg-slate-100 dark:text-white/65 dark:hover:bg-white/5'
+                }`}
             >
               <Icon className={`h-4 w-4 ${isActive ? 'text-[#0a6fbe] dark:text-[#7dd3fc]' : 'text-slate-500 dark:text-white/70'}`} />
               <span className="leading-none">{item.label}</span>

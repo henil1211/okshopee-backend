@@ -1,10 +1,17 @@
-Place your official logo image file here as:
+ReferNex logo assets used by the app:
 
-brand-logo.png
+- refernex-full-dark.png
+- refernex-full-light.png
+- refernex-icon-dark.png
+- refernex-icon-light.png
+- refernex-full-dark.svg
+- refernex-full-light.svg
+- refernex-icon-dark.svg
+- refernex-icon-light.svg
 
-Recommended:
-- Square image (1024x1024 or 512x512)
-- Transparent background PNG for best results
-
-The app is already wired to use /brand-logo.png everywhere.
-If brand-logo.png is missing, it falls back to /brand-logo.svg automatically.
+Usage rules:
+- PNG files are used first.
+- SVG files are fallback if PNG fails to load.
+- full logo files are used where icon + ReferNex text is needed.
+- icon logo files are used where only the icon mark is needed (including favicon).
+- The BrandLogo component auto-selects dark/light asset based on current theme.

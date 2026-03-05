@@ -4,12 +4,15 @@ import { defineConfig } from "vite"
 import { inspectAttr } from 'kimi-plugin-inspect-react'
 
 // https://vite.dev/config/
+const srcDir = path.resolve(__dirname, "./src").replace(/\\/g, "/")
+
 export default defineConfig({
   base: '/',
   plugins: [inspectAttr(), react()],
   resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
+    alias: [
+      { find: /^@\//, replacement: `${srcDir}/` },
+      { find: "@", replacement: srcDir },
+    ],
   },
 });

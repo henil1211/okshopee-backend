@@ -34,16 +34,32 @@ export interface User {
   emailVerified: boolean;
   // Offer achievements tracking
   achievements: UserAchievements;
+  lastActions?: {
+    email?: string;
+    phone?: string;
+    usdtAddress?: string;
+    loginPassword?: string;
+    transactionPassword?: string;
+  };
 }
 
 // User Achievements for Tours
 export interface UserAchievements {
-  nationalTour: boolean;      // Level 3 completion
-  internationalTour: boolean; // Level 4 completion
-  familyTour: boolean;        // Level 5 completion
+  silverCoin?: boolean;
+  silverCoinDate?: string;
+  smartWatch?: boolean;
+  smartWatchDate?: string;
+  nationalTour?: boolean;
   nationalTourDate?: string;
+  internationalTour?: boolean;
   internationalTourDate?: string;
+  familyTour?: boolean;
   familyTourDate?: string;
+  car?: boolean;
+  carDate?: string;
+  house?: boolean;
+  houseDate?: string;
+  [key: string]: any;
 }
 
 // PIN Types
@@ -94,13 +110,10 @@ export interface Wallet {
   userId: string;
   // Three main wallets
   depositWallet: number;    // For deposits and withdrawals
-  pinWallet: number;        // For PIN purchases (tracks PIN value)
+  pinWallet: number;        // Tracks current unused PIN count
   incomeWallet: number;     // For earnings and income
   matrixWallet: number;     // Matrix-earned balance used for matrix give-help
   lockedIncomeWallet: number; // Unqualified level income locked until direct-referral requirement is met
-  // Legacy fields (kept for compatibility)
-  fundWallet: number;
-  getHelpWallet: number;
   giveHelpLocked: number;
   totalReceived: number;
   totalGiven: number;
@@ -109,10 +122,11 @@ export interface Wallet {
 // Transaction Types - Updated
 export type TransactionType =
   | 'activation'
+  | 'income_transfer'
   | 'direct_income'
   | 'level_income'
   | 'give_help'
-  | 'get_help'
+  | 'receive_help'
   | 'p2p_transfer'
   | 'withdrawal'
   | 'reentry'
@@ -175,12 +189,12 @@ export interface HelpDistribution {
   level: number;
   users: number;
   perUserHelp: number;
-  totalGetHelp: number;
+  totalReceiveHelp: number;
   giveHelp: number;
   netBalance: number;
   directRequired: number;
   // New fields for qualification
-  qualifiedGetHelp: number;    // Amount for qualified users
+  qualifiedReceiveHelp: number;    // Amount for qualified users
   unqualifiedCarryForward: number; // Amount carried forward for unqualified
 }
 
@@ -225,6 +239,14 @@ export interface DashboardStats {
   activeUsers: number;
   totalHelpDistributed: number;
   totalInSafetyPool: number;
+  totalDeposits: number;
+  totalWithdrawals: number;
+  totalLockedIncome: number;
+  totalPinsSold: number;
+  totalPinSoldAmount: number;
+  totalIncomeWalletBalance: number;
+  totalFundWalletBalance: number;
+  balanceAmountRemaining: number;
   averageEarnings: number;
   topEarners: TopEarner[];
 }
@@ -398,7 +420,7 @@ export interface UserLevelProgress {
   requiredDirect: number;
   completedDirect: number;
   remainingDirect: number;
-  totalGetHelpAtLevel: number;
+  totalReceiveHelpAtLevel: number;
   giveHelpAtLevel: number;
   netBalanceAtLevel: number;
   isQualified: boolean;
@@ -419,10 +441,14 @@ export interface LevelWiseReport {
   level: number;
   userId: string;
   fullName: string;
-  sponsorId: string;
-  getHelpAmount: number;
+  receiveHelpAmount: number;
   giveHelpAmount: number;
   netAmount: number;
+  directReferralIncome?: number;
+  incomeWallet?: number;
+  totalEarning?: number;
+  lockedHelp?: number;
+  qualifiedLevel?: number;
   isQualified: boolean;
   directCount: number;
   date: string;
@@ -447,6 +473,60 @@ export interface PinPurchaseRequest {
   pinsGenerated?: string[]; // List of PIN codes generated
 }
 
+export type SupportTicketStatus =
+  | 'open'
+  | 'in_progress'
+  | 'awaiting_user_response'
+  | 'resolved'
+  | 'closed';
+
+export type SupportTicketPriority = 'low' | 'medium' | 'high';
+
+export type SupportTicketCategory =
+  | 'account_issues'
+  | 'deposit_payment_issues'
+  | 'withdrawal_issues'
+  | 'referral_matrix_issues'
+  | 'technical_issues';
+
+export interface SupportTicketAttachment {
+  id: string;
+  file_name: string;
+  file_type: string;
+  file_size: number;
+  data_url: string;
+  uploaded_by: string;
+  uploaded_at: string;
+  message_id?: string;
+}
+
+export interface SupportTicketMessage {
+  id: string;
+  sender_type: 'user' | 'admin';
+  sender_user_id: string;
+  sender_name: string;
+  message: string;
+  attachments: SupportTicketAttachment[];
+  created_at: string;
+}
+
+// Ticket schema uses snake_case keys so backend collections stay consistent.
+export interface SupportTicket {
+  ticket_id: string;
+  user_id: string;
+  category: SupportTicketCategory;
+  subject: string;
+  priority: SupportTicketPriority;
+  status: SupportTicketStatus;
+  messages: SupportTicketMessage[];
+  attachments: SupportTicketAttachment[];
+  created_at: string;
+  updated_at: string;
+  admin_reply: string;
+  name: string;
+  email: string;
+}
+
 // Admin Impersonation Session
 export interface ImpersonationSession {
   adminId: string;
@@ -456,3 +536,5 @@ export interface ImpersonationSession {
   startedAt: string;
   isActive: boolean;
 }
+
+

@@ -2,7 +2,9 @@ import type {
   User, Wallet, Transaction, MatrixNode, SafetyPoolTransaction,
   GracePeriod, Notification, AdminSettings, PaymentMethod, Payment,
   Pin, PinTransfer, OtpRecord, PinPurchaseRequest, EmailLog,
-  ImpersonationSession
+  ImpersonationSession, SupportTicket, SupportTicketAttachment,
+  SupportTicketCategory, SupportTicketMessage, SupportTicketPriority,
+  SupportTicketStatus
 } from '@/types';
 
 // Database Keys
@@ -27,6 +29,7 @@ const DB_KEYS = {
   OTP_RECORDS: 'mlm_otp_records',
   EMAIL_LOGS: 'mlm_email_logs',
   IMPERSONATION: 'mlm_impersonation',
+  SUPPORT_TICKETS: 'mlm_support_tickets',
   HELP_TRACKERS: 'mlm_help_trackers',
   MATRIX_PENDING_CONTRIBUTIONS: 'mlm_matrix_pending_contributions'
 };
@@ -116,6 +119,24 @@ const defaultPaymentMethods: PaymentMethod[] = [
     processingTime: 'Within 24 hours'
   }
 ];
+
+const SUPPORT_TICKET_CATEGORIES: SupportTicketCategory[] = [
+  'account_issues',
+  'deposit_payment_issues',
+  'withdrawal_issues',
+  'referral_matrix_issues',
+  'technical_issues'
+];
+
+const SUPPORT_TICKET_STATUSES: SupportTicketStatus[] = [
+  'open',
+  'in_progress',
+  'awaiting_user_response',
+  'resolved',
+  'closed'
+];
+
+const SUPPORT_TICKET_PRIORITIES: SupportTicketPriority[] = ['low', 'medium', 'high'];
 
 interface LockedGiveHelpItem {
   id: string;
@@ -520,11 +541,28 @@ class Database {
     }
 
     const strict = !!options?.strict;
-    const timeoutMs = strict ? 20000 : 5000;
     const maxAttempts = strict ? 3 : 1;
     let lastError: unknown = null;
 
+    // Pre-warm: send a lightweight health ping to wake up the backend (Render cold starts)
+    if (strict) {
+      try {
+        const warmUrl = `${this.REMOTE_SYNC_BASE_URL}/api/health?t=${Date.now()}`;
+        const warmCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const warmTimeout = setTimeout(() => warmCtrl?.abort(), 60000);
+        try {
+          await fetch(warmUrl, { method: 'GET', signal: warmCtrl?.signal });
+        } finally {
+          clearTimeout(warmTimeout);
+        }
+      } catch {
+        // Health ping failed — the main fetch will also retry, so continue
+      }
+    }
+
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      // First attempt gets 60s for Render cold starts; retries get 30s
+      const timeoutMs = strict ? (attempt === 1 ? 60000 : 30000) : 5000;
       try {
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         const timeout = setTimeout(() => controller?.abort(), timeoutMs);
@@ -593,7 +631,7 @@ class Database {
       } catch (error) {
         lastError = error;
         if (attempt < maxAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, strict ? 1000 : 300));
+          await new Promise((resolve) => setTimeout(resolve, strict ? 3000 : 300));
         }
       }
     }
@@ -1620,7 +1658,7 @@ class Database {
         );
       }
       if (lockedFirstTwoAmount > 0) {
-        reasons.push(`Locked because first two helps at this level are reserved for auto give-help settlement.`);
+        reasons.push(`Locked because first two received helps at this level are reserved for auto give-help settlement.`);
       }
 
       rows.push({
@@ -3653,6 +3691,258 @@ class Database {
     });
   }
 
+  // ==================== SUPPORT TICKETS ====================
+  private static generateSupportTicketId(): string {
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const rand = Math.floor(1000 + Math.random() * 9000);
+    return `TKT-${stamp}-${rand}`;
+  }
+
+  private static normalizeSupportCategory(value: unknown): SupportTicketCategory {
+    const candidate = String(value || '').trim().toLowerCase() as SupportTicketCategory;
+    return SUPPORT_TICKET_CATEGORIES.includes(candidate) ? candidate : 'technical_issues';
+  }
+
+  private static normalizeSupportStatus(value: unknown): SupportTicketStatus {
+    const candidate = String(value || '').trim().toLowerCase() as SupportTicketStatus;
+    return SUPPORT_TICKET_STATUSES.includes(candidate) ? candidate : 'open';
+  }
+
+  private static normalizeSupportPriority(value: unknown): SupportTicketPriority {
+    const candidate = String(value || '').trim().toLowerCase() as SupportTicketPriority;
+    return SUPPORT_TICKET_PRIORITIES.includes(candidate) ? candidate : 'medium';
+  }
+
+  private static normalizeSupportAttachment(
+    raw: any,
+    fallbackUploadedBy: string,
+    messageId?: string
+  ): SupportTicketAttachment {
+    return {
+      id: String(raw?.id || generateEventId('att', 'support')),
+      file_name: String(raw?.file_name || raw?.fileName || 'attachment'),
+      file_type: String(raw?.file_type || raw?.fileType || ''),
+      file_size: Number(raw?.file_size ?? raw?.fileSize ?? 0) || 0,
+      data_url: String(raw?.data_url || raw?.dataUrl || ''),
+      uploaded_by: String(raw?.uploaded_by || raw?.uploadedBy || fallbackUploadedBy || ''),
+      uploaded_at: String(raw?.uploaded_at || raw?.uploadedAt || new Date().toISOString()),
+      message_id: String(raw?.message_id || raw?.messageId || messageId || '')
+    };
+  }
+
+  private static normalizeSupportMessage(raw: any, fallbackUserId: string): SupportTicketMessage {
+    const senderType: 'user' | 'admin' = raw?.sender_type === 'admin' ? 'admin' : 'user';
+    const messageId = String(raw?.id || generateEventId('msg', `support_${senderType}`));
+    const rawAttachments = Array.isArray(raw?.attachments) ? raw.attachments : [];
+    return {
+      id: messageId,
+      sender_type: senderType,
+      sender_user_id: String(raw?.sender_user_id || raw?.senderUserId || fallbackUserId || ''),
+      sender_name: String(raw?.sender_name || raw?.senderName || (senderType === 'admin' ? 'Admin' : 'User')),
+      message: String(raw?.message || ''),
+      attachments: rawAttachments
+        .map((item: any) => this.normalizeSupportAttachment(item, fallbackUserId, messageId))
+        .filter((item: SupportTicketAttachment) => item.data_url),
+      created_at: String(raw?.created_at || raw?.createdAt || new Date().toISOString())
+    };
+  }
+
+  static getSupportTickets(): SupportTicket[] {
+    const rawTickets = this.getCached<any[]>(DB_KEYS.SUPPORT_TICKETS, []);
+    if (!Array.isArray(rawTickets)) return [];
+
+    const normalized = rawTickets.map((ticket, index) => {
+      const fallbackUserId = String(ticket?.user_id || ticket?.userId || '');
+      const messagesRaw = Array.isArray(ticket?.messages) ? ticket.messages : [];
+      const messages: SupportTicketMessage[] = messagesRaw.map((msg: any) => this.normalizeSupportMessage(msg, fallbackUserId));
+
+      const topLevelAttachmentsRaw = Array.isArray(ticket?.attachments) ? ticket.attachments : [];
+      const topLevelAttachments = topLevelAttachmentsRaw
+        .map((item: any) => this.normalizeSupportAttachment(item, fallbackUserId))
+        .filter((item: SupportTicketAttachment) => item.data_url);
+
+      const messageAttachments = messages.flatMap((msg: SupportTicketMessage) => msg.attachments);
+      const attachmentsById = new Map<string, SupportTicketAttachment>();
+      [...topLevelAttachments, ...messageAttachments].forEach((attachment) => {
+        if (attachment.data_url) attachmentsById.set(attachment.id, attachment);
+      });
+
+      const lastAdminMessage = [...messages].reverse().find((msg: SupportTicketMessage) => msg.sender_type === 'admin');
+
+      return {
+        ticket_id: String(ticket?.ticket_id || ticket?.ticketId || `TKT-LEGACY-${index + 1}`),
+        user_id: fallbackUserId,
+        category: this.normalizeSupportCategory(ticket?.category),
+        subject: String(ticket?.subject || ''),
+        priority: this.normalizeSupportPriority(ticket?.priority),
+        status: this.normalizeSupportStatus(ticket?.status),
+        messages,
+        attachments: Array.from(attachmentsById.values()),
+        created_at: String(ticket?.created_at || ticket?.createdAt || new Date().toISOString()),
+        updated_at: String(ticket?.updated_at || ticket?.updatedAt || new Date().toISOString()),
+        admin_reply: String(ticket?.admin_reply || ticket?.adminReply || lastAdminMessage?.message || ''),
+        name: String(ticket?.name || ''),
+        email: String(ticket?.email || '')
+      } as SupportTicket;
+    });
+
+    return normalized.sort(
+      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+    );
+  }
+
+  static saveSupportTickets(tickets: SupportTicket[]): void {
+    this.setCached(DB_KEYS.SUPPORT_TICKETS, tickets);
+  }
+
+  static getSupportTicketById(ticketId: string): SupportTicket | null {
+    return this.getSupportTickets().find((ticket) => ticket.ticket_id === ticketId) || null;
+  }
+
+  static getUserSupportTickets(userIdOrUserCode: string): SupportTicket[] {
+    const userByInternalId = this.getUserById(userIdOrUserCode);
+    const userByCode = this.getUserByUserId(userIdOrUserCode);
+    const userCode = userByInternalId?.userId || userByCode?.userId || userIdOrUserCode;
+    return this.getSupportTickets().filter((ticket) => ticket.user_id === userCode);
+  }
+
+  static createSupportTicket(params: {
+    user_id: string;
+    name: string;
+    email: string;
+    category: SupportTicketCategory;
+    subject: string;
+    message: string;
+    priority: SupportTicketPriority;
+    attachments?: SupportTicketAttachment[];
+  }): SupportTicket {
+    const now = new Date().toISOString();
+    const ticket_id = this.generateSupportTicketId();
+    const messageId = generateEventId('msg', 'support_user');
+
+    const attachments = (params.attachments || [])
+      .map((attachment) => this.normalizeSupportAttachment(attachment, params.user_id, messageId))
+      .filter((attachment) => attachment.data_url);
+
+    const initialMessage: SupportTicketMessage = {
+      id: messageId,
+      sender_type: 'user',
+      sender_user_id: params.user_id,
+      sender_name: params.name || params.user_id,
+      message: String(params.message || '').trim(),
+      attachments,
+      created_at: now
+    };
+
+    const ticket: SupportTicket = {
+      ticket_id,
+      user_id: params.user_id,
+      category: this.normalizeSupportCategory(params.category),
+      subject: String(params.subject || '').trim(),
+      priority: this.normalizeSupportPriority(params.priority),
+      status: 'open',
+      messages: [initialMessage],
+      attachments,
+      created_at: now,
+      updated_at: now,
+      admin_reply: '',
+      name: String(params.name || '').trim(),
+      email: String(params.email || '').trim()
+    };
+
+    const tickets = this.getSupportTickets();
+    tickets.unshift(ticket);
+    this.saveSupportTickets(tickets);
+
+    const admins = this.getUsers().filter((member) => member.isAdmin);
+    admins.forEach((admin) => {
+      this.createNotification({
+        id: generateEventId('notif', 'support_ticket'),
+        userId: admin.id,
+        title: 'New Support Ticket',
+        message: `Ticket ${ticket.ticket_id} submitted by ${ticket.user_id}: ${ticket.subject}`,
+        type: 'info',
+        isRead: false,
+        createdAt: now
+      });
+    });
+
+    return ticket;
+  }
+
+  static addSupportTicketMessage(params: {
+    ticket_id: string;
+    sender_type: 'user' | 'admin';
+    sender_user_id: string;
+    sender_name: string;
+    message: string;
+    attachments?: SupportTicketAttachment[];
+  }): SupportTicket | null {
+    const tickets = this.getSupportTickets();
+    const index = tickets.findIndex((item) => item.ticket_id === params.ticket_id);
+    if (index === -1) return null;
+
+    const now = new Date().toISOString();
+    const messageId = generateEventId('msg', params.sender_type === 'admin' ? 'support_admin' : 'support_user');
+    const attachments = (params.attachments || [])
+      .map((attachment) => this.normalizeSupportAttachment(attachment, params.sender_user_id, messageId))
+      .filter((attachment) => attachment.data_url);
+
+    const newMessage: SupportTicketMessage = {
+      id: messageId,
+      sender_type: params.sender_type,
+      sender_user_id: params.sender_user_id,
+      sender_name: params.sender_name || (params.sender_type === 'admin' ? 'Admin' : 'User'),
+      message: String(params.message || '').trim(),
+      attachments,
+      created_at: now
+    };
+
+    let nextStatus = tickets[index].status;
+    if (params.sender_type === 'admin' && nextStatus !== 'closed') {
+      nextStatus = 'awaiting_user_response';
+    }
+    if (
+      params.sender_type === 'user'
+      && (nextStatus === 'awaiting_user_response' || nextStatus === 'resolved' || nextStatus === 'closed')
+    ) {
+      nextStatus = 'open';
+    }
+
+    const updatedTicket: SupportTicket = {
+      ...tickets[index],
+      messages: [...tickets[index].messages, newMessage],
+      attachments: [...tickets[index].attachments, ...attachments],
+      status: nextStatus,
+      updated_at: now,
+      admin_reply: params.sender_type === 'admin' ? newMessage.message : tickets[index].admin_reply
+    };
+
+    tickets[index] = updatedTicket;
+    this.saveSupportTickets(tickets);
+    return updatedTicket;
+  }
+
+  static updateSupportTicketStatus(
+    ticketId: string,
+    status: SupportTicketStatus,
+    options?: { adminReply?: string }
+  ): SupportTicket | null {
+    const tickets = this.getSupportTickets();
+    const index = tickets.findIndex((item) => item.ticket_id === ticketId);
+    if (index === -1) return null;
+
+    const now = new Date().toISOString();
+    tickets[index] = {
+      ...tickets[index],
+      status: this.normalizeSupportStatus(status),
+      updated_at: now,
+      admin_reply: options?.adminReply ? String(options.adminReply).trim() : tickets[index].admin_reply
+    };
+    this.saveSupportTickets(tickets);
+    return tickets[index];
+  }
+
   // ==================== OTP RECORDS ====================
   static getOtpRecords(): OtpRecord[] {
     const data = localStorage.getItem(DB_KEYS.OTP_RECORDS);
@@ -4342,11 +4632,43 @@ class Database {
     const wallets = this.getWallets();
     const pool = this.getSafetyPool();
     const transactions = this.getTransactions();
+    const pins = this.getPins();
 
     const activeUsers = users.filter(u => u.isActive).length;
     const totalHelpDistributed = transactions
       .filter(t => t.type === 'receive_help' && t.status === 'completed')
       .reduce((sum, t) => sum + t.amount, 0);
+    const totalDeposits = this.getTotalDeposits();
+    const totalWithdrawals = this.getTotalWithdrawals();
+    const totalLockedIncome = wallets.reduce((sum, wallet) => sum + (wallet.lockedIncomeWallet || 0), 0);
+    const totalIncomeWalletBalance = wallets.reduce((sum, wallet) => sum + (wallet.incomeWallet || 0), 0);
+    const totalFundWalletBalance = wallets.reduce((sum, wallet) => sum + (wallet.depositWallet || 0), 0);
+
+    // Count all PIN inventory in system (including admin-owned PINs).
+    const totalPinsInSystem = pins.length;
+    const totalPinAmountInSystem = pins.reduce((sum, pin) => sum + (Number(pin.amount) || 0), 0);
+
+    // Bulk IDs created without PIN should still contribute virtual PIN sale count/amount.
+    const bulkNoPinActivationTransactions = transactions.filter((tx) =>
+      tx.type === 'activation'
+      && tx.status === 'completed'
+      && tx.description === 'Account activation by admin without PIN'
+      && tx.amount > 0
+    );
+    const bulkNoPinCount = bulkNoPinActivationTransactions.length;
+    const bulkNoPinAmount = bulkNoPinActivationTransactions.reduce((sum, tx) => sum + tx.amount, 0);
+
+    const totalPinsSold = totalPinsInSystem + bulkNoPinCount;
+    const totalPinSoldAmount = totalPinAmountInSystem + bulkNoPinAmount;
+
+    // Balance Amount Remaining = Safety Pool + Pin Sold + Deposits - Withdrawals - Income Wallet - Locked Income
+    const balanceAmountRemaining =
+      pool.totalAmount
+      + totalPinSoldAmount
+      + totalDeposits
+      - totalWithdrawals
+      - totalIncomeWalletBalance
+      - totalLockedIncome;
 
     const averageEarnings = wallets.length > 0
       ? wallets.reduce((sum, w) => sum + w.totalReceived, 0) / wallets.length
@@ -4367,6 +4689,14 @@ class Database {
       activeUsers,
       totalHelpDistributed,
       totalInSafetyPool: pool.totalAmount,
+      totalPinsSold,
+      totalPinSoldAmount,
+      totalIncomeWalletBalance,
+      totalFundWalletBalance,
+      totalLockedIncome,
+      totalDeposits,
+      totalWithdrawals,
+      balanceAmountRemaining,
       averageEarnings,
       topEarners
     };
@@ -4618,6 +4948,7 @@ class Database {
     this.savePins([]);
     this.savePinTransfers([]);
     this.savePinPurchaseRequests([]);
+    this.saveSupportTickets([]);
     this.saveOtpRecords([]);
     this.saveEmailLogs([]);
     this.saveImpersonationSessions([]);

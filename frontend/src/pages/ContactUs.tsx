@@ -4,26 +4,26 @@ export default function ContactUs() {
   return (
     <StaticPageLayout
       title="Contact Us"
-      subtitle="Reach the ReferNex support team for account, policy, or platform-related assistance."
+      subtitle="All support is handled through the in-app ticket system."
     >
       <section className="glass border border-white/10 rounded-2xl p-6">
-        <h2 className="font-heading text-xl font-semibold text-white">Support Email</h2>
+        <h2 className="font-heading text-xl font-semibold text-white">Ticket-Based Support Only</h2>
         <p className="mt-3 text-white/70 leading-relaxed">
-          Email: <span className="text-[#7cc9ff]">support@refernex.com</span>
+          Submit your issue from the <a href="/support" className="text-[#7cc9ff] hover:underline">Support Ticket Center</a>. External support channels are not used.
         </p>
       </section>
 
       <section className="glass border border-white/10 rounded-2xl p-6">
-        <h2 className="font-heading text-xl font-semibold text-white">Support Hours</h2>
+        <h2 className="font-heading text-xl font-semibold text-white">Important Notice</h2>
         <p className="mt-3 text-white/70 leading-relaxed">
-          Monday to Saturday, 10:00 AM to 7:00 PM (local business hours). Response times may vary during high-volume periods.
+          Do not create multiple tickets for the same issue. Typical response time is up to 24 hours.
         </p>
       </section>
 
       <section className="glass border border-white/10 rounded-2xl p-6">
-        <h2 className="font-heading text-xl font-semibold text-white">Before You Contact Support</h2>
+        <h2 className="font-heading text-xl font-semibold text-white">Before Submitting a Ticket</h2>
         <p className="mt-3 text-white/70 leading-relaxed">
-          Please include your User ID, registered email, and relevant transaction references so the team can verify and resolve your issue faster.
+          Include your User ID, transaction ID, amount, payment method, and screenshot/payment proof for faster verification.
         </p>
       </section>
     </StaticPageLayout>

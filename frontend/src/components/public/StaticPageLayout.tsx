@@ -18,8 +18,7 @@ export default function StaticPageLayout({ title, subtitle, updatedOn, children 
       <header className="fixed inset-x-0 top-0 z-40 glass border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2.5">
-            <BrandLogo className="h-9 w-9 rounded-lg" />
-            <span className="font-heading text-lg font-semibold text-white">ReferNex</span>
+            <BrandLogo variant="full" className="h-9 w-[152px] rounded-md" />
           </Link>
 
           <Link to="/" className="inline-flex items-center gap-2 text-sm text-white/70 hover:text-white">

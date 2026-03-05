@@ -12,8 +12,7 @@ export default function PublicFooter() {
         <div className="grid grid-cols-1 gap-8 md:grid-cols-2 lg:grid-cols-4">
           <div>
             <div className="flex items-center gap-2">
-              <BrandLogo className="h-9 w-9 rounded-lg" />
-              <p className="font-heading text-lg font-semibold text-white">ReferNex</p>
+              <BrandLogo variant="full" className="h-9 w-[152px] rounded-md" />
             </div>
             <p className="mt-3 text-sm text-white/60">
               The next-generation referral network for smart shoppers and digital community growth.

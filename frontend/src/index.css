@@ -1159,6 +1159,11 @@ h1, h2, h3, h4, h5, h6 {
   display: none;
 }
 
+.admin-table-scroll {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .glass {
@@ -1178,6 +1183,17 @@ h1, h2, h3, h4, h5, h6 {
 
   .mobile-nav-item {
     min-height: 56px;
+  }
+
+  .admin-page .admin-table {
+    min-width: 680px;
+  }
+
+  .admin-page .admin-table th,
+  .admin-page .admin-table td {
+    white-space: nowrap;
+    padding-left: 0.7rem;
+    padding-right: 0.7rem;
   }
 }
 

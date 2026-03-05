@@ -19,10 +19,12 @@ import Admin from '@/pages/Admin';
 import Ecommerce from '@/pages/Ecommerce';
 import AboutUs from '@/pages/AboutUs';
 import ContactUs from '@/pages/ContactUs';
+import Support from '@/pages/Support';
 import PrivacyPolicy from '@/pages/PrivacyPolicy';
 import TermsAndConditions from '@/pages/TermsAndConditions';
 import Disclaimer from '@/pages/Disclaimer';
 import RefundPolicy from '@/pages/RefundPolicy';
+import DummyMail from '@/pages/DummyMail';
 
 function App() {
   return (
@@ -45,10 +47,12 @@ function App() {
         <Route path="/admin" element={<Admin />} />
         <Route path="/about-us" element={<AboutUs />} />
         <Route path="/contact-us" element={<ContactUs />} />
+        <Route path="/support" element={<Support />} />
         <Route path="/privacy-policy" element={<PrivacyPolicy />} />
         <Route path="/terms-and-conditions" element={<TermsAndConditions />} />
         <Route path="/disclaimer" element={<Disclaimer />} />
         <Route path="/refund-policy" element={<RefundPolicy />} />
+        <Route path="/dummy-mail" element={<DummyMail />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Router>

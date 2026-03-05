@@ -97,6 +97,7 @@ const STATE_COLLECTIONS = {
   mlm_pins: { collection: 'pins', kind: 'array', idField: 'id' },
   mlm_pin_transfers: { collection: 'pin_transfers', kind: 'array', idField: 'id' },
   mlm_pin_purchase_requests: { collection: 'pin_purchase_requests', kind: 'array', idField: 'id' },
+  mlm_support_tickets: { collection: 'support_tickets', kind: 'array', idField: 'ticket_id' },
   mlm_otp_records: { collection: 'otp_records', kind: 'array', idField: 'id' },
   mlm_email_logs: { collection: 'email_logs', kind: 'array', idField: 'id' },
   mlm_impersonation: { collection: 'impersonation', kind: 'array', idField: 'id' },

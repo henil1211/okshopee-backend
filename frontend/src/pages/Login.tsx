@@ -93,11 +93,8 @@ export default function Login() {
         
         <div className="relative z-10 mx-auto flex w-full max-w-2xl flex-col justify-center px-10 py-16 xl:px-16">
           <div className="mb-8">
-            <div className="flex items-center gap-3 mb-6">
-              <div className={`w-12 h-12 rounded-xl backdrop-blur p-0.5 ${isDarkMode ? 'bg-[#0d2b48]/75' : 'bg-white/70'}`}>
-                <BrandLogo className="h-full w-full rounded-[10px]" />
-              </div>
-              <span className={`text-2xl font-bold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>ReferNex</span>
+            <div className="mb-6">
+              <BrandLogo variant="full" className="h-14 w-[236px] rounded-md" />
             </div>
             <h1 className={`text-4xl font-bold mb-4 ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
               Welcome to the Future of<br />
@@ -133,8 +130,7 @@ export default function Login() {
         <div className="w-full max-w-md">
           {/* Mobile Logo */}
           <div className="mb-6 flex items-center justify-center gap-3 lg:hidden">
-            <BrandLogo className="h-10 w-10 rounded-xl" />
-            <span className="text-xl font-bold text-white">ReferNex</span>
+            <BrandLogo variant="full" className="h-10 w-[168px] rounded-md" />
           </div>
 
           <Card className="glass rounded-2xl border-white/10">

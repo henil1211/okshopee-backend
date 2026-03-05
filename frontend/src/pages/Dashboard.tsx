@@ -9,7 +9,7 @@ import {
   TrendingUp, Users, ArrowUpRight, ArrowDownLeft,
   Copy, CheckCircle, RefreshCw,
   DollarSign, UserPlus, BarChart3, PlusCircle, LogOut, Shield,
-  Ticket, Plane, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Headphones, Mail, Train
+  Ticket, Plane, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Train
 } from 'lucide-react';
 import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel } from '@/utils/helpers';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
@@ -434,10 +434,10 @@ export default function Dashboard() {
               <div>
                 <p className="text-sm text-slate-500 dark:text-white/50 flex items-center gap-2">
                   <ShoppingBag className="w-4 h-4 text-emerald-500" />
-                  Affiliate MarketPlace
+                  Affiliate E-Commerce Platforms
                 </p>
                 <p className="text-sm text-slate-600 dark:text-white/60 mt-1">
-                  Products and services from leading global brands are available.
+                  Top brands at great discounts — Click now and explore the deals!
                 </p>
               </div>
               <Button
@@ -445,7 +445,7 @@ export default function Dashboard() {
                 className="bg-emerald-600 hover:bg-emerald-700 text-white"
               >
                 <ShoppingBag className="w-4 h-4 mr-2" />
-                Click & Visit MarketPlace
+                Click Now & Explore
               </Button>
             </CardContent>
           </Card>
@@ -801,27 +801,19 @@ export default function Dashboard() {
               <div className="flex flex-col gap-4">
                 <div>
                   <h3 className="text-lg font-bold text-slate-900 dark:text-white mb-1 flex items-center gap-2">
-                    <Headphones className="w-5 h-5 text-purple-500" />
+                    <Ticket className="w-5 h-5 text-purple-500" />
                     Dedicated Support
                   </h3>
-                  <p className="text-slate-600 dark:text-white/60 text-sm">Need help? Our support team is here for you.</p>
+                  <p className="text-slate-600 dark:text-white/60 text-sm">
+                    Support is ticket-based only. Submit and track your issue inside the platform.
+                  </p>
                 </div>
                 <div className="flex flex-col sm:flex-row gap-2">
                   <Button
-                    variant="outline"
-                    onClick={() => window.open('mailto:support@refernex.com', '_blank')}
-                    className="border-purple-500/40 text-purple-700 hover:bg-purple-50 dark:text-purple-300 dark:hover:bg-purple-500/10"
+                    onClick={() => navigate('/support')}
+                    className="bg-[#118bdd] hover:bg-[#0f79be] text-white"
                   >
-                    <Mail className="w-4 h-4 mr-2" />
-                    Email Support
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => window.open('https://wa.me/919999999999', '_blank', 'noopener,noreferrer')}
-                    className="border-emerald-500/40 text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-500/10"
-                  >
-                    <MessageCircle className="w-4 h-4 mr-2" />
-                    WhatsApp Support
+                    Open Ticket Center
                   </Button>
                 </div>
               </div>

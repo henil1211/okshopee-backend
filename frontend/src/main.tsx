@@ -131,6 +131,9 @@ async function bootstrap() {
         <p style={{ margin: 0, opacity: 0.85, maxWidth: 640, lineHeight: 1.5 }}>
           Syncing latest server data. Please wait.
         </p>
+        <p style={{ margin: 0, opacity: 0.55, maxWidth: 640, lineHeight: 1.5, fontSize: '13px' }}>
+          If the server was inactive, it may take up to a minute to start. Please be patient.
+        </p>
       </div>
     </StrictMode>,
   );

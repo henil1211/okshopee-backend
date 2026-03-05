@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import { useAuthStore, useAdminStore } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -7,17 +7,18 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import {
   Users, ArrowLeft, TrendingUp, Wallet, Shield,
   Settings, DollarSign, Search, CheckCircle, RefreshCw, Download,
   CreditCard, XCircle, Eye, LogOut, IdCard, Ticket, UserCog,
   BarChart3, Copy, Check, Ban, UserCheck, ArrowUp, ArrowDown, MessageCircle, Share2
 } from 'lucide-react';
-import { formatCurrency, formatNumber, formatDate, getInitials, generateAvatarColor } from '@/utils/helpers';
+import { formatCurrency, formatNumber, formatDate, getInitials, generateAvatarColor, getTransactionTypeLabel } from '@/utils/helpers';
 import { toast } from 'sonner';
 import Database from '@/db';
 import { helpDistributionTable } from '@/db';
-import type { Payment, PaymentMethod, Pin } from '@/types';
+import type { Payment, PaymentMethod, Pin, SupportTicket, SupportTicketAttachment, SupportTicketStatus } from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
@@ -29,6 +30,7 @@ interface MemberReportRow {
   mobile: string;
   sponsorId: string;
   sponsorName: string;
+  currentLevelDisplay: string;
   qualifiedLevel: number;
   achievedOffer: string;
   blockStatus: 'active' | 'inactive' | 'temp_blocked' | 'permanent_blocked';
@@ -41,8 +43,8 @@ interface ReceiveHelpReportRow {
   userName: string;
   amount: number;
   level: number;
-  status: string;
-  helpNumberInLevel: number;
+  fromUserId: string;
+  fromUserName: string;
 }
 
 interface GiveHelpReportRow {
@@ -56,16 +58,45 @@ interface GiveHelpReportRow {
 }
 
 interface OfferAchieverReportRow {
-  id: string;
   achievedAt: string;
   userId: string;
   name: string;
   mobile: string;
-  completeLevel: number;
+  qualifiedLevel: number;
   offerAchieved: string;
   sponsorId: string;
   sponsorName: string;
   sponsorMobile: string;
+}
+
+interface DepositReportRow {
+  id: string;
+  createdAt: string;
+  userId: string;
+  userName: string;
+  amount: number;
+  method: string;
+  status: string;
+  txHash?: string;
+}
+
+interface WithdrawalReportRow {
+  id: string;
+  createdAt: string;
+  userId: string;
+  userName: string;
+  amount: number;
+  status: string;
+  description: string;
+}
+
+interface LockedIncomeReportRow {
+  userId: string;
+  name: string;
+  lockedAmount: number;
+  directCount: number;
+  requiredDirect: number;
+  currentLevel: number;
 }
 
 const isDateInRange = (date: string, from?: string, to?: string) => {
@@ -91,6 +122,21 @@ const getOfferName = (user: any) => {
 const safeLower = (value: unknown): string => String(value ?? '').toLowerCase();
 const safeText = (value: unknown): string => String(value ?? '');
 const DELETE_ALL_IDS_PHRASE = 'DELETE ALL IDS';
+const SUPPORT_STATUS_OPTIONS: Array<{ value: SupportTicketStatus; label: string }> = [
+  { value: 'open', label: 'Open' },
+  { value: 'in_progress', label: 'In Progress' },
+  { value: 'awaiting_user_response', label: 'Awaiting User Response' },
+  { value: 'resolved', label: 'Resolved' },
+  { value: 'closed', label: 'Closed' }
+];
+
+const SUPPORT_CATEGORY_LABELS: Record<string, string> = {
+  account_issues: 'Account Issues',
+  deposit_payment_issues: 'Deposit / Payment Issues',
+  withdrawal_issues: 'Withdrawal Issues',
+  referral_matrix_issues: 'Referral / Matrix Issues',
+  technical_issues: 'Technical Issues'
+};
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -204,6 +250,35 @@ export default function Admin() {
     userId: '',
     reason: ''
   });
+
+  const [depositReportFilters, setDepositReportFilters] = useState({
+    dateFrom: '',
+    dateTo: '',
+    userId: '',
+    userName: '',
+    status: ''
+  });
+
+  const [withdrawalReportFilters, setWithdrawalReportFilters] = useState({
+    dateFrom: '',
+    dateTo: '',
+    userId: '',
+    userName: '',
+    status: ''
+  });
+
+  const [lockedIncomeFilters, setLockedIncomeFilters] = useState({
+    userId: '',
+    name: '',
+    minAmount: ''
+  });
+  const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([]);
+  const [supportStatusFilter, setSupportStatusFilter] = useState<'all' | SupportTicketStatus>('all');
+  const [supportSearch, setSupportSearch] = useState('');
+  const [selectedSupportTicketId, setSelectedSupportTicketId] = useState('');
+  const [supportStatusDraft, setSupportStatusDraft] = useState<SupportTicketStatus>('open');
+  const [supportReplyMessage, setSupportReplyMessage] = useState('');
+  const [supportReplyAttachment, setSupportReplyAttachment] = useState<SupportTicketAttachment | null>(null);
   const [isReconciling, setIsReconciling] = useState(false);
   const [lastReconcileReport, setLastReconcileReport] = useState<any | null>(null);
   const [isRebuildingMatrix, setIsRebuildingMatrix] = useState(false);
@@ -235,6 +310,7 @@ export default function Admin() {
     loadPendingPinRequests();
     loadPayments();
     loadPaymentMethods();
+    loadSupportTickets();
     setBulkNoPin((prev) => ({
       ...prev,
       sponsorUserId: prev.sponsorUserId || user.userId
@@ -249,6 +325,34 @@ export default function Admin() {
   const loadPaymentMethods = () => {
     const methods = Database.getPaymentMethods();
     setPaymentMethods(methods);
+  };
+
+  const loadSupportTickets = () => {
+    const rows = Database.getSupportTickets();
+    setSupportTickets(rows);
+    if (!selectedSupportTicketId && rows.length > 0) {
+      setSelectedSupportTicketId(rows[0].ticket_id);
+      setSupportStatusDraft(rows[0].status);
+    }
+  };
+
+  const readSupportAttachment = async (file: File): Promise<SupportTicketAttachment> => {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read attachment'));
+      reader.readAsDataURL(file);
+    });
+
+    return {
+      id: `support_admin_att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      file_name: file.name,
+      file_type: file.type || 'application/octet-stream',
+      file_size: file.size,
+      data_url: dataUrl,
+      uploaded_by: user?.userId || 'admin',
+      uploaded_at: new Date().toISOString()
+    };
   };
 
   const handleApprovePayment = () => {
@@ -320,12 +424,30 @@ export default function Admin() {
       const pendingMatrixDebug = Database.getPendingMatrixContributionsDebug(foundUser.id);
       const incomingPendingMatrixDebug = Database.getIncomingPendingMatrixContributionsDebug(foundUser.id);
 
+      const receiveHelpAmount = userTransactions
+        .filter(t => t.type === 'receive_help' && t.status === 'completed')
+        .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+      const giveHelpAmount = userTransactions
+        .filter(t => t.type === 'give_help' && t.status === 'completed')
+        .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+      const directReferralIncome = userTransactions
+        .filter(t => t.type === 'direct_income' && t.status === 'completed')
+        .reduce((sum, t) => sum + Math.abs(t.amount), 0);
+
+      const qualifiedLevel = Database.getQualifiedLevel(foundUser.id);
+
       setSearchedUser({
         ...foundUser,
         wallet,
         teamStats,
         payments: userPayments,
         transactions: userTransactions,
+        receiveHelpAmount,
+        giveHelpAmount,
+        directReferralIncome,
+        qualifiedLevel,
         pins: userPins,
         pendingMatrixDebug,
         incomingPendingMatrixDebug
@@ -715,6 +837,10 @@ export default function Admin() {
             ? 'active'
             : 'inactive';
 
+      const levelProgress = Database.getLevelFillProgress(u.id);
+      const currentLevelDisplay = `Level ${levelProgress.level} (${levelProgress.filled}/${levelProgress.required} filled)`;
+      const trueQualifiedLevel = Database.getQualifiedLevel(u.id);
+
       return {
         id: u.id,
         createdAt: u.createdAt,
@@ -723,7 +849,8 @@ export default function Admin() {
         mobile: u.phone || '-',
         sponsorId: u.sponsorId || '-',
         sponsorName: sponsor?.fullName || '-',
-        qualifiedLevel: Database.getQualifiedLevel(u.id),
+        currentLevelDisplay,
+        qualifiedLevel: trueQualifiedLevel,
         achievedOffer: getOfferName(u),
         blockStatus
       };
@@ -744,16 +871,12 @@ export default function Admin() {
 
   const receiveHelpReportRows = useMemo(() => {
     const ordered = [...allTransactions]
-      .filter(tx => tx.type === 'get_help')
+      .filter(tx => tx.type === 'receive_help')
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
-    const counts = new Map<string, number>();
     const rows: ReceiveHelpReportRow[] = ordered.map((tx) => {
       const user = userById.get(tx.userId);
-      const level = tx.level || 0;
-      const key = `${tx.userId}_${level}`;
-      const next = (counts.get(key) || 0) + 1;
-      counts.set(key, next);
+      const fromUser = tx.fromUserId ? userById.get(tx.fromUserId) : undefined;
 
       return {
         id: tx.id,
@@ -761,9 +884,9 @@ export default function Admin() {
         userId: user?.userId || '-',
         userName: user?.fullName || '-',
         amount: Math.abs(tx.amount),
-        level,
-        status: tx.status,
-        helpNumberInLevel: next
+        level: tx.level || 0,
+        fromUserId: fromUser?.userId || '-',
+        fromUserName: fromUser?.fullName || '-'
       };
     });
 
@@ -781,7 +904,7 @@ export default function Admin() {
   }, [allTransactions, userById, receiveFilters]);
 
   const giveHelpReportRows = useMemo(() => {
-    const getHelpTx = allTransactions.filter(tx => tx.type === 'get_help' && tx.fromUserId);
+    const receiveHelpTx = allTransactions.filter(tx => tx.type === 'receive_help' && tx.fromUserId);
     const rows: GiveHelpReportRow[] = allTransactions
       .filter(tx => tx.type === 'give_help')
       .map((tx) => {
@@ -792,7 +915,7 @@ export default function Admin() {
         // Fallback for legacy transactions that didn't store explicit receiver
         if (!receiver) {
           const txTime = new Date(tx.createdAt).getTime();
-          const candidates = getHelpTx
+          const candidates = receiveHelpTx
             .filter(g =>
               g.fromUserId === tx.userId &&
               (tx.level ? g.level === tx.level : true) &&
@@ -830,51 +953,55 @@ export default function Admin() {
   const offerAchieverRows = useMemo(() => {
     const rows: OfferAchieverReportRow[] = [];
 
-    for (const u of allUsers) {
+    allUsers.forEach((u) => {
       const sponsor = u.sponsorId ? userByUserId.get(u.sponsorId) : undefined;
+      const trueQualifiedLevel = Database.getQualifiedLevel(u.id);
+
       const base = {
         userId: u.userId,
         name: u.fullName,
         mobile: u.phone || '-',
+        qualifiedLevel: trueQualifiedLevel,
         sponsorId: sponsor?.userId || '-',
         sponsorName: sponsor?.fullName || '-',
         sponsorMobile: sponsor?.phone || '-'
       };
 
+      if (u.achievements?.silverCoin) {
+        rows.push({
+          achievedAt: u.achievements.silverCoinDate || u.createdAt,
+          offerAchieved: 'Silver Coin Achiever',
+          ...base
+        });
+      }
       if (u.achievements?.nationalTour) {
         rows.push({
-          id: `${u.id}_national`,
           achievedAt: u.achievements.nationalTourDate || u.createdAt,
-          completeLevel: 5,
           offerAchieved: 'National Tour Achiever',
           ...base
         });
       }
       if (u.achievements?.internationalTour) {
         rows.push({
-          id: `${u.id}_international`,
           achievedAt: u.achievements.internationalTourDate || u.createdAt,
-          completeLevel: 7,
           offerAchieved: 'International Tour Achiever',
           ...base
         });
       }
       if (u.achievements?.familyTour) {
         rows.push({
-          id: `${u.id}_family`,
           achievedAt: u.achievements.familyTourDate || u.createdAt,
-          completeLevel: 10,
           offerAchieved: 'International Family Tour Achiever',
           ...base
         });
       }
-    }
+    });
 
     return rows.filter((r) => {
       if (!isDateInRange(r.achievedAt, offerFilters.dateFrom, offerFilters.dateTo)) return false;
       if (offerFilters.userId && !safeText(r.userId).includes(offerFilters.userId)) return false;
       if (offerFilters.name && !safeLower(r.name).includes(safeLower(offerFilters.name))) return false;
-      if (offerFilters.level && r.completeLevel !== Number(offerFilters.level)) return false;
+      if (offerFilters.level && r.qualifiedLevel !== Number(offerFilters.level)) return false;
       if (offerFilters.offer && r.offerAchieved !== offerFilters.offer) return false;
       if (offerFilters.sponsorId && !safeText(r.sponsorId).includes(offerFilters.sponsorId)) return false;
       if (offerFilters.sponsorName && !safeLower(r.sponsorName).includes(safeLower(offerFilters.sponsorName))) return false;
@@ -892,18 +1019,93 @@ export default function Admin() {
     });
   }, [levelReport, allLevelFilters]);
 
+  const depositReportRows = useMemo(() => {
+    // Get all completed payments for deposit report
+    const allPayments = Database.getAllCompletedPayments();
+    const rows: DepositReportRow[] = allPayments.map(p => ({
+      id: p.id,
+      createdAt: p.createdAt,
+      userId: p.userId,
+      userName: userById?.get(p.userId)?.fullName || '-',
+      amount: p.amount,
+      method: p.method,
+      status: p.status,
+      txHash: p.txHash || ''
+    }));
+
+    return rows.filter(r => {
+      if (!isDateInRange(r.createdAt, depositReportFilters.dateFrom, depositReportFilters.dateTo)) return false;
+      if (depositReportFilters.userId && !safeText(r.userId).includes(depositReportFilters.userId)) return false;
+      if (depositReportFilters.userName && !safeLower(r.userName).includes(safeLower(depositReportFilters.userName))) return false;
+      if (depositReportFilters.status && r.status !== depositReportFilters.status) return false;
+      return true;
+    }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [depositReportFilters]);
+
+  const withdrawalReportRows = useMemo(() => {
+    // Filter transactions for withdrawals
+    const rows: WithdrawalReportRow[] = allTransactions
+      .filter(tx => tx.type === 'withdrawal')
+      .map(tx => {
+        const user = userById.get(tx.userId);
+        return {
+          id: tx.id,
+          createdAt: tx.createdAt,
+          userId: user?.userId || '-',
+          userName: user?.fullName || '-',
+          amount: Math.abs(tx.amount),
+          status: tx.status,
+          description: tx.description
+        };
+      });
+
+    return rows.filter(r => {
+      if (!isDateInRange(r.createdAt, withdrawalReportFilters.dateFrom, withdrawalReportFilters.dateTo)) return false;
+      if (withdrawalReportFilters.userId && !safeText(r.userId).includes(withdrawalReportFilters.userId)) return false;
+      if (withdrawalReportFilters.userName && !safeLower(r.userName).includes(safeLower(withdrawalReportFilters.userName))) return false;
+      if (withdrawalReportFilters.status && r.status !== withdrawalReportFilters.status) return false;
+      return true;
+    }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [allTransactions, userById, withdrawalReportFilters]);
+
+  const lockedIncomeRows = useMemo(() => {
+    const rows: LockedIncomeReportRow[] = allUsers
+      .filter(u => !u.isAdmin)
+      .map(u => {
+        const wallet = Database.getWallet(u.id);
+        const currentLevel = Database.getCurrentMatrixLevel(u.id);
+        const requiredDirect = Database.getRequiredDirectsForLevel(currentLevel + 1);
+        return {
+          userId: u.userId,
+          name: u.fullName,
+          lockedAmount: wallet?.lockedIncomeWallet || 0,
+          directCount: u.directCount || 0,
+          requiredDirect,
+          currentLevel
+        };
+      })
+      .filter(r => r.lockedAmount > 0);
+
+    return rows.filter(r => {
+      if (lockedIncomeFilters.userId && !safeText(r.userId).includes(lockedIncomeFilters.userId)) return false;
+      if (lockedIncomeFilters.name && !safeLower(r.name).includes(safeLower(lockedIncomeFilters.name))) return false;
+      if (lockedIncomeFilters.minAmount && r.lockedAmount < Number(lockedIncomeFilters.minAmount)) return false;
+      return true;
+    }).sort((a, b) => b.lockedAmount - a.lockedAmount);
+  }, [allUsers, lockedIncomeFilters]);
+
   const safetyPoolRows = useMemo(() => {
     const pool = Database.getSafetyPool();
     return pool.transactions
       .map((t) => {
-        const sourceUser = userById.get(t.fromUserId);
+        const user = userById.get(t.fromUserId);
         return {
-          id: t.id,
+          id: t.id || Math.random().toString(),
           createdAt: t.createdAt,
+          userId: user?.userId || '-',
+          userName: user?.fullName || '-',
           amount: t.amount,
-          reason: t.reason || '',
-          userId: sourceUser?.userId || '-',
-          userName: sourceUser?.fullName || '-'
+          reason: t.reason
         };
       })
       .filter((r) => {
@@ -913,12 +1115,91 @@ export default function Admin() {
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [userById, safetyPoolAmount, safetyPoolFilters]);
+  }, [userById, safetyPoolFilters]);
 
   const filteredPinRequests = useMemo(() => {
     if (pinRequestStatusFilter === 'all') return allPinRequests;
     return allPinRequests.filter(r => r.status === pinRequestStatusFilter);
   }, [allPinRequests, pinRequestStatusFilter]);
+
+  const filteredSupportTickets = useMemo(() => {
+    return supportTickets.filter((ticket) => {
+      if (supportStatusFilter !== 'all' && ticket.status !== supportStatusFilter) return false;
+      if (!supportSearch.trim()) return true;
+      const q = supportSearch.trim().toLowerCase();
+      return (
+        ticket.ticket_id.toLowerCase().includes(q)
+        || ticket.user_id.toLowerCase().includes(q)
+        || (ticket.name || '').toLowerCase().includes(q)
+        || (ticket.subject || '').toLowerCase().includes(q)
+      );
+    });
+  }, [supportTickets, supportStatusFilter, supportSearch]);
+
+  const selectedSupportTicket = useMemo(
+    () => supportTickets.find((ticket) => ticket.ticket_id === selectedSupportTicketId) || null,
+    [supportTickets, selectedSupportTicketId]
+  );
+
+  useEffect(() => {
+    if (selectedSupportTicket) {
+      setSupportStatusDraft(selectedSupportTicket.status);
+    }
+  }, [selectedSupportTicket]);
+
+  const handleSupportStatusUpdate = () => {
+    if (!selectedSupportTicket) return;
+    const updated = Database.updateSupportTicketStatus(selectedSupportTicket.ticket_id, supportStatusDraft);
+    if (!updated) {
+      toast.error('Failed to update ticket status');
+      return;
+    }
+    loadSupportTickets();
+    toast.success(`Ticket ${updated.ticket_id} marked ${SUPPORT_STATUS_OPTIONS.find((s) => s.value === updated.status)?.label || updated.status}`);
+  };
+
+  const handleSupportAttachmentChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      setSupportReplyAttachment(null);
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Attachment size must be under 5MB');
+      return;
+    }
+    try {
+      const attachment = await readSupportAttachment(file);
+      setSupportReplyAttachment(attachment);
+    } catch (error: unknown) {
+      toast.error(error instanceof Error ? error.message : 'Failed to read attachment');
+    }
+  };
+
+  const handleSupportReply = () => {
+    if (!selectedSupportTicket || !user) return;
+    if (!supportReplyMessage.trim() && !supportReplyAttachment) {
+      toast.error('Write a reply or attach a file');
+      return;
+    }
+    const updated = Database.addSupportTicketMessage({
+      ticket_id: selectedSupportTicket.ticket_id,
+      sender_type: 'admin',
+      sender_user_id: user.userId,
+      sender_name: user.fullName,
+      message: supportReplyMessage.trim(),
+      attachments: supportReplyAttachment ? [supportReplyAttachment] : []
+    });
+    if (!updated) {
+      toast.error('Failed to send reply');
+      return;
+    }
+    setSupportReplyMessage('');
+    setSupportReplyAttachment(null);
+    setSupportStatusDraft(updated.status);
+    loadSupportTickets();
+    toast.success('Reply sent');
+  };
 
   const exportData = () => {
     const data = {
@@ -943,12 +1224,12 @@ export default function Admin() {
   if (!user?.isAdmin) return null;
 
   return (
-    <div className="admin-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
+    <div className="admin-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0" >
       {/* Header */}
       <header className="glass sticky top-0 z-50 border-b border-white/5">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between min-h-16 py-2 sm:py-0 gap-2">
-            <div className="flex items-center gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between min-h-16 py-2 sm:py-0 gap-2 sm:gap-3">
+            <div className="flex items-center gap-3 sm:gap-4 w-full sm:w-auto">
               <Button
                 variant="ghost"
                 size="icon"
@@ -957,7 +1238,7 @@ export default function Admin() {
               >
                 <ArrowLeft className="w-5 h-5" />
               </Button>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center">
                   <Shield className="w-5 h-5 text-white" />
                 </div>
@@ -968,7 +1249,7 @@ export default function Admin() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2 sm:gap-3">
+            <div className="flex w-full sm:w-auto items-center justify-end gap-2 sm:gap-3 flex-wrap sm:flex-nowrap">
               <Button
                 variant="outline"
                 onClick={exportData}
@@ -987,6 +1268,7 @@ export default function Admin() {
                   loadAllPinRequests();
                   loadPendingPinRequests();
                   loadPayments();
+                  loadSupportTickets();
                   toast.success('Data refreshed');
                 }}
                 className="border-white/20 text-white hover:bg-white/10"
@@ -1009,16 +1291,16 @@ export default function Admin() {
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         {/* Stats Overview */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
           <Card className="glass border-white/10">
             <CardContent className="p-4">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center">
                   <Users className="w-5 h-5 text-blue-400" />
                 </div>
                 <div>
                   <p className="text-sm text-white/60">Total Users</p>
-                  <p className="text-2xl font-bold text-white">{formatNumber(stats?.totalUsers || 0)}</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatNumber(stats?.totalUsers || 0)}</p>
                 </div>
               </div>
             </CardContent>
@@ -1026,13 +1308,13 @@ export default function Admin() {
 
           <Card className="glass border-white/10">
             <CardContent className="p-4">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <div className="w-10 h-10 rounded-lg bg-emerald-500/20 flex items-center justify-center">
                   <CheckCircle className="w-5 h-5 text-emerald-400" />
                 </div>
                 <div>
                   <p className="text-sm text-white/60">Active Users</p>
-                  <p className="text-2xl font-bold text-white">{formatNumber(stats?.activeUsers || 0)}</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatNumber(stats?.activeUsers || 0)}</p>
                 </div>
               </div>
             </CardContent>
@@ -1040,13 +1322,13 @@ export default function Admin() {
 
           <Card className="glass border-white/10">
             <CardContent className="p-4">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center">
                   <TrendingUp className="w-5 h-5 text-purple-400" />
                 </div>
                 <div>
                   <p className="text-sm text-white/60">Total Distributed</p>
-                  <p className="text-2xl font-bold text-white">{formatCurrency(stats?.totalHelpDistributed || 0)}</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.totalHelpDistributed || 0)}</p>
                 </div>
               </div>
             </CardContent>
@@ -1054,32 +1336,146 @@ export default function Admin() {
 
           <Card className="glass border-white/10">
             <CardContent className="p-4">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <div className="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center">
                   <Wallet className="w-5 h-5 text-amber-400" />
                 </div>
                 <div>
                   <p className="text-sm text-white/60">Safety Pool</p>
-                  <p className="text-2xl font-bold text-white">{formatCurrency(safetyPoolAmount)}</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(safetyPoolAmount)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-indigo-500/20 flex items-center justify-center">
+                  <DollarSign className="w-5 h-5 text-indigo-400" />
+                </div>
+                <div>
+                  <p className="text-sm text-white/60">Total Deposits</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.totalDeposits || 0)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-rose-500/20 flex items-center justify-center">
+                  <ArrowUp className="w-5 h-5 text-rose-400" />
+                </div>
+                <div>
+                  <p className="text-sm text-white/60">Total Withdrawals</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.totalWithdrawals || 0)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
+                  <Shield className="w-5 h-5 text-cyan-400" />
+                </div>
+                <div>
+                  <p className="text-sm text-white/60">Total Locked Income</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.totalLockedIncome || 0)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-sky-500/20 flex items-center justify-center">
+                  <Wallet className="w-5 h-5 text-sky-400" />
+                </div>
+                <div>
+                  <p className="text-sm text-white/60">Total Income Wallet</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.totalIncomeWalletBalance || 0)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-orange-500/20 flex items-center justify-center">
+                  <CreditCard className="w-5 h-5 text-orange-400" />
+                </div>
+                <div>
+                  <p className="text-sm text-white/60">Total Fund Wallet Balance</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.totalFundWalletBalance || 0)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-teal-500/20 flex items-center justify-center">
+                  <Ticket className="w-5 h-5 text-teal-400" />
+                </div>
+                <div>
+                  <p className="text-sm text-white/60">No of Pin Sold</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatNumber(stats?.totalPinsSold || 0)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-fuchsia-500/20 flex items-center justify-center">
+                  <DollarSign className="w-5 h-5 text-fuchsia-400" />
+                </div>
+                <div>
+                  <p className="text-sm text-white/60">Total Pin Sold Amount</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.totalPinSoldAmount || 0)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-lime-500/20 flex items-center justify-center">
+                  <Wallet className="w-5 h-5 text-lime-400" />
+                </div>
+                <div>
+                  <p className="text-sm text-white/60">Balance Amount Remaining</p>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.balanceAmountRemaining || 0)}</p>
                 </div>
               </div>
             </CardContent>
           </Card>
         </div>
 
+
         {/* Main Content Tabs */}
         <Tabs defaultValue="users" className="space-y-6">
           <TabsList className="mobile-bottom-scroll bg-[#1f2937] border border-white/10 h-auto w-full justify-start gap-1 overflow-x-auto whitespace-nowrap">
-            <TabsTrigger value="users" className="data-[state=active]:bg-[#118bdd]">Users</TabsTrigger>
-            <TabsTrigger value="pins" className="data-[state=active]:bg-[#118bdd]">PIN Management</TabsTrigger>
-            <TabsTrigger value="payments" className="data-[state=active]:bg-[#118bdd]">
+            <TabsTrigger value="users" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Users</TabsTrigger>
+            <TabsTrigger value="pins" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">PIN Management</TabsTrigger>
+            <TabsTrigger value="payments" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">
               Payments {pendingPayments.length > 0 && <span className="ml-1 text-xs bg-red-500 text-white px-1.5 rounded-full">{pendingPayments.length}</span>}
             </TabsTrigger>
-            <TabsTrigger value="user-details" className="data-[state=active]:bg-[#118bdd]">User Details</TabsTrigger>
-            <TabsTrigger value="impersonate" className="data-[state=active]:bg-[#118bdd]">Login As User</TabsTrigger>
-            <TabsTrigger value="reports" className="data-[state=active]:bg-[#118bdd]">Reports</TabsTrigger>
-            <TabsTrigger value="matrix" className="data-[state=active]:bg-[#118bdd]">Matrix Table</TabsTrigger>
-            <TabsTrigger value="settings" className="data-[state=active]:bg-[#118bdd]">Settings</TabsTrigger>
+            <TabsTrigger value="user-details" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">User Details</TabsTrigger>
+            <TabsTrigger value="impersonate" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Login As User</TabsTrigger>
+            <TabsTrigger value="support" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Support</TabsTrigger>
+            <TabsTrigger value="reports" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Reports</TabsTrigger>
+            <TabsTrigger value="matrix" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Matrix Table</TabsTrigger>
+            <TabsTrigger value="settings" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Settings</TabsTrigger>
           </TabsList>
 
           {/* Users Tab */}
@@ -1177,7 +1573,7 @@ export default function Admin() {
                   <TrendingUp className="w-5 h-5 text-emerald-400" />
                   Top Referrers
                 </CardTitle>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <Button
                     size="sm"
                     variant={topReferrerLimit === 10 ? 'default' : 'outline'}
@@ -1197,8 +1593,8 @@ export default function Admin() {
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
+                <div className="overflow-x-auto admin-table-scroll">
+                  <table className="w-full admin-table">
                     <thead>
                       <tr className="border-b border-white/10">
                         <th className="text-left py-3 px-4 text-white/60 font-medium">Rank</th>
@@ -1275,8 +1671,8 @@ export default function Admin() {
                 <p className="text-sm text-white/60 mb-4">
                   Sorted by: {allUsersSortLabel}.
                 </p>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
+                <div className="overflow-x-auto admin-table-scroll">
+                  <table className="w-full admin-table">
                     <thead>
                       <tr className="border-b border-white/10">
                         <th className="text-left py-3 px-4 text-white/60 font-medium">Rank</th>
@@ -1304,7 +1700,7 @@ export default function Admin() {
                               <span className="text-[#118bdd] font-mono font-medium">{u.userId}</span>
                             </td>
                             <td className="py-3 px-4">
-                              <div className="flex items-center gap-3">
+                              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                                 <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${generateAvatarColor(u.userId)}`}>
                                   {getInitials(u.fullName)}
                                 </div>
@@ -1349,7 +1745,7 @@ export default function Admin() {
                             <td className="py-3 px-4 text-emerald-400">{formatCurrency(walletEarnings)}</td>
                             <td className="py-3 px-4 text-white/60">{formatDate(u.createdAt)}</td>
                             <td className="py-3 px-4">
-                              <div className="flex gap-2">
+                              <div className="flex flex-wrap gap-2">
                                 <Button
                                   size="sm"
                                   variant="outline"
@@ -1468,7 +1864,7 @@ export default function Admin() {
               {/* PIN Purchase Requests */}
               <Card className="glass border-white/10">
                 <CardHeader>
-                  <div className="flex items-center justify-between gap-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                     <CardTitle className="text-white flex items-center gap-2">
                       <BarChart3 className="w-5 h-5 text-[#118bdd]" />
                       PIN Purchase Requests
@@ -1481,7 +1877,7 @@ export default function Admin() {
                     <select
                       value={pinRequestStatusFilter}
                       onChange={(e) => setPinRequestStatusFilter(e.target.value as 'all' | 'pending' | 'completed' | 'cancelled')}
-                      className="px-3 h-9 bg-[#1f2937] border border-white/10 rounded-md text-white text-sm"
+                      className="px-3 h-9 bg-[#1f2937] border border-white/10 rounded-md text-white text-sm w-full sm:w-auto"
                     >
                       <option value="pending">Pending</option>
                       <option value="completed">Approved</option>
@@ -1497,7 +1893,7 @@ export default function Admin() {
                       const processedByUser = request.processedBy ? allUsers.find(u => u.id === request.processedBy) : null;
                       return (
                         <div key={request.id} className="p-4 rounded-lg bg-[#1f2937] border border-white/10">
-                          <div className="flex items-center justify-between mb-2">
+                          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-2 gap-1">
                             <span className="text-[#118bdd] font-mono">{requestUser?.userId}</span>
                             <span className="text-white font-bold">{formatCurrency(request.amount)}</span>
                           </div>
@@ -1534,7 +1930,7 @@ export default function Admin() {
                             </div>
                           )}
                           <p className="text-white/40 text-xs">{formatDate(request.createdAt)}</p>
-                          <div className="flex gap-2 mt-3">
+                          <div className="flex flex-wrap gap-2 mt-3">
                             {request.status === 'pending' ? (
                               <>
                                 <Button
@@ -1601,8 +1997,8 @@ export default function Admin() {
                   <CardTitle className="text-white">All PINs</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
+                  <div className="overflow-x-auto admin-table-scroll">
+                    <table className="w-full admin-table">
                       <thead>
                         <tr className="border-b border-white/10">
                           <th className="text-left py-3 px-4 text-white/60 font-medium">PIN Code</th>
@@ -1697,7 +2093,7 @@ export default function Admin() {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Pending Payments */}
               <Card className="glass border-white/10">
-                <CardHeader className="flex flex-row items-center justify-between">
+                <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                   <CardTitle className="text-white flex items-center gap-2">
                     <CreditCard className="w-5 h-5 text-[#118bdd]" />
                     Pending Deposits
@@ -1709,8 +2105,8 @@ export default function Admin() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
+                  <div className="overflow-x-auto admin-table-scroll">
+                    <table className="w-full admin-table">
                       <thead>
                         <tr className="border-b border-white/10">
                           <th className="text-left py-3 px-4 text-white/60 font-medium">User ID</th>
@@ -1770,8 +2166,8 @@ export default function Admin() {
                 <CardContent>
                   <div className="space-y-3">
                     {paymentMethods.map((method) => (
-                      <div key={method.id} className="flex items-center justify-between p-4 rounded-lg bg-[#1f2937]">
-                        <div className="flex items-center gap-3">
+                      <div key={method.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-lg bg-[#1f2937]">
+                        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                           <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${method.isActive ? 'bg-[#118bdd]' : 'bg-gray-600'}`}>
                             <CreditCard className="w-5 h-5 text-white" />
                           </div>
@@ -1782,7 +2178,7 @@ export default function Admin() {
                             </p>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <button
                             onClick={() => togglePaymentMethod(method.id, !method.isActive)}
                             className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${method.isActive
@@ -1811,7 +2207,7 @@ export default function Admin() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="flex gap-3 mb-6">
+                <div className="flex flex-col sm:flex-row gap-3 mb-6">
                   <Input
                     value={userSearchId}
                     onChange={(e) => {
@@ -1820,7 +2216,7 @@ export default function Admin() {
                     }}
                     maxLength={7}
                     placeholder="Enter 7-digit User ID"
-                    className="bg-[#1f2937] border-white/10 text-white max-w-xs"
+                    className="bg-[#1f2937] border-white/10 text-white w-full sm:max-w-xs"
                   />
                   <Button
                     onClick={searchUserById}
@@ -1833,19 +2229,22 @@ export default function Admin() {
 
                 {searchedUser && (
                   <div className="space-y-6">
-                    {/* User Info */}
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* User Details Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                      {/* 1. User ID */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">User ID</p>
                         <p className="text-xl font-bold text-[#118bdd] font-mono">{searchedUser.userId}</p>
                       </div>
+                      {/* 2. Name */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Name</p>
                         <p className="text-xl font-bold text-white">{searchedUser.fullName}</p>
                       </div>
+                      {/* 3. Status */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Status</p>
-                        <div className="space-y-1">
+                        <div className="space-y-1 mt-1">
                           {searchedUser.accountStatus === 'permanent_blocked' && (
                             <Badge className="bg-red-500/20 text-red-400">Permanently Blocked</Badge>
                           )}
@@ -1866,39 +2265,89 @@ export default function Admin() {
                           )}
                         </div>
                       </div>
-                    </div>
-
-                    {/* Wallet Info - Three Wallets */}
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                      {/* 4. Fund Wallet */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
-                        <p className="text-sm text-white/50">Deposit Wallet</p>
+                        <p className="text-sm text-white/50">Fund Wallet</p>
                         <p className="text-xl font-bold text-white">{formatCurrency(searchedUser.wallet?.depositWallet || 0)}</p>
                       </div>
+                      {/* 5. Pin Wallet */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">PIN Wallet</p>
                         <p className="text-xl font-bold text-[#118bdd]">{searchedUser.pins?.filter((p: Pin) => p.status === 'unused').length || 0} PINs</p>
                       </div>
+                      {/* 6. Income Wallet */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Income Wallet</p>
                         <p className="text-xl font-bold text-emerald-400">{formatCurrency(searchedUser.wallet?.incomeWallet || 0)}</p>
                       </div>
+                      {/* 7. Total Earnings */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
-                        <p className="text-sm text-white/50">Direct Referrals</p>
+                        <p className="text-sm text-white/50">Total Earnings</p>
+                        <p className="text-xl font-bold text-emerald-400">{formatCurrency(searchedUser.wallet?.totalEarning || 0)}</p>
+                      </div>
+                      {/* 8. Give Help */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">Give Help</p>
+                        <p className="text-xl font-bold text-orange-400">{formatCurrency(searchedUser.giveHelpAmount || 0)}</p>
+                      </div>
+                      {/* 9. Received Help */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">Received Help</p>
+                        <p className="text-xl font-bold text-emerald-400">{formatCurrency(searchedUser.receiveHelpAmount || 0)}</p>
+                      </div>
+                      {/* 10. Locked Help */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">Locked Help</p>
+                        <p className="text-xl font-bold text-white/80">{formatCurrency((searchedUser.wallet?.lockedIncomeWallet || 0) + (searchedUser.wallet?.giveHelpLocked || 0))}</p>
+                      </div>
+                      {/* 11. Direct Referral */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">Direct Referral</p>
                         <p className="text-xl font-bold text-white">{searchedUser.directCount}</p>
                       </div>
-                    </div>
-
-                    {/* Team Stats */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* 12. Direct Referral Income */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
-                        <p className="text-sm text-white/50 mb-2">Left Team</p>
-                        <p className="text-2xl font-bold text-white">{searchedUser.teamStats?.left || 0}</p>
-                        <p className="text-sm text-emerald-400">{searchedUser.teamStats?.leftActive || 0} Active</p>
+                        <p className="text-sm text-white/50">Direct Referral Income</p>
+                        <p className="text-xl font-bold text-white/80">{formatCurrency(searchedUser.directReferralIncome || 0)}</p>
                       </div>
+                      {/* 13. Left Team */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
-                        <p className="text-sm text-white/50 mb-2">Right Team</p>
-                        <p className="text-2xl font-bold text-white">{searchedUser.teamStats?.right || 0}</p>
-                        <p className="text-sm text-emerald-400">{searchedUser.teamStats?.rightActive || 0} Active</p>
+                        <p className="text-sm text-white/50 mb-1">Left Team</p>
+                        <p className="text-xl font-bold text-white">{searchedUser.teamStats?.left || 0}</p>
+                        <p className="text-xs text-emerald-400">{searchedUser.teamStats?.leftActive || 0} Active</p>
+                      </div>
+                      {/* 14. Right Team */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50 mb-1">Right Team</p>
+                        <p className="text-xl font-bold text-white">{searchedUser.teamStats?.right || 0}</p>
+                        <p className="text-xs text-emerald-400">{searchedUser.teamStats?.rightActive || 0} Active</p>
+                      </div>
+                      {/* 15. Level Filled */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">Level Filled</p>
+                        <p className="text-xl font-bold text-white">
+                          {(() => {
+                            const progress = Database.getLevelFillProgress(searchedUser.id);
+                            return `Level ${progress.level} (${progress.filled}/${progress.required} filled)`;
+                          })()}
+                        </p>
+                      </div>
+                      {/* 16. Qualified Level */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">Qualified Level</p>
+                        <p className="text-xl font-bold text-white">
+                          Level {Database.getQualifiedLevel(searchedUser.id)}
+                        </p>
+                      </div>
+                      {/* 17. Offer Achievement */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">Offer Achievement</p>
+                        <p className="text-xl font-bold text-purple-400">{searchedUser.offerAchieved ? 'Achieved' : 'Not Achieved'}</p>
+                      </div>
+                      {/* 18. User's Transition */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">User's Transition</p>
+                        <p className="text-xl font-bold text-white/80">{searchedUser.transactions?.length || 0} Txns</p>
                       </div>
                     </div>
 
@@ -1908,7 +2357,7 @@ export default function Admin() {
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div className="p-4 rounded-lg bg-[#1f2937]">
                           <p className="text-sm text-white/50">Total Pending</p>
-                          <p className="text-2xl font-bold text-white">{searchedUser.pendingMatrixDebug?.totalPending || 0}</p>
+                          <p className="text-xl sm:text-2xl font-bold text-white">{searchedUser.pendingMatrixDebug?.totalPending || 0}</p>
                         </div>
                         <div className="p-4 rounded-lg bg-[#1f2937]">
                           <p className="text-sm text-white/50">Blocked At Item</p>
@@ -1933,8 +2382,8 @@ export default function Admin() {
                       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                         <div className="p-4 rounded-lg bg-[#1f2937]">
                           <p className="text-white/80 font-medium mb-3">Pending By Level</p>
-                          <div className="overflow-x-auto">
-                            <table className="w-full">
+                          <div className="overflow-x-auto admin-table-scroll">
+                            <table className="w-full admin-table">
                               <thead>
                                 <tr className="border-b border-white/10">
                                   <th className="text-left py-2 px-3 text-white/60 text-sm">Level</th>
@@ -1965,7 +2414,7 @@ export default function Admin() {
                           <div className="max-h-80 overflow-auto space-y-2 pr-1">
                             {searchedUser.pendingMatrixDebug?.items?.slice(0, 50).map((item: any) => (
                               <div key={item.id} className="p-3 rounded-lg border border-white/10 bg-[#0f172a]">
-                                <div className="flex items-center justify-between gap-3">
+                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                   <p className="text-sm text-white font-medium">
                                     Level {item.level} - {safeText(item.side).toUpperCase()} - To {item.toUserId}
                                   </p>
@@ -1991,7 +2440,7 @@ export default function Admin() {
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div className="p-4 rounded-lg bg-[#1f2937]">
                           <p className="text-sm text-white/50">Total Pending Incoming</p>
-                          <p className="text-2xl font-bold text-white">{searchedUser.incomingPendingMatrixDebug?.totalPending || 0}</p>
+                          <p className="text-xl sm:text-2xl font-bold text-white">{searchedUser.incomingPendingMatrixDebug?.totalPending || 0}</p>
                         </div>
                         <div className="p-4 rounded-lg bg-[#1f2937]">
                           <p className="text-sm text-white/50">Blocked Senders</p>
@@ -2008,8 +2457,8 @@ export default function Admin() {
                       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                         <div className="p-4 rounded-lg bg-[#1f2937]">
                           <p className="text-white/80 font-medium mb-3">Incoming Pending By Level</p>
-                          <div className="overflow-x-auto">
-                            <table className="w-full">
+                          <div className="overflow-x-auto admin-table-scroll">
+                            <table className="w-full admin-table">
                               <thead>
                                 <tr className="border-b border-white/10">
                                   <th className="text-left py-2 px-3 text-white/60 text-sm">Level</th>
@@ -2040,7 +2489,7 @@ export default function Admin() {
                           <div className="max-h-80 overflow-auto space-y-2 pr-1">
                             {searchedUser.incomingPendingMatrixDebug?.items?.slice(0, 50).map((item: any) => (
                               <div key={item.id} className="p-3 rounded-lg border border-white/10 bg-[#0f172a]">
-                                <div className="flex items-center justify-between gap-3">
+                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                                   <p className="text-sm text-white font-medium">
                                     Level {item.level} - {safeText(item.side).toUpperCase()} - From {item.fromUserId}
                                   </p>
@@ -2063,8 +2512,8 @@ export default function Admin() {
                     {/* User's Transactions */}
                     <div>
                       <h4 className="text-white font-medium mb-3">User's Transactions</h4>
-                      <div className="overflow-x-auto">
-                        <table className="w-full">
+                      <div className="overflow-x-auto admin-table-scroll">
+                        <table className="w-full admin-table">
                           <thead>
                             <tr className="border-b border-white/10">
                               <th className="text-left py-2 px-4 text-white/60 font-medium">Type</th>
@@ -2077,8 +2526,8 @@ export default function Admin() {
                             {searchedUser.transactions?.slice(0, 10).map((tx: any) => (
                               <tr key={tx.id} className="border-b border-white/5">
                                 <td className="py-2 px-4">
-                                  <Badge variant="outline" className="border-white/20 text-white/80 capitalize">
-                                    {tx.type.replace('_', ' ')}
+                                  <Badge variant="outline" className="border-white/20 text-white/80">
+                                    {getTransactionTypeLabel(tx.type)}
                                   </Badge>
                                 </td>
                                 <td className={`py-2 px-4 font-medium ${tx.amount > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -2156,20 +2605,229 @@ export default function Admin() {
             </Card>
           </TabsContent>
 
+          {/* Support Tab */}
+          <TabsContent value="support">
+            <div className="space-y-4">
+              <Card className="glass border-white/10">
+                <CardHeader>
+                  <CardTitle className="text-white flex items-center gap-2">
+                    <Ticket className="w-5 h-5 text-[#118bdd]" />
+                    Support Tickets
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="space-y-2">
+                      <Label className="text-white/80">Search</Label>
+                      <Input
+                        value={supportSearch}
+                        onChange={(e) => setSupportSearch(e.target.value)}
+                        placeholder="Ticket ID / User ID / Name / Subject"
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-white/80">Status Filter</Label>
+                      <select
+                        value={supportStatusFilter}
+                        onChange={(e) => setSupportStatusFilter(e.target.value as 'all' | SupportTicketStatus)}
+                        className="w-full h-10 rounded-md bg-[#1f2937] border border-white/10 text-white px-3 text-sm"
+                      >
+                        <option value="all">All Statuses</option>
+                        {SUPPORT_STATUS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex items-end">
+                      <Button
+                        variant="outline"
+                        onClick={loadSupportTickets}
+                        className="w-full border-white/20 text-white hover:bg-white/10"
+                      >
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        Refresh Tickets
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                    <div className="xl:col-span-1 space-y-2 max-h-[580px] overflow-y-auto pr-1">
+                      {filteredSupportTickets.map((ticket) => {
+                        const isActive = ticket.ticket_id === selectedSupportTicketId;
+                        return (
+                          <button
+                            type="button"
+                            key={ticket.ticket_id}
+                            onClick={() => setSelectedSupportTicketId(ticket.ticket_id)}
+                            className={`w-full text-left p-3 rounded-lg border transition-colors ${isActive ? 'border-[#118bdd] bg-[#118bdd]/15' : 'border-white/10 bg-[#1f2937] hover:bg-[#263248]'
+                              }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-mono text-white">{ticket.ticket_id}</p>
+                              <Badge className="bg-white/10 text-white/80 border-white/20">{SUPPORT_STATUS_OPTIONS.find((s) => s.value === ticket.status)?.label || ticket.status}</Badge>
+                            </div>
+                            <p className="text-sm text-white mt-2 line-clamp-1">{ticket.subject || '-'}</p>
+                            <p className="text-xs text-white/50 mt-1">{ticket.user_id} - {ticket.name || '-'}</p>
+                            <p className="text-xs text-white/40 mt-1">{new Date(ticket.updated_at).toLocaleString()}</p>
+                          </button>
+                        );
+                      })}
+                      {filteredSupportTickets.length === 0 && (
+                        <p className="text-white/50 text-sm text-center py-6">No support tickets found</p>
+                      )}
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      {!selectedSupportTicket && (
+                        <div className="rounded-lg border border-white/10 bg-[#1f2937] p-6 text-white/60 text-center">
+                          Select a ticket to view conversation.
+                        </div>
+                      )}
+
+                      {selectedSupportTicket && (
+                        <div className="space-y-4">
+                          <div className="rounded-lg border border-white/10 bg-[#1f2937] p-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                              <p className="text-white/70"><span className="text-white">Ticket ID:</span> {selectedSupportTicket.ticket_id}</p>
+                              <p className="text-white/70"><span className="text-white">User:</span> {selectedSupportTicket.user_id} ({selectedSupportTicket.name || '-'})</p>
+                              <p className="text-white/70"><span className="text-white">Email:</span> {selectedSupportTicket.email || '-'}</p>
+                              <p className="text-white/70"><span className="text-white">Category:</span> {SUPPORT_CATEGORY_LABELS[selectedSupportTicket.category] || selectedSupportTicket.category}</p>
+                              <p className="text-white/70"><span className="text-white">Priority:</span> {selectedSupportTicket.priority}</p>
+                              <p className="text-white/70"><span className="text-white">Created:</span> {new Date(selectedSupportTicket.created_at).toLocaleString()}</p>
+                            </div>
+                          </div>
+
+                          <div className="rounded-lg border border-white/10 bg-[#1f2937] p-4 space-y-3">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                              <div className="space-y-2 md:col-span-2">
+                                <Label className="text-white/80">Change Status</Label>
+                                <select
+                                  value={supportStatusDraft}
+                                  onChange={(e) => setSupportStatusDraft(e.target.value as SupportTicketStatus)}
+                                  className="w-full h-10 rounded-md bg-[#111827] border border-white/10 text-white px-3 text-sm"
+                                >
+                                  {SUPPORT_STATUS_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="flex items-end">
+                                <Button onClick={handleSupportStatusUpdate} className="w-full bg-[#118bdd] hover:bg-[#0f79be] text-white">
+                                  Update Status
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="rounded-lg border border-white/10 bg-[#1f2937] p-4">
+                            <p className="text-white/80 font-medium mb-3">Ticket History</p>
+                            <div className="space-y-3 max-h-[320px] overflow-y-auto pr-1">
+                              {selectedSupportTicket.messages.map((msg) => (
+                                <div key={msg.id} className="rounded-lg border border-white/10 bg-[#111827] p-3">
+                                  <div className="flex items-center justify-between gap-3 mb-2">
+                                    <p className="text-sm text-white">
+                                      {msg.sender_type === 'admin' ? 'Admin' : 'User'} - {msg.sender_name}
+                                    </p>
+                                    <p className="text-xs text-white/50">{new Date(msg.created_at).toLocaleString()}</p>
+                                  </div>
+                                  <p className="text-white/75 text-sm whitespace-pre-wrap">{msg.message || '-'}</p>
+                                  {msg.attachments.length > 0 && (
+                                    <div className="mt-2 space-y-2">
+                                      {msg.attachments.map((att) => (
+                                        <div key={att.id}>
+                                          {(att.file_type?.startsWith('image/') || att.data_url?.startsWith('data:image/')) ? (
+                                            <a href={att.data_url} target="_blank" rel="noreferrer" className="block">
+                                              <img
+                                                src={att.data_url}
+                                                alt={att.file_name}
+                                                className="max-w-[280px] max-h-[200px] rounded-lg border border-white/10 object-contain cursor-pointer hover:opacity-80 transition-opacity"
+                                              />
+                                              <p className="text-xs text-[#7cc9ff] mt-1">{att.file_name}</p>
+                                            </a>
+                                          ) : (
+                                            <a href={att.data_url} target="_blank" rel="noreferrer" className="block text-xs text-[#7cc9ff] hover:underline">
+                                              📎 {att.file_name}
+                                            </a>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {selectedSupportTicket.status === 'closed' ? (
+                            <div className="rounded-lg border border-white/10 bg-[#1f2937] p-4">
+                              <p className="text-white/50 text-sm text-center">This ticket is closed. Reopen it by changing the status above to reply.</p>
+                            </div>
+                          ) : (
+                            <div className="rounded-lg border border-white/10 bg-[#1f2937] p-4 space-y-3">
+                              <p className="text-white/80 font-medium">Reply to Ticket</p>
+                              <Textarea
+                                rows={4}
+                                value={supportReplyMessage}
+                                onChange={(e) => setSupportReplyMessage(e.target.value)}
+                                placeholder="Write your response for the user..."
+                                className="bg-[#111827] border-white/10 text-white"
+                              />
+                              <Input
+                                type="file"
+                                accept="image/*,.pdf"
+                                onChange={(e) => { void handleSupportAttachmentChange(e); }}
+                                className="bg-[#111827] border-white/10 text-white file:text-white"
+                              />
+                              {supportReplyAttachment && (
+                                <p className="text-xs text-emerald-400">Attachment ready: {supportReplyAttachment.file_name}</p>
+                              )}
+                              <div className="flex flex-col sm:flex-row gap-2">
+                                <Button onClick={handleSupportReply} className="bg-[#118bdd] hover:bg-[#0f79be] text-white">
+                                  Reply to User
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  onClick={() => {
+                                    setSupportStatusDraft('closed');
+                                    const closed = Database.updateSupportTicketStatus(selectedSupportTicket.ticket_id, 'closed');
+                                    if (!closed) {
+                                      toast.error('Failed to close ticket');
+                                      return;
+                                    }
+                                    loadSupportTickets();
+                                    toast.success('Ticket closed');
+                                  }}
+                                  className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                                >
+                                  Close Ticket
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          </TabsContent>
+
           {/* Reports Tab */}
           <TabsContent value="reports">
             <Card className="glass border-white/10">
-              <CardHeader className="flex flex-row items-center justify-between">
+              <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <CardTitle className="text-white flex items-center gap-2">
                   <BarChart3 className="w-5 h-5 text-[#118bdd]" />
                   Advanced Reports & Filters
                 </CardTitle>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
                   <Button
                     variant="outline"
                     onClick={handleActivateAndRebuildMatrix}
                     disabled={isRebuildingMatrix}
-                    className="border-rose-500/30 text-rose-300 hover:bg-rose-500/10"
+                    className="w-full sm:w-auto border-rose-500/30 text-rose-300 hover:bg-rose-500/10"
                   >
                     {isRebuildingMatrix ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
                     Activate + Rebuild Matrix
@@ -2178,7 +2836,7 @@ export default function Admin() {
                     variant="outline"
                     onClick={handleReconcileTrackers}
                     disabled={isReconciling}
-                    className="border-amber-500/30 text-amber-300 hover:bg-amber-500/10"
+                    className="w-full sm:w-auto border-amber-500/30 text-amber-300 hover:bg-amber-500/10"
                   >
                     {isReconciling ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
                     Reconcile Matrix
@@ -2210,12 +2868,15 @@ export default function Admin() {
                 )}
                 <Tabs value={reportTab} onValueChange={setReportTab} className="space-y-4">
                   <TabsList className="bg-[#1f2937] border border-white/10 flex-wrap h-auto">
-                    <TabsTrigger value="member-report" className="data-[state=active]:bg-[#118bdd]">Member Report</TabsTrigger>
-                    <TabsTrigger value="receive-help" className="data-[state=active]:bg-[#118bdd]">Receive Help</TabsTrigger>
-                    <TabsTrigger value="give-help" className="data-[state=active]:bg-[#118bdd]">Give Help</TabsTrigger>
-                    <TabsTrigger value="offer-achievers" className="data-[state=active]:bg-[#118bdd]">Offer Achievers</TabsTrigger>
-                    <TabsTrigger value="all-level" className="data-[state=active]:bg-[#118bdd]">All Level Report</TabsTrigger>
-                    <TabsTrigger value="safety-pool" className="data-[state=active]:bg-[#118bdd]">Safety Pool</TabsTrigger>
+                    <TabsTrigger value="member-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Member Report</TabsTrigger>
+                    <TabsTrigger value="receive-help" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Receive Help</TabsTrigger>
+                    <TabsTrigger value="give-help" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Give Help</TabsTrigger>
+                    <TabsTrigger value="deposit-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Deposit Report</TabsTrigger>
+                    <TabsTrigger value="withdrawal-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Withdrawal Report</TabsTrigger>
+                    <TabsTrigger value="locked-income" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Locked Income</TabsTrigger>
+                    <TabsTrigger value="offer-achievers" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Offer Achievers</TabsTrigger>
+                    <TabsTrigger value="all-level" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">All Level Report</TabsTrigger>
+                    <TabsTrigger value="safety-pool" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Safety Pool</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="member-report" className="space-y-4">
@@ -2241,33 +2902,33 @@ export default function Admin() {
                         <option value="permanent_blocked">Permanent Blocked</option>
                       </select>
                     </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
                         <thead>
                           <tr className="border-b border-white/10">
-                            <th className="text-left py-2 px-3 text-white/60">Date & Time</th>
                             <th className="text-left py-2 px-3 text-white/60">ID</th>
                             <th className="text-left py-2 px-3 text-white/60">Name</th>
                             <th className="text-left py-2 px-3 text-white/60">Mobile</th>
-                            <th className="text-left py-2 px-3 text-white/60">Sponsor ID</th>
                             <th className="text-left py-2 px-3 text-white/60">Sponsor Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Current Level</th>
                             <th className="text-left py-2 px-3 text-white/60">Qualified Level</th>
                             <th className="text-left py-2 px-3 text-white/60">Offer</th>
                             <th className="text-left py-2 px-3 text-white/60">Status</th>
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
                           </tr>
                         </thead>
                         <tbody>
                           {memberReportRows.slice(0, 200).map((r) => (
                             <tr key={r.id} className="border-b border-white/5">
-                              <td className="py-2 px-3 text-white/60">{formatDate(r.createdAt)}</td>
                               <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
                               <td className="py-2 px-3 text-white">{r.name}</td>
                               <td className="py-2 px-3 text-white/60">{r.mobile}</td>
-                              <td className="py-2 px-3 text-white/60">{r.sponsorId}</td>
                               <td className="py-2 px-3 text-white/60">{r.sponsorName}</td>
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{r.currentLevelDisplay}</td>
                               <td className="py-2 px-3 text-white/60">L{r.qualifiedLevel}</td>
                               <td className="py-2 px-3 text-white/60">{r.achievedOffer}</td>
                               <td className="py-2 px-3 text-white/60">{r.blockStatus}</td>
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(r.createdAt)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -2286,29 +2947,29 @@ export default function Admin() {
                       <Input placeholder="Min Amount" type="number" value={receiveFilters.amountMin} onChange={(e) => setReceiveFilters({ ...receiveFilters, amountMin: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
                       <Input placeholder="Max Amount" type="number" value={receiveFilters.amountMax} onChange={(e) => setReceiveFilters({ ...receiveFilters, amountMax: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
                     </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
                         <thead>
                           <tr className="border-b border-white/10">
-                            <th className="text-left py-2 px-3 text-white/60">Date & Time</th>
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
                             <th className="text-left py-2 px-3 text-white/60">ID</th>
                             <th className="text-left py-2 px-3 text-white/60">User Name</th>
                             <th className="text-left py-2 px-3 text-white/60">Received Help</th>
                             <th className="text-left py-2 px-3 text-white/60">From Level</th>
-                            <th className="text-left py-2 px-3 text-white/60">Status</th>
-                            <th className="text-left py-2 px-3 text-white/60">Help # in Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Received From ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Received From User Name</th>
                           </tr>
                         </thead>
                         <tbody>
                           {receiveHelpReportRows.slice(0, 300).map((r) => (
                             <tr key={r.id} className="border-b border-white/5">
-                              <td className="py-2 px-3 text-white/60">{formatDate(r.createdAt)}</td>
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(r.createdAt)}</td>
                               <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
                               <td className="py-2 px-3 text-white">{r.userName}</td>
                               <td className="py-2 px-3 text-emerald-400">{formatCurrency(r.amount)}</td>
                               <td className="py-2 px-3 text-white/60">{r.level}</td>
-                              <td className="py-2 px-3 text-white/60">{r.status}</td>
-                              <td className="py-2 px-3 text-white/60">{r.helpNumberInLevel}</td>
+                              <td className="py-2 px-3 text-white/60 font-mono">{r.fromUserId}</td>
+                              <td className="py-2 px-3 text-white/60">{r.fromUserName}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -2326,11 +2987,11 @@ export default function Admin() {
                       <Input placeholder="Min Amount" type="number" value={giveFilters.amountMin} onChange={(e) => setGiveFilters({ ...giveFilters, amountMin: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
                       <Input placeholder="Max Amount" type="number" value={giveFilters.amountMax} onChange={(e) => setGiveFilters({ ...giveFilters, amountMax: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
                     </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
                         <thead>
                           <tr className="border-b border-white/10">
-                            <th className="text-left py-2 px-3 text-white/60">Date & Time</th>
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
                             <th className="text-left py-2 px-3 text-white/60">ID</th>
                             <th className="text-left py-2 px-3 text-white/60">User Name</th>
                             <th className="text-left py-2 px-3 text-white/60">Give Help</th>
@@ -2341,7 +3002,7 @@ export default function Admin() {
                         <tbody>
                           {giveHelpReportRows.slice(0, 300).map((r) => (
                             <tr key={r.id} className="border-b border-white/5">
-                              <td className="py-2 px-3 text-white/60">{formatDate(r.createdAt)}</td>
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(r.createdAt)}</td>
                               <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
                               <td className="py-2 px-3 text-white">{r.userName}</td>
                               <td className="py-2 px-3 text-orange-400">{formatCurrency(r.amount)}</td>
@@ -2355,13 +3016,148 @@ export default function Admin() {
                     </div>
                   </TabsContent>
 
+                  <TabsContent value="deposit-report" className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
+                      <Input type="date" value={depositReportFilters.dateFrom} onChange={(e) => setDepositReportFilters({ ...depositReportFilters, dateFrom: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input type="date" value={depositReportFilters.dateTo} onChange={(e) => setDepositReportFilters({ ...depositReportFilters, dateTo: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="User ID" value={depositReportFilters.userId} onChange={(e) => setDepositReportFilters({ ...depositReportFilters, userId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="User Name" value={depositReportFilters.userName} onChange={(e) => setDepositReportFilters({ ...depositReportFilters, userName: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <select value={depositReportFilters.status} onChange={(e) => setDepositReportFilters({ ...depositReportFilters, status: e.target.value })} className="px-3 h-10 bg-[#1f2937] border border-white/10 rounded-md text-white">
+                        <option value="">All Status</option>
+                        <option value="completed">Completed</option>
+                        <option value="pending">Pending</option>
+                        <option value="rejected">Rejected</option>
+                      </select>
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">User Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Amount</th>
+                            <th className="text-left py-2 px-3 text-white/60">Method</th>
+                            <th className="text-left py-2 px-3 text-white/60">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {depositReportRows.slice(0, 300).map((r) => (
+                            <tr key={r.id} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(r.createdAt)}</td>
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
+                              <td className="py-2 px-3 text-white">{r.userName}</td>
+                              <td className="py-2 px-3 text-emerald-400 font-medium">{formatCurrency(r.amount)}</td>
+                              <td className="py-2 px-3 text-white/60">{r.method}</td>
+                              <td className="py-2 px-3">
+                                <Badge className={
+                                  r.status === 'completed' ? 'bg-emerald-500/20 text-emerald-400' :
+                                    r.status === 'pending' ? 'bg-amber-500/20 text-amber-400' :
+                                      'bg-red-500/20 text-red-400'
+                                }>
+                                  {r.status}
+                                </Badge>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {depositReportRows.length === 0 && <p className="text-center text-white/50 py-6">No matching deposit records</p>}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="withdrawal-report" className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
+                      <Input type="date" value={withdrawalReportFilters.dateFrom} onChange={(e) => setWithdrawalReportFilters({ ...withdrawalReportFilters, dateFrom: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input type="date" value={withdrawalReportFilters.dateTo} onChange={(e) => setWithdrawalReportFilters({ ...withdrawalReportFilters, dateTo: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="User ID" value={withdrawalReportFilters.userId} onChange={(e) => setWithdrawalReportFilters({ ...withdrawalReportFilters, userId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="User Name" value={withdrawalReportFilters.userName} onChange={(e) => setWithdrawalReportFilters({ ...withdrawalReportFilters, userName: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <select value={withdrawalReportFilters.status} onChange={(e) => setWithdrawalReportFilters({ ...withdrawalReportFilters, status: e.target.value })} className="px-3 h-10 bg-[#1f2937] border border-white/10 rounded-md text-white">
+                        <option value="">All Status</option>
+                        <option value="completed">Completed</option>
+                        <option value="pending">Pending</option>
+                        <option value="cancelled">Cancelled</option>
+                      </select>
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">User Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Amount</th>
+                            <th className="text-left py-2 px-3 text-white/60">Status</th>
+                            <th className="text-left py-2 px-3 text-white/60">Description</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {withdrawalReportRows.slice(0, 300).map((r) => (
+                            <tr key={r.id} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(r.createdAt)}</td>
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
+                              <td className="py-2 px-3 text-white">{r.userName}</td>
+                              <td className="py-2 px-3 text-rose-400 font-medium">{formatCurrency(r.amount)}</td>
+                              <td className="py-2 px-3">
+                                <Badge className={
+                                  r.status === 'completed' ? 'bg-emerald-500/20 text-emerald-400' :
+                                    r.status === 'pending' ? 'bg-amber-500/20 text-amber-400' :
+                                      'bg-red-500/20 text-red-400'
+                                }>
+                                  {r.status}
+                                </Badge>
+                              </td>
+                              <td className="py-2 px-3 text-white/60 text-sm">{r.description}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {withdrawalReportRows.length === 0 && <p className="text-center text-white/50 py-6">No matching withdrawal records</p>}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="locked-income" className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                      <Input placeholder="User ID" value={lockedIncomeFilters.userId} onChange={(e) => setLockedIncomeFilters({ ...lockedIncomeFilters, userId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="User Name" value={lockedIncomeFilters.name} onChange={(e) => setLockedIncomeFilters({ ...lockedIncomeFilters, name: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Min Amount" type="number" value={lockedIncomeFilters.minAmount} onChange={(e) => setLockedIncomeFilters({ ...lockedIncomeFilters, minAmount: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">User Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Locked Amount</th>
+                            <th className="text-left py-2 px-3 text-white/60">Current Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Direct Count</th>
+                            <th className="text-left py-2 px-3 text-white/60">Required for Next Level</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {lockedIncomeRows.slice(0, 300).map((r) => (
+                            <tr key={r.userId} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
+                              <td className="py-2 px-3 text-white">{r.name}</td>
+                              <td className="py-2 px-3 text-cyan-400 font-medium">{formatCurrency(r.lockedAmount)}</td>
+                              <td className="py-2 px-3"><Badge className="bg-purple-500/20 text-purple-400">Level {r.currentLevel}</Badge></td>
+                              <td className="py-2 px-3 text-white/60">{r.directCount}</td>
+                              <td className="py-2 px-3 text-white/60">{r.requiredDirect}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {lockedIncomeRows.length === 0 && <p className="text-center text-white/50 py-6">No users with locked income found</p>}
+                    </div>
+                  </TabsContent>
+
                   <TabsContent value="offer-achievers" className="space-y-4">
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3">
                       <Input type="date" value={offerFilters.dateFrom} onChange={(e) => setOfferFilters({ ...offerFilters, dateFrom: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
                       <Input type="date" value={offerFilters.dateTo} onChange={(e) => setOfferFilters({ ...offerFilters, dateTo: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
                       <Input placeholder="User ID" value={offerFilters.userId} onChange={(e) => setOfferFilters({ ...offerFilters, userId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
                       <Input placeholder="Name" value={offerFilters.name} onChange={(e) => setOfferFilters({ ...offerFilters, name: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
-                      <Input placeholder="Complete Level" type="number" min={1} max={10} value={offerFilters.level} onChange={(e) => setOfferFilters({ ...offerFilters, level: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Qualified Level" type="number" min={1} max={10} value={offerFilters.level} onChange={(e) => setOfferFilters({ ...offerFilters, level: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
                       <select value={offerFilters.offer} onChange={(e) => setOfferFilters({ ...offerFilters, offer: e.target.value })} className="px-3 h-10 bg-[#1f2937] border border-white/10 rounded-md text-white">
                         <option value="">All Offers</option>
                         <option value="National Tour Achiever">National Tour Achiever</option>
@@ -2371,15 +3167,15 @@ export default function Admin() {
                       <Input placeholder="Sponsor ID" value={offerFilters.sponsorId} onChange={(e) => setOfferFilters({ ...offerFilters, sponsorId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
                       <Input placeholder="Sponsor Name" value={offerFilters.sponsorName} onChange={(e) => setOfferFilters({ ...offerFilters, sponsorName: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
                     </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
                         <thead>
                           <tr className="border-b border-white/10">
-                            <th className="text-left py-2 px-3 text-white/60">Date</th>
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date</th>
                             <th className="text-left py-2 px-3 text-white/60">ID</th>
                             <th className="text-left py-2 px-3 text-white/60">Name</th>
                             <th className="text-left py-2 px-3 text-white/60">Mobile</th>
-                            <th className="text-left py-2 px-3 text-white/60">Complete Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Qualified Level</th>
                             <th className="text-left py-2 px-3 text-white/60">Offer</th>
                             <th className="text-left py-2 px-3 text-white/60">Sponsor ID</th>
                             <th className="text-left py-2 px-3 text-white/60">Sponsor Name</th>
@@ -2387,13 +3183,13 @@ export default function Admin() {
                           </tr>
                         </thead>
                         <tbody>
-                          {offerAchieverRows.slice(0, 200).map((r) => (
-                            <tr key={r.id} className="border-b border-white/5">
-                              <td className="py-2 px-3 text-white/60">{formatDate(r.achievedAt)}</td>
+                          {offerAchieverRows.slice(0, 200).map((r, index) => (
+                            <tr key={index} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(r.achievedAt)}</td>
                               <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
                               <td className="py-2 px-3 text-white">{r.name}</td>
                               <td className="py-2 px-3 text-white/60">{r.mobile}</td>
-                              <td className="py-2 px-3 text-white/60">{r.completeLevel}</td>
+                              <td className="py-2 px-3 text-white/60">L{r.qualifiedLevel}</td>
                               <td className="py-2 px-3 text-white/60">{r.offerAchieved}</td>
                               <td className="py-2 px-3 text-white/60">{r.sponsorId}</td>
                               <td className="py-2 px-3 text-white/60">{r.sponsorName}</td>
@@ -2424,31 +3220,35 @@ export default function Admin() {
                       <BarChart3 className="w-4 h-4 mr-2" />
                       Generate Level Report
                     </Button>
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
                         <thead>
                           <tr className="border-b border-white/10">
                             <th className="text-left py-2 px-3 text-white/60">Level</th>
-                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">User Id</th>
                             <th className="text-left py-2 px-3 text-white/60">Name</th>
-                            <th className="text-left py-2 px-3 text-white/60">Sponsor</th>
-                            <th className="text-left py-2 px-3 text-white/60">Get Help</th>
-                            <th className="text-left py-2 px-3 text-white/60">Give Help</th>
-                            <th className="text-left py-2 px-3 text-white/60">Net</th>
+                            <th className="text-left py-2 px-3 text-white/60">Give help</th>
+                            <th className="text-left py-2 px-3 text-white/60">Received Help</th>
+                            <th className="text-left py-2 px-3 text-white/60">Direct Refer Income</th>
+                            <th className="text-left py-2 px-3 text-white/60">Income wallet</th>
+                            <th className="text-left py-2 px-3 text-white/60">Total Earning</th>
+                            <th className="text-left py-2 px-3 text-white/60">Locked help</th>
                             <th className="text-left py-2 px-3 text-white/60">Qualified</th>
                           </tr>
                         </thead>
                         <tbody>
                           {filteredLevelReport.slice(0, 300).map((row, index) => (
                             <tr key={`${row.userId}_${index}`} className="border-b border-white/5">
-                              <td className="py-2 px-3"><Badge className="bg-[#118bdd]/20 text-[#118bdd]">Level {row.level}</Badge></td>
+                              <td className="py-2 px-3"><Badge className="bg-[#118bdd]/20 text-[#118bdd]">{row.levelFilledText || `Level ${row.level}`}</Badge></td>
                               <td className="py-2 px-3 text-[#118bdd] font-mono">{row.userId}</td>
                               <td className="py-2 px-3 text-white">{row.fullName}</td>
-                              <td className="py-2 px-3 text-white/60">{row.sponsorId}</td>
-                              <td className="py-2 px-3 text-emerald-400">{formatCurrency(row.getHelpAmount)}</td>
                               <td className="py-2 px-3 text-orange-400">{formatCurrency(row.giveHelpAmount)}</td>
-                              <td className="py-2 px-3 text-purple-400">{formatCurrency(row.netAmount)}</td>
-                              <td className="py-2 px-3">{row.isQualified ? <Badge className="bg-emerald-500/20 text-emerald-400">Yes</Badge> : <Badge className="bg-red-500/20 text-red-400">No</Badge>}</td>
+                              <td className="py-2 px-3 text-emerald-400">{formatCurrency(row.receiveHelpAmount)}</td>
+                              <td className="py-2 px-3 text-white/60">{formatCurrency(row.directReferralIncome)}</td>
+                              <td className="py-2 px-3 text-white/60">{formatCurrency(row.incomeWallet)}</td>
+                              <td className="py-2 px-3 text-white/60">{formatCurrency(row.totalEarning)}</td>
+                              <td className="py-2 px-3 text-white/60">{formatCurrency(row.lockedHelp)}</td>
+                              <td className="py-2 px-3 text-white/60">L{row.qualifiedLevel}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -2468,11 +3268,11 @@ export default function Admin() {
                       <p className="text-sm text-white/60">Current Safety Pool Balance</p>
                       <p className="text-xl font-bold text-amber-400">{formatCurrency(safetyPoolAmount)}</p>
                     </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full">
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
                         <thead>
                           <tr className="border-b border-white/10">
-                            <th className="text-left py-2 px-3 text-white/60">Date & Time</th>
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
                             <th className="text-left py-2 px-3 text-white/60">From ID</th>
                             <th className="text-left py-2 px-3 text-white/60">From User</th>
                             <th className="text-left py-2 px-3 text-white/60">Amount</th>
@@ -2482,7 +3282,7 @@ export default function Admin() {
                         <tbody>
                           {safetyPoolRows.slice(0, 300).map((r) => (
                             <tr key={r.id} className="border-b border-white/5">
-                              <td className="py-2 px-3 text-white/60">{formatDate(r.createdAt)}</td>
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(r.createdAt)}</td>
                               <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
                               <td className="py-2 px-3 text-white">{r.userName}</td>
                               <td className="py-2 px-3 text-amber-400">{formatCurrency(r.amount)}</td>
@@ -2506,14 +3306,14 @@ export default function Admin() {
                 <CardTitle className="text-white">Help Distribution Table</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
+                <div className="overflow-x-auto admin-table-scroll">
+                  <table className="w-full admin-table">
                     <thead>
                       <tr className="bg-[#1f2937]">
                         <th className="text-left py-4 px-6 text-white/60 font-medium">Level</th>
                         <th className="text-left py-4 px-6 text-white/60 font-medium">Users</th>
                         <th className="text-left py-4 px-6 text-white/60 font-medium">Per User Help</th>
-                        <th className="text-left py-4 px-6 text-white/60 font-medium">Total Get Help</th>
+                        <th className="text-left py-4 px-6 text-white/60 font-medium">Total Receive Help</th>
                         <th className="text-left py-4 px-6 text-white/60 font-medium">Give Help</th>
                         <th className="text-left py-4 px-6 text-white/60 font-medium">Net Balance</th>
                         <th className="text-left py-4 px-6 text-white/60 font-medium">New Direct Required</th>
@@ -2528,7 +3328,7 @@ export default function Admin() {
                           </td>
                           <td className="py-4 px-6 text-white">{row.users.toLocaleString()}</td>
                           <td className="py-4 px-6 text-white">{formatCurrency(row.perUserHelp)}</td>
-                          <td className="py-4 px-6 text-emerald-400">{formatCurrency(row.totalGetHelp)}</td>
+                          <td className="py-4 px-6 text-emerald-400">{formatCurrency(row.totalReceiveHelp)}</td>
                           <td className="py-4 px-6 text-orange-400">{formatCurrency(row.giveHelp)}</td>
                           <td className="py-4 px-6 text-purple-400 font-bold">{formatCurrency(row.netBalance)}</td>
                           <td className="py-4 px-6 text-white/60">{row.directRequired === 0 ? '0' : `+${row.directRequired}`}</td>
@@ -2615,8 +3415,8 @@ export default function Admin() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-4 p-4 rounded-lg bg-[#1f2937]">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 rounded-lg bg-[#1f2937]">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <input
                       type="checkbox"
                       checked={settings.reEntryEnabled}
@@ -2627,8 +3427,8 @@ export default function Admin() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-4 p-4 rounded-lg bg-[#1f2937]">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 rounded-lg bg-[#1f2937]">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <input
                       type="checkbox"
                       checked={settings.safetyPoolEnabled}
@@ -2639,8 +3439,8 @@ export default function Admin() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-4 p-4 rounded-lg bg-[#1f2937]">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 rounded-lg bg-[#1f2937]">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <input
                       type="checkbox"
                       checked={settings.requireOtpForTransactions}
@@ -2685,7 +3485,7 @@ export default function Admin() {
           }
         }}
       >
-        <DialogContent className="glass border-red-500/40 bg-[#111827] max-w-lg">
+        <DialogContent className="glass border-red-500/40 bg-[#111827] max-w-lg w-[calc(100vw-2rem)] sm:w-full">
           <DialogHeader>
             <DialogTitle className="text-red-300">Delete All IDs</DialogTitle>
             <DialogDescription className="text-white/70">
@@ -2742,64 +3542,66 @@ export default function Admin() {
       </Dialog>
 
       {/* Add Funds Dialog */}
-      {selectedUser && (
-        <div
-          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-          onClick={() => setSelectedUser(null)}
-        >
-          <Card
-            className="glass border-white/10 bg-[#111827] max-w-md w-full"
-            onClick={(e) => e.stopPropagation()}
+      {
+        selectedUser && (
+          <div
+            className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+            onClick={() => setSelectedUser(null)}
           >
-            <CardHeader>
-              <CardTitle className="text-white">Add Funds</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label className="text-white/80">Wallet Type</Label>
-                <select
-                  value={fundWalletType}
-                  onChange={(e) => setFundWalletType(e.target.value as 'deposit' | 'income')}
-                  className="w-full px-4 py-2 bg-[#1f2937] border border-white/10 rounded-lg text-white"
-                >
-                  <option value="deposit">Deposit Wallet</option>
-                  <option value="income">Income Wallet</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <Label className="text-white/80">Amount</Label>
-                <Input
-                  type="number"
-                  value={fundAmount}
-                  onChange={(e) => setFundAmount(e.target.value)}
-                  placeholder="Enter amount"
-                  className="bg-[#1f2937] border-white/10 text-white"
-                />
-              </div>
-              <div className="flex gap-3">
-                <Button
-                  variant="outline"
-                  onClick={() => setSelectedUser(null)}
-                  className="flex-1 border-white/20 text-white hover:bg-white/10"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleAddFunds}
-                  disabled={isLoading}
-                  className="flex-1 btn-primary"
-                >
-                  {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Add Funds'}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+            <Card
+              className="glass border-white/10 bg-[#111827] max-w-md w-full"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <CardHeader>
+                <CardTitle className="text-white">Add Funds</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label className="text-white/80">Wallet Type</Label>
+                  <select
+                    value={fundWalletType}
+                    onChange={(e) => setFundWalletType(e.target.value as 'deposit' | 'income')}
+                    className="w-full px-4 py-2 bg-[#1f2937] border border-white/10 rounded-lg text-white"
+                  >
+                    <option value="deposit">Deposit Wallet</option>
+                    <option value="income">Income Wallet</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-white/80">Amount</Label>
+                  <Input
+                    type="number"
+                    value={fundAmount}
+                    onChange={(e) => setFundAmount(e.target.value)}
+                    placeholder="Enter amount"
+                    className="bg-[#1f2937] border-white/10 text-white"
+                  />
+                </div>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={() => setSelectedUser(null)}
+                    className="flex-1 border-white/20 text-white hover:bg-white/10"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleAddFunds}
+                    disabled={isLoading}
+                    className="flex-1 btn-primary"
+                  >
+                    {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Add Funds'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )
+      }
 
       {/* Generated PINs Dialog */}
       <Dialog open={showPinDialog} onOpenChange={setShowPinDialog}>
-        <DialogContent className="glass border-white/10 bg-[#111827] max-w-lg max-h-[80vh] overflow-y-auto">
+        <DialogContent className="glass border-white/10 bg-[#111827] max-w-lg w-[calc(100vw-2rem)] sm:w-full max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="text-white">Generated PINs</DialogTitle>
             <DialogDescription className="text-white/60">
@@ -2851,7 +3653,7 @@ export default function Admin() {
 
       {/* Payment Review Dialog */}
       <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
-        <DialogContent className="glass border-white/10 bg-[#111827] max-w-lg">
+        <DialogContent className="glass border-white/10 bg-[#111827] max-w-lg w-[calc(100vw-2rem)] sm:w-full">
           <DialogHeader>
             <DialogTitle className="text-white">Review Deposit</DialogTitle>
             <DialogDescription className="text-white/60">
@@ -2912,7 +3714,7 @@ export default function Admin() {
                       />
                     </div>
 
-                    <div className="flex gap-3">
+                    <div className="flex flex-col sm:flex-row gap-3">
                       <Button
                         variant="outline"
                         onClick={() => setShowPaymentDialog(false)}
@@ -2944,7 +3746,7 @@ export default function Admin() {
         </DialogContent>
       </Dialog>
       <MobileBottomNav />
-    </div>
+    </div >
   );
 }
 
@@ -2964,3 +3766,7 @@ function AlertDescription({ children, className }: { children: React.ReactNode; 
     </p>
   );
 }
+
+
+
+

@@ -92,8 +92,7 @@ export default function Landing() {
       <header className="fixed inset-x-0 top-0 z-50 glass border-b border-white/5">
         <div className={`${containerClass} flex h-16 items-center justify-between`}>
           <a href="#top" className="flex items-center gap-2.5">
-            <BrandLogo className="h-10 w-10 rounded-xl" />
-            <span className="font-heading text-xl font-bold text-white">ReferNex</span>
+            <BrandLogo variant="full" className="h-10 w-[168px] rounded-md" />
           </a>
 
           <nav className="hidden items-center gap-7 text-sm font-semibold md:flex">
