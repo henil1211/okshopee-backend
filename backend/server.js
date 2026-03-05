@@ -1,4 +1,6 @@
 import { createServer } from 'node:http';
+import { gzip as zlibGzip } from 'node:zlib';
+import { promisify } from 'node:util';
 import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +8,8 @@ import { createHash } from 'node:crypto';
 import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
 import nodemailer from 'nodemailer';
+
+const gzipAsync = promisify(zlibGzip);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -112,18 +116,37 @@ const SAFETY_POOL_TRANSACTIONS_COLLECTION = 'safety_pool_transactions';
 const mongoClient = new MongoClient(MONGODB_URI);
 let mongoDb;
 
-function sendJson(res, statusCode, payload) {
+function sendJson(res, statusCode, payload, req) {
   const body = JSON.stringify(payload);
-  res.writeHead(statusCode, {
+  const headers = {
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
     'Pragma': 'no-cache',
     'Expires': '0'
-  });
+  };
+
+  const acceptEncoding = (req && req.headers && req.headers['accept-encoding']) || '';
+  const supportsGzip = typeof acceptEncoding === 'string' && acceptEncoding.includes('gzip');
+
+  if (supportsGzip && body.length > 1024) {
+    gzipAsync(Buffer.from(body)).then((compressed) => {
+      headers['Content-Encoding'] = 'gzip';
+      headers['Content-Length'] = compressed.length;
+      res.writeHead(statusCode, headers);
+      res.end(compressed);
+    }).catch(() => {
+      headers['Content-Length'] = Buffer.byteLength(body);
+      res.writeHead(statusCode, headers);
+      res.end(body);
+    });
+    return;
+  }
+
+  headers['Content-Length'] = Buffer.byteLength(body);
+  res.writeHead(statusCode, headers);
   res.end(body);
 }
 
@@ -723,7 +746,7 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/state') {
     try {
       const snapshot = await readStateFromCollections();
-      sendJson(res, 200, snapshot);
+      sendJson(res, 200, snapshot, req);
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to read state' });
     }
