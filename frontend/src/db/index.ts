@@ -302,10 +302,10 @@ class Database {
   // Eliminates redundant JSON.parse() on hot-path reads.
   private static _cache = new Map<string, unknown>();
 
-  /** Return cached parsed value or parse from localStorage and cache it. */
+  /** Return cached parsed value or parse from storage and cache it. */
   private static getCached<T>(key: string, fallback: T): T {
     if (this._cache.has(key)) return this._cache.get(key) as T;
-    const raw = localStorage.getItem(key);
+    const raw = this.getStorageItem(key);
     if (raw === null) return fallback;
     try {
       const parsed = JSON.parse(raw) as T;
@@ -369,8 +369,7 @@ class Database {
   private static getPersistedSnapshot(): Record<string, string> {
     const state: Record<string, string> = {};
     for (const key of this.REMOTE_SYNC_KEYS) {
-      const volatileValue = this.volatileSyncState.get(key);
-      const value = typeof volatileValue === 'string' ? volatileValue : localStorage.getItem(key);
+      const value = this.getStorageItem(key);
       if (typeof value === 'string') {
         state[key] = value;
       }
@@ -386,11 +385,8 @@ class Database {
   }
 
   private static hasLocalPersistedData(): boolean {
-    if (this.volatileSyncState.size > 0) {
-      return true;
-    }
     for (const key of this.REMOTE_SYNC_KEYS) {
-      if (localStorage.getItem(key) !== null) {
+      if (this.getStorageItem(key) !== null) {
         return true;
       }
     }
@@ -399,7 +395,7 @@ class Database {
 
   static hasLocalUsersData(): boolean {
     try {
-      const raw = localStorage.getItem(DB_KEYS.USERS);
+      const raw = this.getStorageItem(DB_KEYS.USERS);
       if (!raw) return false;
       const parsed = JSON.parse(raw);
       return Array.isArray(parsed) && parsed.length > 0;
@@ -408,19 +404,24 @@ class Database {
     }
   }
 
+  private static getStorageItem(key: string): string | null {
+    const volatileValue = this.volatileSyncState.get(key);
+    if (typeof volatileValue === 'string') return volatileValue;
+    return localStorage.getItem(key);
+  }
+
   private static setStorageItem(key: string, value: string): void {
     const shouldSync = this.shouldSyncKey(key);
     try {
       localStorage.setItem(key, value);
+      // If write succeeds, we can clear the volatile entry (if any)
       if (shouldSync) this.volatileSyncState.delete(key);
     } catch (error) {
       if (!this.isQuotaExceededError(error)) throw error;
-      if (!shouldSync) {
-        console.warn(`[DB] localStorage quota exceeded while writing ${key}.`);
-        return;
-      }
+
+      // Handle QuotaExceeded by falling back to in-memory storage
       this.volatileSyncState.set(key, value);
-      console.warn(`[DB] localStorage quota exceeded; using in-memory sync state for ${key}.`);
+      console.warn(`[DB] localStorage quota exceeded while writing ${key}; using in-memory sync state.`);
     }
     if (shouldSync) this.scheduleRemoteSync();
   }
@@ -544,22 +545,6 @@ class Database {
     const maxAttempts = strict ? 3 : 1;
     let lastError: unknown = null;
 
-    // Pre-warm: send a lightweight health ping to wake up the backend (Render cold starts)
-    if (strict) {
-      try {
-        const warmUrl = `${this.REMOTE_SYNC_BASE_URL}/api/health?t=${Date.now()}`;
-        const warmCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const warmTimeout = setTimeout(() => warmCtrl?.abort(), 60000);
-        try {
-          await fetch(warmUrl, { method: 'GET', signal: warmCtrl?.signal });
-        } finally {
-          clearTimeout(warmTimeout);
-        }
-      } catch {
-        // Health ping failed — the main fetch will also retry, so continue
-      }
-    }
-
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       // First attempt gets 60s for Render cold starts; retries get 30s
       const timeoutMs = strict ? (attempt === 1 ? 60000 : 30000) : 5000;
@@ -585,16 +570,18 @@ class Database {
         const hasServerState = Object.keys(serverState).length > 0;
 
         if (hasServerState) {
+          // Clear caches before batch update
+          this.invalidateAllCaches();
+          this.volatileSyncState.clear();
+
           for (const key of this.REMOTE_SYNC_KEYS) {
             const value = serverState[key];
             if (typeof value === 'string') {
-              localStorage.setItem(key, value);
+              this.setStorageItem(key, value);
             } else {
-              localStorage.removeItem(key);
+              this.removeStorageItem(key);
             }
           }
-          this.invalidateAllCaches();
-          this.volatileSyncState.clear();
           this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
           return;
         }
@@ -3538,7 +3525,7 @@ class Database {
 
   // ==================== PIN TRANSFERS ====================
   static getPinTransfers(): PinTransfer[] {
-    const data = localStorage.getItem(DB_KEYS.PIN_TRANSFERS);
+    const data = this.getStorageItem(DB_KEYS.PIN_TRANSFERS);
     return data ? JSON.parse(data) : [];
   }
 
@@ -3561,7 +3548,7 @@ class Database {
 
   // ==================== PIN PURCHASE REQUESTS ====================
   static getPinPurchaseRequests(): PinPurchaseRequest[] {
-    const data = localStorage.getItem(DB_KEYS.PIN_PURCHASE_REQUESTS);
+    const data = this.getStorageItem(DB_KEYS.PIN_PURCHASE_REQUESTS);
     return data ? JSON.parse(data) : [];
   }
 
@@ -3945,7 +3932,7 @@ class Database {
 
   // ==================== OTP RECORDS ====================
   static getOtpRecords(): OtpRecord[] {
-    const data = localStorage.getItem(DB_KEYS.OTP_RECORDS);
+    const data = this.getStorageItem(DB_KEYS.OTP_RECORDS);
     return data ? JSON.parse(data) : [];
   }
 
@@ -3997,7 +3984,7 @@ class Database {
   }
 
   static getEmailLogs(): EmailLog[] {
-    const data = localStorage.getItem(DB_KEYS.EMAIL_LOGS);
+    const data = this.getStorageItem(DB_KEYS.EMAIL_LOGS);
     return data ? JSON.parse(data) : [];
   }
 
@@ -4358,7 +4345,7 @@ class Database {
 
   // ==================== GRACE PERIODS ====================
   static getGracePeriods(): GracePeriod[] {
-    const data = localStorage.getItem(DB_KEYS.GRACE_PERIODS);
+    const data = this.getStorageItem(DB_KEYS.GRACE_PERIODS);
     return data ? JSON.parse(data) : [];
   }
 
@@ -4421,7 +4408,7 @@ class Database {
 
   // ==================== PAYMENT METHODS ====================
   static getPaymentMethods(): PaymentMethod[] {
-    const data = localStorage.getItem(DB_KEYS.PAYMENT_METHODS);
+    const data = this.getStorageItem(DB_KEYS.PAYMENT_METHODS);
     return data ? JSON.parse(data) : defaultPaymentMethods;
   }
 
@@ -4445,7 +4432,7 @@ class Database {
 
   // ==================== PAYMENTS ====================
   static getPayments(): Payment[] {
-    const data = localStorage.getItem(DB_KEYS.PAYMENTS);
+    const data = this.getStorageItem(DB_KEYS.PAYMENTS);
     return data ? JSON.parse(data) : [];
   }
 
@@ -4536,7 +4523,7 @@ class Database {
 
   // ==================== IMPERSONATION ====================
   static getImpersonationSessions(): ImpersonationSession[] {
-    const data = localStorage.getItem(DB_KEYS.IMPERSONATION);
+    const data = this.getStorageItem(DB_KEYS.IMPERSONATION);
     return data ? JSON.parse(data) : [];
   }
 
@@ -4571,12 +4558,14 @@ class Database {
   static setCurrentUser(user: User | null): void {
     const tabSession = this.getSessionStorage();
     if (user) {
+      const value = JSON.stringify(user);
       if (tabSession) {
-        tabSession.setItem(DB_KEYS.CURRENT_USER, JSON.stringify(user));
+        tabSession.setItem(DB_KEYS.CURRENT_USER, value);
       } else {
-        localStorage.setItem(DB_KEYS.CURRENT_USER, JSON.stringify(user));
+        this.setStorageItem(DB_KEYS.CURRENT_USER, value);
       }
       // Remove legacy global user session so tabs stop overriding each other.
+      // This is handled via standard removeStorageItem which clears both local and volatile.
       this.removeStorageItem(DB_KEYS.CURRENT_USER);
     } else {
       if (tabSession) {
@@ -4595,8 +4584,8 @@ class Database {
       return fresh || parsed;
     }
 
-    // Backward compatibility for legacy sessions stored in localStorage.
-    const legacyData = localStorage.getItem(DB_KEYS.CURRENT_USER);
+    // Backward compatibility for legacy sessions / fallback storage.
+    const legacyData = this.getStorageItem(DB_KEYS.CURRENT_USER);
     if (!legacyData) return null;
     const parsed = JSON.parse(legacyData) as User;
     const fresh = parsed?.id ? this.getUserById(parsed.id) : undefined;
@@ -4832,12 +4821,12 @@ class Database {
       });
     }
 
-    const settingsData = localStorage.getItem(DB_KEYS.SETTINGS);
+    const settingsData = this.getStorageItem(DB_KEYS.SETTINGS);
     if (!settingsData) {
       this.saveSettings(defaultSettings);
     }
 
-    const paymentMethodData = localStorage.getItem(DB_KEYS.PAYMENT_METHODS);
+    const paymentMethodData = this.getStorageItem(DB_KEYS.PAYMENT_METHODS);
     if (!paymentMethodData || this.getPaymentMethods().length === 0) {
       this.savePaymentMethods(defaultPaymentMethods);
     }
