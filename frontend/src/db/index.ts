@@ -258,6 +258,7 @@ class Database {
   private static remoteSyncSuspendDepth = 0;
   private static remoteSyncPending = false;
   private static remoteStateUpdatedAt: string | null = null;
+  private static volatileSyncState = new Map<string, string>();
   // When true, createTransaction/addToSafetyPool become no-ops to save memory
   static _bulkRebuildMode = false;
   private static _bulkSafetyPoolTotal = 0;
@@ -304,6 +305,16 @@ class Database {
     }
   }
 
+  private static isQuotaExceededError(error: unknown): boolean {
+    if (!(error instanceof DOMException)) return false;
+    return (
+      error.name === 'QuotaExceededError'
+      || error.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+      || error.code === 22
+      || error.code === 1014
+    );
+  }
+
   private static shouldSyncKey(key: string): boolean {
     return this.REMOTE_SYNC_KEYS.has(key);
   }
@@ -323,7 +334,8 @@ class Database {
   private static getPersistedSnapshot(): Record<string, string> {
     const state: Record<string, string> = {};
     for (const key of this.REMOTE_SYNC_KEYS) {
-      const value = localStorage.getItem(key);
+      const volatileValue = this.volatileSyncState.get(key);
+      const value = typeof volatileValue === 'string' ? volatileValue : localStorage.getItem(key);
       if (typeof value === 'string') {
         state[key] = value;
       }
@@ -339,6 +351,9 @@ class Database {
   }
 
   private static hasLocalPersistedData(): boolean {
+    if (this.volatileSyncState.size > 0) {
+      return true;
+    }
     for (const key of this.REMOTE_SYNC_KEYS) {
       if (localStorage.getItem(key) !== null) {
         return true;
@@ -359,20 +374,27 @@ class Database {
   }
 
   private static setStorageItem(key: string, value: string): void {
-    localStorage.setItem(key, value);
-    // Don't invalidate here — callers using setCached() already updated the cache.
-    // Only sync remote.
-    if (this.shouldSyncKey(key)) {
-      this.scheduleRemoteSync();
+    const shouldSync = this.shouldSyncKey(key);
+    try {
+      localStorage.setItem(key, value);
+      if (shouldSync) this.volatileSyncState.delete(key);
+    } catch (error) {
+      if (!this.isQuotaExceededError(error)) throw error;
+      if (!shouldSync) {
+        console.warn(`[DB] localStorage quota exceeded while writing ${key}.`);
+        return;
+      }
+      this.volatileSyncState.set(key, value);
+      console.warn(`[DB] localStorage quota exceeded; using in-memory sync state for ${key}.`);
     }
+    if (shouldSync) this.scheduleRemoteSync();
   }
 
   private static removeStorageItem(key: string): void {
     localStorage.removeItem(key);
+    this.volatileSyncState.delete(key);
     this.invalidateCache(key);
-    if (this.shouldSyncKey(key)) {
-      this.scheduleRemoteSync();
-    }
+    if (this.shouldSyncKey(key)) this.scheduleRemoteSync();
   }
 
   private static scheduleRemoteSync(): void {
@@ -520,6 +542,7 @@ class Database {
             }
           }
           this.invalidateAllCaches();
+          this.volatileSyncState.clear();
           this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
           return;
         }
@@ -4555,5 +4578,6 @@ interface LevelWiseReport {
   directCount: number;
   date: string;
 }
+
 
 
