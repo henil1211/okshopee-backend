@@ -3644,26 +3644,35 @@ class Database {
 
     this.remoteSyncQueued = false;
     this.remoteSyncPending = false;
-    try {
-      const response = await fetch(this.getRemoteSyncWriteEndpoint(options), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(this.getSyncRequestBody())
-      });
-      if (!response.ok) {
-        if (response.status === 409) {
-          console.warn('[DB Sync] Forced sync rejected due to stale snapshot. Re-hydrating from backend.');
-          await this.hydrateFromServer();
+
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const response = await fetch(this.getRemoteSyncWriteEndpoint(options), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this.getSyncRequestBody())
+        });
+        if (!response.ok) {
+          if (response.status === 409 && attempt < maxAttempts) {
+            console.warn('[DB Sync] Forced sync rejected due to stale snapshot. Re-hydrating from backend and retrying.');
+            await this.hydrateFromServer();
+            continue;
+          }
+          throw new Error(`Remote sync failed with HTTP ${response.status}`);
         }
-        throw new Error(`Remote sync failed with HTTP ${response.status}`);
+        const payload = await response.json() as { updatedAt?: unknown };
+        this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
+        return true;
+      } catch {
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          continue;
+        }
       }
-      const payload = await response.json() as { updatedAt?: unknown };
-      this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
-      return true;
-    } catch {
-      console.warn('[DB Sync] Failed to force-push local state to backend.');
-      return false;
     }
+    console.warn('[DB Sync] Failed to force-push local state to backend.');
+    return false;
   }
 
   private static normalizeTransactionRecord(tx: Transaction): Transaction {

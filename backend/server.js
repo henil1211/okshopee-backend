@@ -34,6 +34,11 @@ const SMTP_HOST = process.env.SMTP_HOST || '';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
 const SMTP_TIMEOUT_MS_RAW = Number(process.env.SMTP_TIMEOUT_MS || 8000);
 const SMTP_TIMEOUT_MS = Number.isFinite(SMTP_TIMEOUT_MS_RAW) && SMTP_TIMEOUT_MS_RAW > 0 ? SMTP_TIMEOUT_MS_RAW : 8000;
+const STATE_PAYLOAD_LIMIT_MB_RAW = Number(process.env.STATE_PAYLOAD_LIMIT_MB || 25);
+const STATE_PAYLOAD_LIMIT_MB = Number.isFinite(STATE_PAYLOAD_LIMIT_MB_RAW) && STATE_PAYLOAD_LIMIT_MB_RAW > 0
+  ? STATE_PAYLOAD_LIMIT_MB_RAW
+  : 25;
+const STATE_PAYLOAD_LIMIT_BYTES = Math.floor(STATE_PAYLOAD_LIMIT_MB * 1024 * 1024);
 const SMTP_SECURE = process.env.SMTP_SECURE ? process.env.SMTP_SECURE === 'true' : SMTP_PORT === 465;
 const SMTP_IGNORE_TLS = process.env.SMTP_IGNORE_TLS === 'true';
 const SMTP_REQUIRE_TLS = process.env.SMTP_REQUIRE_TLS === 'true';
@@ -55,6 +60,21 @@ function extractDbNameFromMongoUri(uri) {
     return dbName || null;
   } catch {
     return null;
+  }
+}
+
+function redactMongoUri(uri) {
+  if (typeof uri !== 'string' || uri.length === 0) return uri;
+  try {
+    const parsed = new URL(uri);
+    if (parsed.username || parsed.password) {
+      parsed.username = '***';
+      parsed.password = '***';
+      return parsed.toString();
+    }
+    return uri;
+  } catch {
+    return uri.replace(/\/\/([^@]+)@/, '//***:***@');
   }
 }
 
@@ -662,9 +682,11 @@ async function buildAdminAuditReport() {
 function getRequestBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
+    let totalBytes = 0;
     req.on('data', (chunk) => {
+      totalBytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
       data += chunk;
-      if (data.length > 5 * 1024 * 1024) {
+      if (totalBytes > STATE_PAYLOAD_LIMIT_BYTES) {
         reject(new Error('Payload too large'));
         req.destroy();
       }
@@ -745,7 +767,9 @@ const server = createServer(async (req, res) => {
       const saved = await writeStateToCollections(mergedState, destructiveWrite);
       sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt, destructive: destructiveWrite });
     } catch (error) {
-      sendJson(res, 400, { ok: false, error: error instanceof Error ? error.message : 'Invalid request body' });
+      const message = error instanceof Error ? error.message : 'Invalid request body';
+      const status = message === 'Payload too large' ? 413 : 400;
+      sendJson(res, status, { ok: false, error: message });
     }
     return;
   }
@@ -901,7 +925,7 @@ async function start() {
   server.listen(PORT, HOST, () => {
     console.log(`Backend listening on http://${HOST}:${PORT}`);
     console.log(`Environment: NODE_ENV=${NODE_ENV} envFile=${ENV_FILE_PATH ? path.basename(ENV_FILE_PATH) : 'process.env'}`);
-    console.log(`MongoDB URI: ${MONGODB_URI}`);
+    console.log(`MongoDB URI: ${redactMongoUri(MONGODB_URI)}`);
     console.log(`MongoDB DB (${MONGODB_DB_SOURCE}): ${MONGODB_DB}`);
     console.log(`MongoDB collections: ${Object.values(STATE_COLLECTIONS).map((c) => c.collection).join(', ')}`);
     console.log(`MongoDB derived collections: ${SAFETY_POOL_TRANSACTIONS_COLLECTION}`);
