@@ -4,6 +4,7 @@ import type {
   AdminSettings, DashboardStats, Pin, PinTransfer, PinPurchaseRequest, RegisterData, PaymentMethodType
 } from '@/types';
 import Database from '@/db';
+import { isValidPhoneNumber, normalizePhoneNumber } from '@/utils/helpers';
 
 type SystemEmailPurpose = 'otp' | 'welcome' | 'system';
 
@@ -13,6 +14,7 @@ async function dispatchSystemEmail(params: {
   body: string;
   purpose: SystemEmailPurpose;
   metadata?: Record<string, string>;
+  timeoutMs?: number;
 }): Promise<{ success: boolean; mode: 'api' | 'local'; error?: string }> {
   const logId = `email_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   Database.createEmailLog({
@@ -27,36 +29,76 @@ async function dispatchSystemEmail(params: {
     metadata: params.metadata
   });
 
-  const apiUrl = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_MAIL_API_URL;
-  if (!apiUrl) {
-    Database.updateEmailLog(logId, { status: 'sent', provider: 'local' });
-    return { success: true, mode: 'local' };
+  const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
+  const configuredMailApi = typeof env.VITE_MAIL_API_URL === 'string' ? env.VITE_MAIL_API_URL.trim() : '';
+  const backendBase = typeof env.VITE_BACKEND_URL === 'string' ? env.VITE_BACKEND_URL.trim() : '';
+  const isProd = env.PROD === true || env.PROD === 'true';
+  const backendMailApi = backendBase ? `${backendBase.replace(/\/+$/, '')}/api/send-mail` : '';
+  const localhostApi = 'http://127.0.0.1:4000/api/send-mail';
+  // Only use the same-origin URL if no backend URL is configured at all
+  const hasExplicitBackend = !!(configuredMailApi || backendMailApi);
+  const sameOriginApi = !hasExplicitBackend && typeof window !== 'undefined' ? `${window.location.origin.replace(/\/+$/, '')}/api/send-mail` : '';
+  const requestTimeoutMs = Number.isFinite(Number(params.timeoutMs)) ? Math.max(1500, Number(params.timeoutMs)) : 8000;
+  const candidates = [configuredMailApi, backendMailApi, sameOriginApi, !isProd ? localhostApi : ''].filter(Boolean);
+  const seen = new Set<string>();
+  const apiUrls = candidates.filter((u) => {
+    if (seen.has(u)) return false;
+    seen.add(u);
+    return true;
+  });
+
+  if (apiUrls.length === 0) {
+    const message = 'Mail API URL is not configured';
+    Database.updateEmailLog(logId, { status: 'failed', provider: 'local', error: message });
+    return { success: false, mode: 'local', error: message };
   }
 
-  try {
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        to: params.to,
-        subject: params.subject,
-        body: params.body,
-        purpose: params.purpose,
-        metadata: params.metadata
-      })
-    });
+  let firstError = '';
+  for (const apiUrl of apiUrls) {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = setTimeout(() => controller?.abort(), requestTimeoutMs);
+    try {
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller?.signal,
+        body: JSON.stringify({
+          to: params.to,
+          subject: params.subject,
+          text: params.body,
+          body: params.body,
+          purpose: params.purpose,
+          metadata: params.metadata
+        })
+      });
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+      if (!response.ok || payload?.ok === false) {
+        const err =
+          typeof payload?.error === 'string'
+            ? payload.error
+            : typeof payload?.message === 'string'
+              ? payload.message
+              : `HTTP ${response.status}`;
+        throw new Error(err);
+      }
+
+      Database.updateEmailLog(logId, { status: 'sent', provider: 'api' });
+      return { success: true, mode: 'api' };
+    } catch (error: unknown) {
+      const msg =
+        error instanceof Error
+          ? (error.name === 'AbortError' ? `Email API timeout after ${requestTimeoutMs}ms` : error.message)
+          : 'Unknown email error';
+      if (!firstError) firstError = msg;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    Database.updateEmailLog(logId, { status: 'sent', provider: 'api' });
-    return { success: true, mode: 'api' };
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Unknown email error';
-    Database.updateEmailLog(logId, { status: 'failed', provider: 'api', error: message });
-    return { success: false, mode: 'api', error: message };
   }
+
+  const resolvedError = firstError || 'Email API request failed';
+  Database.updateEmailLog(logId, { status: 'failed', provider: 'api', error: resolvedError });
+  return { success: false, mode: 'api', error: resolvedError };
 }
 
 // Auth Store - Updated with PIN-based registration
@@ -154,10 +196,22 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   register: async (userData: RegisterData) => {
     const { fullName, email, password, transactionPassword, phone, country, sponsorId, pinCode } = userData;
+    const normalizedPhone = normalizePhoneNumber(phone);
 
     // Check if email exists
     if (Database.getUserByEmail(email)) {
       return { success: false, message: 'Email already exists' };
+    }
+
+    if (!isValidPhoneNumber(phone)) {
+      return { success: false, message: 'Enter a valid mobile number' };
+    }
+
+    const phoneExists = Database.getUsers().some(
+      (existing) => normalizePhoneNumber(existing.phone) === normalizedPhone
+    );
+    if (phoneExists) {
+      return { success: false, message: 'Mobile number already exists' };
     }
 
     // Validate PIN - MANDATORY
@@ -213,7 +267,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       email,
       password,
       fullName,
-      phone,
+      phone: normalizedPhone,
       country,
       isActive: true, // Active immediately with PIN
       isAdmin: false,
@@ -337,14 +391,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     Database.createNotification({
       id: `notif_${Date.now()}`,
       userId: newUser.id,
-      title: 'Welcome to Matrix Helping MLM!',
+      title: 'Welcome To ReferNex',
       message: `Your account has been created successfully. Your User ID is ${newUserId}. Transaction Password: ${transactionPassword}`,
       type: 'success',
       isRead: false,
       createdAt: new Date().toISOString()
     });
 
-    const welcomeSubject = 'Welcome to Matrix Helping MLM';
+    const welcomeSubject = 'Welcome To ReferNex';
     const welcomeBody = [
       `Hello ${newUser.fullName},`,
       '',
@@ -356,21 +410,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       '',
       'Keep these credentials secure.'
     ].join('\n');
-    const welcomeMail = await dispatchSystemEmail({
+    const synced = await Database.forceRemoteSyncNowWithOptions();
+    if (!synced) {
+      try {
+        await Database.hydrateFromServer({ strict: true });
+      } catch {
+        // If hydrate also fails, caller still gets explicit failure.
+      }
+      return { success: false, message: 'Registration could not be saved to backend. Please try again.' };
+    }
+
+    void dispatchSystemEmail({
       to: newUser.email,
       subject: welcomeSubject,
       body: welcomeBody,
       purpose: 'welcome',
+      timeoutMs: 5000,
       metadata: {
         userId: newUser.userId
       }
     });
-
-    const message = welcomeMail.success
-      ? `Registration successful. Your ID is: ${newUserId}`
-      : `Registration successful. Your ID is: ${newUserId}. Warning: welcome email could not be delivered`;
-
-    return { success: true, message, userId: newUserId };
+    return { success: true, message: `Registration successful. Your ID is: ${newUserId}`, userId: newUserId };
   },
 
   logout: () => {
@@ -385,7 +445,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
   },
 
-  updateUser: (updates) => {
+  updateUser: async (updates) => {
     const { user, impersonatedUser } = get();
     const targetUser = impersonatedUser || user;
 
@@ -398,6 +458,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           Database.setCurrentUser(updatedUser);
           set({ user: updatedUser });
         }
+        // Sync to backend and wait for it
+        await Database.syncNow();
       }
     }
   },
@@ -413,7 +475,16 @@ interface WalletState {
   wallet: Wallet | null;
   transactions: Transaction[];
   loadWallet: (userId: string) => void;
-  transferFunds: (fromUserId: string, toUserId: string, amount: number) => Promise<{ success: boolean; message: string }>;
+  transferFunds: (
+    fromUserId: string,
+    toUserId: string,
+    amount: number,
+    sourceWallet?: 'fund' | 'income',
+    security?: {
+      transactionPassword?: string;
+      otp?: string;
+    }
+  ) => Promise<{ success: boolean; message: string }>;
   withdraw: (userId: string, amount: number, walletAddress: string) => Promise<{ success: boolean; message: string }>;
   refreshTransactions: (userId: string) => void;
 }
@@ -447,18 +518,103 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     set({ wallet, transactions });
   },
 
-  transferFunds: async (fromUserId: string, toUserId: string, amount: number) => {
+  transferFunds: async (
+    fromUserId: string,
+    toUserId: string,
+    amount: number,
+    sourceWallet: 'fund' | 'income' = 'fund',
+    security?: {
+      transactionPassword?: string;
+      otp?: string;
+    }
+  ) => {
     if (amount <= 0) {
       return { success: false, message: 'Invalid amount' };
     }
 
     const fromWallet = Database.getWallet(fromUserId);
-    const toUser = Database.getUserByUserId(toUserId);
-    const toWallet = toUser ? Database.getWallet(toUser.id) : null;
+    const fromUser = Database.getUserById(fromUserId);
 
-    if (!fromWallet) {
+    if (!fromWallet || !fromUser) {
       return { success: false, message: 'Sender wallet not found' };
     }
+
+    const normalizedTarget = (toUserId || '').trim();
+
+    if (sourceWallet === 'income') {
+      if (fromWallet.incomeWallet < amount) {
+        return { success: false, message: 'Insufficient income wallet balance' };
+      }
+
+      const toUser = normalizedTarget ? Database.getUserByUserId(normalizedTarget) : fromUser;
+      const toWallet = toUser ? Database.getWallet(toUser.id) : null;
+      if (!toUser || !toWallet) {
+        return { success: false, message: 'Recipient not found' };
+      }
+
+      const isSelfTransfer = toUser.id === fromUserId;
+      if (!isSelfTransfer && !Database.isInSameChain(fromUserId, toUser.id)) {
+        return { success: false, message: 'Transfer allowed only to upline or downline' };
+      }
+      if (!isSelfTransfer) {
+        const txPassword = (security?.transactionPassword || '').trim();
+        if (!txPassword || fromUser.transactionPassword !== txPassword) {
+          return { success: false, message: 'Invalid transaction password' };
+        }
+        const otp = (security?.otp || '').trim();
+        if (!otp || !Database.verifyOtp(fromUserId, otp, 'transaction')) {
+          return { success: false, message: 'Invalid or expired OTP' };
+        }
+      }
+
+      Database.updateWallet(fromUserId, {
+        incomeWallet: fromWallet.incomeWallet - amount
+      });
+
+      Database.updateWallet(toUser.id, {
+        depositWallet: toWallet.depositWallet + amount
+      });
+
+      const now = new Date().toISOString();
+      Database.createTransaction({
+        id: `tx_${Date.now()}_income_send`,
+        userId: fromUserId,
+        type: 'income_transfer',
+        amount: -amount,
+        toUserId: toUser.id,
+        status: 'completed',
+        description: isSelfTransfer
+          ? 'Transferred from income wallet to your fund wallet'
+          : `Transferred from income wallet to fund wallet of ${toUser.fullName} (${toUser.userId})`,
+        createdAt: now,
+        completedAt: now
+      });
+
+      if (!isSelfTransfer) {
+        Database.createTransaction({
+          id: `tx_${Date.now()}_income_recv`,
+          userId: toUser.id,
+          type: 'p2p_transfer',
+          amount,
+          fromUserId,
+          status: 'completed',
+          description: `Fund wallet received from ${fromUser.fullName} (${fromUser.userId}) via income wallet transfer`,
+          createdAt: now,
+          completedAt: now
+        });
+      }
+
+      get().loadWallet(fromUserId);
+      return {
+        success: true,
+        message: isSelfTransfer
+          ? 'Income transferred to your fund wallet successfully'
+          : 'Income transferred to recipient fund wallet successfully'
+      };
+    }
+
+    const toUser = Database.getUserByUserId(normalizedTarget);
+    const toWallet = toUser ? Database.getWallet(toUser.id) : null;
     if (!toUser || !toWallet) {
       return { success: false, message: 'Recipient not found' };
     }
@@ -467,10 +623,17 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     if (!Database.isInSameChain(fromUserId, toUser.id)) {
       return { success: false, message: 'Transfer allowed only to upline or downline' };
     }
-    const fromUser = Database.getUserById(fromUserId);
 
     if (fromWallet.depositWallet < amount) {
       return { success: false, message: 'Insufficient fund wallet balance' };
+    }
+    const txPassword = (security?.transactionPassword || '').trim();
+    if (!txPassword || fromUser.transactionPassword !== txPassword) {
+      return { success: false, message: 'Invalid transaction password' };
+    }
+    const otp = (security?.otp || '').trim();
+    if (!otp || !Database.verifyOtp(fromUserId, otp, 'transaction')) {
+      return { success: false, message: 'Invalid or expired OTP' };
     }
 
     // Fund wallet P2P transfer (upline/downline only)
@@ -502,7 +665,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       amount,
       fromUserId,
       status: 'completed',
-      description: `Fund wallet transfer from ${fromUser?.fullName} (${fromUser?.userId})`,
+      description: `Fund wallet transfer from ${fromUser.fullName} (${fromUser.userId})`,
       createdAt: new Date().toISOString(),
       completedAt: new Date().toISOString()
     });
@@ -868,7 +1031,19 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   loadStats: () => {
     const stats = Database.getStats();
     const pool = Database.getSafetyPool();
-    set({ stats, safetyPoolAmount: pool.totalAmount });
+    const totalDeposits = Database.getTotalDeposits();
+    const totalWithdrawals = Database.getTotalWithdrawals();
+    const totalLockedIncome = Database.getTotalLockedIncome();
+
+    set({
+      stats: {
+        ...stats,
+        totalDeposits,
+        totalWithdrawals,
+        totalLockedIncome
+      },
+      safetyPoolAmount: pool.totalAmount
+    });
   },
 
   loadAllUsers: () => {
@@ -1156,6 +1331,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const yieldToMainThread = async () => new Promise<void>((resolve) => setTimeout(resolve, 0));
     let sponsorIncomeCredits = 0;
 
+    let remoteSyncResumed = false;
     Database.pauseRemoteSync();
     try {
       for (let i = 0; i < quantity; i += 1) {
@@ -1260,7 +1436,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           deferredNotifications.push({
             id: `notif_${Date.now()}_bulk_admin_${i}`,
             userId: newUser.id,
-            title: 'Welcome to Matrix Helping MLM!',
+            title: 'Welcome To ReferNex',
             message: `Your account has been created by admin. Your User ID is ${newUserId}. Transaction Password: ${params.transactionPassword}`,
             type: 'success',
             isRead: false,
@@ -1308,13 +1484,37 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         Database.releaseLockedReceiveHelp(latestSponsor.id);
       }
 
+      if (createdUserIds.length === 0) {
+        get().loadAllUsers();
+        get().loadAllTransactions();
+        get().loadStats();
+        return { success: false, message: 'No IDs created', createdUserIds, failed };
+      }
+
+      // Bulk create must be persisted remotely before reporting success.
+      Database.resumeRemoteSync(false);
+      remoteSyncResumed = true;
+      const synced = await Database.forceRemoteSyncNowWithOptions();
+      if (!synced) {
+        try {
+          await Database.hydrateFromServer({ strict: true });
+        } catch {
+          // Ignore hydrate failures here; caller still gets a hard failure.
+        }
+        get().loadAllUsers();
+        get().loadAllTransactions();
+        get().loadStats();
+        return {
+          success: false,
+          message: 'Bulk create could not be saved to backend. No permanent changes were applied.',
+          createdUserIds,
+          failed: [...failed, 'Backend sync failed']
+        };
+      }
+
       get().loadAllUsers();
       get().loadAllTransactions();
       get().loadStats();
-
-      if (createdUserIds.length === 0) {
-        return { success: false, message: 'No IDs created', createdUserIds, failed };
-      }
 
       const message = failed.length > 0
         ? `Created ${createdUserIds.length} ID(s), failed ${failed.length}`
@@ -1322,7 +1522,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
       return { success: true, message, createdUserIds, failed };
     } finally {
-      Database.resumeRemoteSync(true);
+      if (!remoteSyncResumed) {
+        Database.resumeRemoteSync(true);
+      }
     }
   },
 
@@ -1367,6 +1569,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     }
 
     const report = Database.deleteAllNonAdminIds();
+    const synced = await Database.forceRemoteSyncNowWithOptions({ destructive: true });
     get().loadAllUsers();
     get().loadAllTransactions();
     get().loadAllPins();
@@ -1374,7 +1577,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     get().loadPendingPinRequests();
     get().loadStats();
 
-    const message = `Deleted ${report.deletedUsers} IDs. Cleared ${report.deletedTransactions} transactions, ${report.deletedPins} PINs, ${report.deletedMatrixNodes} matrix nodes.`;
+    const message = `Deleted ${report.deletedUsers} IDs. Cleared ${report.deletedTransactions} transactions, ${report.deletedPins} PINs, ${report.deletedMatrixNodes} matrix nodes.${synced ? '' : ' Warning: backend sync failed, please retry once.'}`;
     return { success: true, message, report };
   }
 }));
@@ -1456,9 +1659,10 @@ export const useOtpStore = create<OtpState>((set) => ({
           : 'registration';
     const emailResult = await dispatchSystemEmail({
       to: email,
-      subject: 'Your Matrix MLM OTP Code',
+      subject: 'Your RefeNex OTP Code',
       body: `Your OTP for ${purposeLabel} is ${otpRecord.otp}. This OTP will expire in 10 minutes.`,
       purpose: 'otp',
+      timeoutMs: 7000,
       metadata: {
         userId,
         action: purpose
@@ -1467,7 +1671,9 @@ export const useOtpStore = create<OtpState>((set) => ({
     if (!emailResult.success) {
       return {
         success: false,
-        message: 'Failed to send OTP email. Please try again later'
+        message: emailResult.error
+          ? `Failed to send OTP email: ${emailResult.error}`
+          : 'Failed to send OTP email. Please try again later'
       };
     }
 

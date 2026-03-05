@@ -7,11 +7,16 @@ import Database from './db'
 
 // Emergency reset mode: visit localhost:5173?reset=true to bypass heavy loading
 const isEmergencyReset = new URLSearchParams(window.location.search).get('reset') === 'true';
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error('Root element not found');
+}
+const root = createRoot(rootElement);
 
 async function bootstrap() {
   if (isEmergencyReset) {
     // Render a minimal emergency reset page — no heavy data loading at all
-    createRoot(document.getElementById('root')!).render(
+    root.render(
       <StrictMode>
         <div style={{
           background: '#1a1a2e', color: '#eee', minHeight: '100vh',
@@ -106,7 +111,79 @@ async function bootstrap() {
     return;
   }
 
-  createRoot(document.getElementById('root')!).render(
+  // Render immediately so users don't see a blank screen while strict hydration runs.
+  root.render(
+    <StrictMode>
+      <div style={{
+        background: '#0b1220',
+        color: '#e5e7eb',
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: 'system-ui, sans-serif',
+        gap: '14px',
+        padding: '24px',
+        textAlign: 'center'
+      }}>
+        <h1 style={{ margin: 0, fontSize: '22px' }}>Loading ReferNex...</h1>
+        <p style={{ margin: 0, opacity: 0.85, maxWidth: 640, lineHeight: 1.5 }}>
+          Syncing latest server data. Please wait.
+        </p>
+      </div>
+    </StrictMode>,
+  );
+
+  // Hydrate from backend first, then seed defaults only if still needed.
+  const strictSync = import.meta.env.PROD;
+  try {
+    await Database.hydrateFromServer({ strict: strictSync });
+    Database.initializeDemoData();
+  } catch (e) {
+    if (strictSync) {
+      root.render(
+        <StrictMode>
+          <div style={{
+            background: '#0b1220',
+            color: '#e5e7eb',
+            minHeight: '100vh',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontFamily: 'system-ui, sans-serif',
+            gap: '16px',
+            padding: '24px',
+            textAlign: 'center'
+          }}>
+            <h1 style={{ color: '#ef4444', margin: 0 }}>Data Sync Error</h1>
+            <p style={{ maxWidth: 720, lineHeight: 1.6, margin: 0 }}>
+              Could not load the latest server state. To protect live data integrity,
+              this session is blocked from using stale local data.
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              style={{
+                padding: '10px 20px',
+                background: '#2563eb',
+                border: 'none',
+                borderRadius: '8px',
+                color: '#fff',
+                cursor: 'pointer'
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        </StrictMode>,
+      );
+      return;
+    }
+    console.warn('Hydration failed, proceeding with local state');
+  }
+
+  root.render(
     <StrictMode>
       <ThemeProvider
         attribute="class"
@@ -118,11 +195,6 @@ async function bootstrap() {
       </ThemeProvider>
     </StrictMode>,
   )
-
-  // Hydrate from backend first, then seed defaults only if still needed.
-  void Database.hydrateFromServer().then(() => {
-    Database.initializeDemoData()
-  })
 }
 
 void bootstrap()

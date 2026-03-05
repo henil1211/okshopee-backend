@@ -73,16 +73,16 @@ const defaultSettings: AdminSettings = {
 // Updated Help Distribution Table - New Logic with Qualification
 export const helpDistributionTable = [
   // directRequired here means NEW direct refers required for this level (incremental)
-  { level: 1, users: 2, perUserHelp: 5, totalGetHelp: 10, giveHelp: 10, netBalance: 0, directRequired: 0, qualifiedGetHelp: 10, unqualifiedCarryForward: 0 },
-  { level: 2, users: 4, perUserHelp: 10, totalGetHelp: 40, giveHelp: 20, netBalance: 20, directRequired: 2, qualifiedGetHelp: 40, unqualifiedCarryForward: 0 },
-  { level: 3, users: 8, perUserHelp: 20, totalGetHelp: 160, giveHelp: 40, netBalance: 120, directRequired: 3, qualifiedGetHelp: 160, unqualifiedCarryForward: 0 },
-  { level: 4, users: 16, perUserHelp: 40, totalGetHelp: 640, giveHelp: 80, netBalance: 560, directRequired: 4, qualifiedGetHelp: 640, unqualifiedCarryForward: 0 },
-  { level: 5, users: 32, perUserHelp: 80, totalGetHelp: 2560, giveHelp: 160, netBalance: 2400, directRequired: 5, qualifiedGetHelp: 2560, unqualifiedCarryForward: 0 },
-  { level: 6, users: 64, perUserHelp: 160, totalGetHelp: 10240, giveHelp: 320, netBalance: 9920, directRequired: 10, qualifiedGetHelp: 10240, unqualifiedCarryForward: 0 },
-  { level: 7, users: 128, perUserHelp: 320, totalGetHelp: 40960, giveHelp: 640, netBalance: 40320, directRequired: 20, qualifiedGetHelp: 40960, unqualifiedCarryForward: 0 },
-  { level: 8, users: 256, perUserHelp: 640, totalGetHelp: 163840, giveHelp: 1280, netBalance: 162560, directRequired: 40, qualifiedGetHelp: 163840, unqualifiedCarryForward: 0 },
-  { level: 9, users: 512, perUserHelp: 1280, totalGetHelp: 655360, giveHelp: 2560, netBalance: 652800, directRequired: 80, qualifiedGetHelp: 655360, unqualifiedCarryForward: 0 },
-  { level: 10, users: 1024, perUserHelp: 2560, totalGetHelp: 2621440, giveHelp: 5120, netBalance: 2616320, directRequired: 100, qualifiedGetHelp: 2621440, unqualifiedCarryForward: 0 }
+  { level: 1, users: 2, perUserHelp: 5, totalReceiveHelp: 10, giveHelp: 10, netBalance: 0, directRequired: 0, qualifiedReceiveHelp: 10, unqualifiedCarryForward: 0 },
+  { level: 2, users: 4, perUserHelp: 10, totalReceiveHelp: 40, giveHelp: 20, netBalance: 20, directRequired: 2, qualifiedReceiveHelp: 40, unqualifiedCarryForward: 0 },
+  { level: 3, users: 8, perUserHelp: 20, totalReceiveHelp: 160, giveHelp: 40, netBalance: 120, directRequired: 3, qualifiedReceiveHelp: 160, unqualifiedCarryForward: 0 },
+  { level: 4, users: 16, perUserHelp: 40, totalReceiveHelp: 640, giveHelp: 80, netBalance: 560, directRequired: 4, qualifiedReceiveHelp: 640, unqualifiedCarryForward: 0 },
+  { level: 5, users: 32, perUserHelp: 80, totalReceiveHelp: 2560, giveHelp: 160, netBalance: 2400, directRequired: 5, qualifiedReceiveHelp: 2560, unqualifiedCarryForward: 0 },
+  { level: 6, users: 64, perUserHelp: 160, totalReceiveHelp: 10240, giveHelp: 320, netBalance: 9920, directRequired: 10, qualifiedReceiveHelp: 10240, unqualifiedCarryForward: 0 },
+  { level: 7, users: 128, perUserHelp: 320, totalReceiveHelp: 40960, giveHelp: 640, netBalance: 40320, directRequired: 20, qualifiedReceiveHelp: 40960, unqualifiedCarryForward: 0 },
+  { level: 8, users: 256, perUserHelp: 640, totalReceiveHelp: 163840, giveHelp: 1280, netBalance: 162560, directRequired: 40, qualifiedReceiveHelp: 163840, unqualifiedCarryForward: 0 },
+  { level: 9, users: 512, perUserHelp: 1280, totalReceiveHelp: 655360, giveHelp: 2560, netBalance: 652800, directRequired: 80, qualifiedReceiveHelp: 655360, unqualifiedCarryForward: 0 },
+  { level: 10, users: 1024, perUserHelp: 2560, totalReceiveHelp: 2621440, giveHelp: 5120, netBalance: 2616320, directRequired: 100, qualifiedReceiveHelp: 2621440, unqualifiedCarryForward: 0 }
 ];
 
 // Default Payment Methods
@@ -257,6 +257,7 @@ class Database {
   private static remoteSyncQueued = false;
   private static remoteSyncSuspendDepth = 0;
   private static remoteSyncPending = false;
+  private static remoteStateUpdatedAt: string | null = null;
   // When true, createTransaction/addToSafetyPool become no-ops to save memory
   static _bulkRebuildMode = false;
   private static _bulkSafetyPoolTotal = 0;
@@ -311,6 +312,14 @@ class Database {
     return `${this.REMOTE_SYNC_BASE_URL}/api/state`;
   }
 
+  private static getRemoteSyncWriteEndpoint(options?: { destructive?: boolean }): string {
+    const base = this.getRemoteSyncEndpoint();
+    if (options?.destructive) {
+      return `${base}?destructive=1`;
+    }
+    return base;
+  }
+
   private static getPersistedSnapshot(): Record<string, string> {
     const state: Record<string, string> = {};
     for (const key of this.REMOTE_SYNC_KEYS) {
@@ -322,6 +331,13 @@ class Database {
     return state;
   }
 
+  private static getSyncRequestBody(): { state: Record<string, string>; baseUpdatedAt: string | null } {
+    return {
+      state: this.getPersistedSnapshot(),
+      baseUpdatedAt: this.remoteStateUpdatedAt
+    };
+  }
+
   private static hasLocalPersistedData(): boolean {
     for (const key of this.REMOTE_SYNC_KEYS) {
       if (localStorage.getItem(key) !== null) {
@@ -329,6 +345,17 @@ class Database {
       }
     }
     return false;
+  }
+
+  static hasLocalUsersData(): boolean {
+    try {
+      const raw = localStorage.getItem(DB_KEYS.USERS);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) && parsed.length > 0;
+    } catch {
+      return false;
+    }
   }
 
   private static setStorageItem(key: string, value: string): void {
@@ -368,6 +395,16 @@ class Database {
     }, 250);
   }
 
+
+  /** Immediate, awaitable remote sync. Returns when sync is complete. */
+  static async syncNow(): Promise<void> {
+    if (this.remoteSyncTimer) {
+      clearTimeout(this.remoteSyncTimer);
+      this.remoteSyncTimer = null;
+    }
+    return this.flushRemoteSync();
+  }
+
   private static async flushRemoteSync(): Promise<void> {
     if (this.remoteSyncSuspendDepth > 0) {
       this.remoteSyncPending = true;
@@ -381,14 +418,20 @@ class Database {
 
     this.remoteSyncInFlight = true;
     try {
-      const response = await fetch(this.getRemoteSyncEndpoint(), {
+      const response = await fetch(this.getRemoteSyncWriteEndpoint(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: this.getPersistedSnapshot() })
+        body: JSON.stringify(this.getSyncRequestBody())
       });
       if (!response.ok) {
+        if (response.status === 409) {
+          console.warn('[DB Sync] Backend rejected stale local snapshot. Re-hydrating from backend.');
+          void this.hydrateFromServer();
+        }
         throw new Error(`Remote sync failed with HTTP ${response.status}`);
       }
+      const payload = await response.json() as { updatedAt?: unknown };
+      this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
     } catch {
       console.warn('[DB Sync] Failed to push local state to backend. App will continue locally.');
     } finally {
@@ -435,67 +478,94 @@ class Database {
     }
   }
 
-  static async hydrateFromServer(): Promise<void> {
+  static async hydrateFromServer(options?: { strict?: boolean }): Promise<void> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') {
       return;
     }
 
-    try {
-      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timeout = setTimeout(() => controller?.abort(), 5000);
-      let response: Response;
+    const strict = !!options?.strict;
+    const timeoutMs = strict ? 8000 : 5000;
+    const maxAttempts = strict ? 2 : 1;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        response = await fetch(this.getRemoteSyncEndpoint(), {
-          method: 'GET',
-          signal: controller?.signal
-        });
-      } finally {
-        clearTimeout(timeout);
-      }
-      if (!response.ok) {
-        console.warn(`[DB Sync] Failed to load state from backend (HTTP ${response.status}). Using local browser state.`);
-        return;
-      }
-
-      const payload = await response.json() as { state?: Record<string, unknown> };
-      const serverState = payload?.state && typeof payload.state === 'object' ? payload.state : {};
-      const hasServerState = Object.keys(serverState).length > 0;
-
-      if (hasServerState) {
-        for (const key of this.REMOTE_SYNC_KEYS) {
-          const value = serverState[key];
-          if (typeof value === 'string') {
-            localStorage.setItem(key, value);
-          } else {
-            localStorage.removeItem(key);
-          }
-        }
-        this.invalidateAllCaches();
-        return;
-      }
-
-      // Server has no state yet. Seed it from local browser state if available.
-      if (this.hasLocalPersistedData()) {
-        const pushController = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const pushTimeout = setTimeout(() => pushController?.abort(), 5000);
-        let pushResponse: Response;
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+        let response: Response;
         try {
-          pushResponse = await fetch(this.getRemoteSyncEndpoint(), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ state: this.getPersistedSnapshot() }),
-            signal: pushController?.signal
+          response = await fetch(`${this.getRemoteSyncEndpoint()}?t=${Date.now()}`, {
+            method: 'GET',
+            signal: controller?.signal
           });
         } finally {
-          clearTimeout(pushTimeout);
+          clearTimeout(timeout);
         }
-        if (!pushResponse.ok) {
-          console.warn(`[DB Sync] Failed to seed backend from local state (HTTP ${pushResponse.status}).`);
+
+        if (!response.ok) {
+          throw new Error(`Failed to load state from backend (HTTP ${response.status})`);
+        }
+
+        const payload = await response.json() as { state?: Record<string, unknown>; updatedAt?: unknown };
+        const serverState = payload?.state && typeof payload.state === 'object' ? payload.state : {};
+        const hasServerState = Object.keys(serverState).length > 0;
+
+        if (hasServerState) {
+          for (const key of this.REMOTE_SYNC_KEYS) {
+            const value = serverState[key];
+            if (typeof value === 'string') {
+              localStorage.setItem(key, value);
+            } else {
+              localStorage.removeItem(key);
+            }
+          }
+          this.invalidateAllCaches();
+          this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
+          return;
+        }
+
+        // In strict mode, never auto-seed backend from browser-local state.
+        if (strict) {
+          throw new Error('Backend returned empty state in strict mode.');
+        }
+
+        // Server has no state yet. Seed it from local browser state if available.
+        if (this.hasLocalPersistedData()) {
+          const pushController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          const pushTimeout = setTimeout(() => pushController?.abort(), 5000);
+          let pushResponse: Response;
+          try {
+            pushResponse = await fetch(this.getRemoteSyncEndpoint(), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.getSyncRequestBody()),
+              signal: pushController?.signal
+            });
+          } finally {
+            clearTimeout(pushTimeout);
+          }
+          if (!pushResponse.ok) {
+            throw new Error(`Failed to seed backend from local state (HTTP ${pushResponse.status})`);
+          }
+          const pushPayload = await pushResponse.json() as { updatedAt?: unknown };
+          this.remoteStateUpdatedAt = typeof pushPayload?.updatedAt === 'string' ? pushPayload.updatedAt : null;
+        } else {
+          this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
         }
       }
-    } catch {
-      console.warn('[DB Sync] Backend unavailable during startup. Using local browser state.');
     }
+
+    if (strict) {
+      throw lastError instanceof Error ? lastError : new Error('Backend hydration failed');
+    }
+
+    console.warn('[DB Sync] Backend unavailable during startup. Using local browser state.');
   }
 
   // ==================== USERS ====================
@@ -527,6 +597,10 @@ class Database {
 
   static getUserByUserId(userId: string): User | undefined {
     return this.getUsers().find(u => u.userId === userId);
+  }
+
+  private static resolveUserByRef(userRef: string): User | undefined {
+    return this.getUserById(userRef) || this.getUserByUserId(userRef);
   }
 
   static getUserByEmail(email: string): User | undefined {
@@ -629,12 +703,59 @@ class Database {
     if (this._cache.has(CACHE_KEY_WALLETS_NORMALIZED)) {
       return this._cache.get(CACHE_KEY_WALLETS_NORMALIZED) as Wallet[];
     }
-    const wallets: Wallet[] = this.getCached<Wallet[]>(DB_KEYS.WALLETS, []);
-    const normalized = wallets.map((w) => ({
-      ...w,
-      matrixWallet: w.matrixWallet ?? 0,
-      lockedIncomeWallet: w.lockedIncomeWallet ?? 0
-    }));
+    const wallets = this.getCached<Record<string, unknown>[]>(DB_KEYS.WALLETS, []);
+    const pins = this.getPins();
+    const unusedPinCountByUserId = new Map<string, number>();
+    for (const pin of pins) {
+      if (pin.status !== 'unused') continue;
+      const current = unusedPinCountByUserId.get(pin.ownerId) || 0;
+      unusedPinCountByUserId.set(pin.ownerId, current + 1);
+    }
+    let hasLegacyFields = false;
+    const normalized: Wallet[] = wallets.map((raw) => {
+      const source = raw || {};
+      if (
+        Object.prototype.hasOwnProperty.call(source, 'fundWallet')
+        || Object.prototype.hasOwnProperty.call(source, 'receiveHelpWallet')
+        || Object.prototype.hasOwnProperty.call(source, 'getHelpWallet')
+      ) {
+        hasLegacyFields = true;
+      }
+      const {
+        fundWallet: _legacyFundWallet,
+        receiveHelpWallet: _legacyReceiveHelpWallet,
+        getHelpWallet: _legacyGetHelpWallet,
+        ...rest
+      } = source as Record<string, unknown>;
+      const userId = typeof rest.userId === 'string' ? rest.userId : String(rest.userId || '');
+      const depositWalletValue = Number(rest.depositWallet);
+      const pinWalletValue = Number(rest.pinWallet);
+      const normalizedStoredPinWallet = Number.isFinite(pinWalletValue) ? pinWalletValue : 0;
+      const computedPinWallet = unusedPinCountByUserId.get(userId) || 0;
+      if (normalizedStoredPinWallet !== computedPinWallet) {
+        hasLegacyFields = true;
+      }
+      const incomeWalletValue = Number(rest.incomeWallet);
+      const matrixWalletValue = Number(rest.matrixWallet);
+      const lockedIncomeWalletValue = Number(rest.lockedIncomeWallet);
+      const giveHelpLockedValue = Number(rest.giveHelpLocked);
+      const totalReceivedValue = Number(rest.totalReceived);
+      const totalGivenValue = Number(rest.totalGiven);
+      return {
+        userId,
+        depositWallet: Number.isFinite(depositWalletValue) ? depositWalletValue : 0,
+        pinWallet: computedPinWallet,
+        incomeWallet: Number.isFinite(incomeWalletValue) ? incomeWalletValue : 0,
+        matrixWallet: Number.isFinite(matrixWalletValue) ? matrixWalletValue : 0,
+        lockedIncomeWallet: Number.isFinite(lockedIncomeWalletValue) ? lockedIncomeWalletValue : 0,
+        giveHelpLocked: Number.isFinite(giveHelpLockedValue) ? giveHelpLockedValue : 0,
+        totalReceived: Number.isFinite(totalReceivedValue) ? totalReceivedValue : 0,
+        totalGiven: Number.isFinite(totalGivenValue) ? totalGivenValue : 0
+      };
+    });
+    if (hasLegacyFields) {
+      this.saveWallets(normalized);
+    }
     this._cache.set(CACHE_KEY_WALLETS_NORMALIZED, normalized);
     return normalized;
   }
@@ -681,14 +802,14 @@ class Database {
     for (const tx of txs) {
       const desc = (tx.description || '').toLowerCase();
       if (
-        tx.type === 'get_help'
+        tx.type === 'receive_help'
         && tx.amount > 0
         && (desc.startsWith('locked first-two help at level') || desc.startsWith('locked receive help at level'))
       ) {
         locked += tx.amount;
         continue;
       }
-      if (tx.type === 'get_help' && tx.amount > 0 && desc.startsWith('released locked receive help at level')) {
+      if (tx.type === 'receive_help' && tx.amount > 0 && desc.startsWith('released locked receive help at level')) {
         locked -= tx.amount;
         continue;
       }
@@ -718,30 +839,44 @@ class Database {
     let relevantCount = 0;
 
     for (const tx of txs) {
+      const txDesc = (tx.description || '').toLowerCase();
+      const isNonEarningCreditType =
+        tx.type === 'activation'
+        || tx.type === 'income_transfer'
+        || tx.type === 'pin_used'
+        || tx.type === 'pin_purchase'
+        || tx.type === 'pin_transfer'
+        || tx.type === 'deposit'
+        || tx.type === 'p2p_transfer'
+        || tx.type === 'reentry';
+      const isIncomeWalletAdminCredit = tx.type !== 'admin_credit' || txDesc.includes('income wallet');
+
+      // Lifetime earnings: all positive credits that are actually earnings (not activation/fund/pin flows).
+      if (tx.amount > 0 && !isNonEarningCreditType && isIncomeWalletAdminCredit) {
+        totalReceived += tx.amount;
+      }
+
       switch (tx.type) {
         case 'direct_income':
         case 'level_income':
           incomeWallet += tx.amount;
           matrixWallet += tx.amount;
-          if (tx.amount > 0) totalReceived += tx.amount;
           relevantCount += 1;
           break;
-        case 'get_help': {
-          const desc = (tx.description || '').toLowerCase();
-          const isLockedReceive = desc.startsWith('locked receive help at level')
-            || desc.startsWith('locked first-two help at level');
+        case 'receive_help': {
+          const isLockedReceive = txDesc.startsWith('locked receive help at level')
+            || txDesc.startsWith('locked first-two help at level');
           if (!isLockedReceive) {
             incomeWallet += tx.amount;
             matrixWallet += tx.amount;
-            if (tx.amount > 0) totalReceived += tx.amount;
           }
           relevantCount += 1;
           break;
         }
         case 'give_help':
           if (
-            !(tx.description || '').toLowerCase().includes('from locked income')
-            && !(tx.description || '').toLowerCase().includes('from matrix contribution')
+            !txDesc.includes('from locked income')
+            && !txDesc.includes('from matrix contribution')
           ) {
             if (tx.amount >= 0) {
               incomeWallet += tx.amount;
@@ -775,15 +910,24 @@ class Database {
           relevantCount += 1;
           break;
         }
-        case 'admin_credit':
-          if ((tx.description || '').toLowerCase().includes('income wallet')) {
+        case 'income_transfer':
+          if (tx.amount >= 0) {
             incomeWallet += tx.amount;
-            if (tx.amount > 0) totalReceived += tx.amount;
+          } else {
+            const transferOutflow = Math.min(Math.abs(tx.amount), Math.max(0, incomeWallet));
+            incomeWallet -= transferOutflow;
+            totalGiven += Math.abs(tx.amount);
+          }
+          relevantCount += 1;
+          break;
+        case 'admin_credit':
+          if (txDesc.includes('income wallet')) {
+            incomeWallet += tx.amount;
             relevantCount += 1;
           }
           break;
         case 'admin_debit':
-          if ((tx.description || '').toLowerCase().includes('income wallet')) {
+          if (txDesc.includes('income wallet')) {
             const debitOutflow = Math.min(Math.abs(tx.amount), Math.max(0, incomeWallet));
             incomeWallet -= debitOutflow;
             totalGiven += Math.abs(tx.amount);
@@ -1202,6 +1346,39 @@ class Database {
     return this.getEffectiveDirectCount(user) >= requiredDirect;
   }
 
+  private static buildMatrixChildrenMap(matrix: MatrixNode[]): Map<string, string[]> {
+    const nodeMap = new Map(matrix.map((node) => [node.userId, node]));
+    const childMap = new Map<string, Set<string>>();
+
+    const pushChild = (parentUserId: string | undefined, childUserId: string | undefined) => {
+      if (!parentUserId || !childUserId) return;
+      if (!nodeMap.has(parentUserId) || !nodeMap.has(childUserId)) return;
+      let bucket = childMap.get(parentUserId);
+      if (!bucket) {
+        bucket = new Set<string>();
+        childMap.set(parentUserId, bucket);
+      }
+      bucket.add(childUserId);
+    };
+
+    // Primary topology source.
+    for (const node of matrix) {
+      pushChild(node.parentId, node.userId);
+    }
+
+    // Fallback for legacy rows where parentId might be missing but child pointers exist.
+    for (const node of matrix) {
+      pushChild(node.userId, node.leftChild);
+      pushChild(node.userId, node.rightChild);
+    }
+
+    const normalized = new Map<string, string[]>();
+    for (const [parent, children] of childMap.entries()) {
+      normalized.set(parent, Array.from(children));
+    }
+    return normalized;
+  }
+
   static getCurrentMatrixLevel(userId: string): number {
     const tracker = this.getUserHelpTracker(userId);
     let trackerLevel = 0;
@@ -1216,42 +1393,98 @@ class Database {
     if (!user) return trackerLevel;
 
     const matrix = this.getMatrix();
-    const nodeMap = new Map(matrix.map((node) => [node.userId, node]));
-    const rootNode = nodeMap.get(user.userId);
-    if (!rootNode) return trackerLevel;
+    const childrenMap = this.buildMatrixChildrenMap(matrix);
+    const rootExists = matrix.some((node) => node.userId === user.userId);
+    if (!rootExists) return trackerLevel;
 
     let matrixDepthLevel = 0;
-    const queue: Array<{ nodeUserId: string; depth: number }> = [];
-
-    if (rootNode.leftChild) queue.push({ nodeUserId: rootNode.leftChild, depth: 1 });
-    if (rootNode.rightChild) queue.push({ nodeUserId: rootNode.rightChild, depth: 1 });
+    const queue: Array<{ nodeUserId: string; depth: number }> = [{ nodeUserId: user.userId, depth: 0 }];
+    const visited = new Set<string>([user.userId]);
 
     while (queue.length > 0) {
       const current = queue.shift()!;
-      matrixDepthLevel = Math.max(matrixDepthLevel, current.depth);
-
-      const node = nodeMap.get(current.nodeUserId);
-      if (!node) continue;
-
-      if (node.leftChild) queue.push({ nodeUserId: node.leftChild, depth: current.depth + 1 });
-      if (node.rightChild) queue.push({ nodeUserId: node.rightChild, depth: current.depth + 1 });
+      const children = childrenMap.get(current.nodeUserId) || [];
+      for (const childUserId of children) {
+        if (visited.has(childUserId)) continue;
+        const nextDepth = current.depth + 1;
+        matrixDepthLevel = Math.max(matrixDepthLevel, nextDepth);
+        visited.add(childUserId);
+        queue.push({ nodeUserId: childUserId, depth: nextDepth });
+      }
     }
 
     const cappedMatrixLevel = Math.min(matrixDepthLevel, helpDistributionTable.length);
     return Math.max(trackerLevel, cappedMatrixLevel);
   }
 
-  static getQualifiedLevel(userId: string): number {
+  static getMatrixNodesCountAtLevel(userId: string, targetDepth: number): number {
+    if (targetDepth < 1 || targetDepth > helpDistributionTable.length) return 0;
+
     const user = this.getUserById(userId);
     if (!user) return 0;
 
+    const matrix = this.getMatrix();
+    const childrenMap = this.buildMatrixChildrenMap(matrix);
+    const rootExists = matrix.some((node) => node.userId === user.userId);
+    if (!rootExists) return 0;
+
+    let countAtDepth = 0;
+    const queue: Array<{ nodeUserId: string; depth: number }> = [{ nodeUserId: user.userId, depth: 0 }];
+    const visited = new Set<string>([user.userId]);
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current.depth === targetDepth) {
+        countAtDepth++;
+        continue;
+      }
+      if (current.depth > targetDepth) continue;
+
+      const children = childrenMap.get(current.nodeUserId) || [];
+      for (const childUserId of children) {
+        if (visited.has(childUserId)) continue;
+        visited.add(childUserId);
+        queue.push({ nodeUserId: childUserId, depth: current.depth + 1 });
+      }
+    }
+
+    return countAtDepth;
+  }
+
+  static getQualifiedLevel(userRef: string): number {
+    const user = this.resolveUserByRef(userRef);
+    if (!user) return 0;
+
+    const tracker = this.getUserHelpTracker(user.id);
     let qualifiedLevel = 0;
-    for (const levelData of helpDistributionTable) {
-      if (!this.isQualifiedForLevel(user, levelData.level)) break;
-      qualifiedLevel = levelData.level;
+
+    if (tracker && tracker.levels) {
+      for (let i = 0; i < helpDistributionTable.length; i++) {
+        const lvl = i + 1;
+        const requiredUsers = helpDistributionTable[i].users;
+        const fill = tracker.levels[String(lvl)]?.receiveEvents || 0;
+        if (fill >= requiredUsers) {
+          qualifiedLevel = lvl;
+        } else {
+          break;
+        }
+      }
     }
 
     return qualifiedLevel;
+  }
+
+  static getLevelFillProgress(userRef: string): { level: number; filled: number; required: number } {
+    const user = this.resolveUserByRef(userRef);
+    const fallbackRequired = helpDistributionTable[0]?.users || 0;
+    if (!user) {
+      return { level: 1, filled: 0, required: fallbackRequired };
+    }
+
+    const level = Math.max(1, this.getCurrentMatrixLevel(user.id));
+    const required = helpDistributionTable[level - 1]?.users || 0;
+    const filled = this.getMatrixNodesCountAtLevel(user.id, level);
+    return { level, filled, required };
   }
 
   static getLockedIncomeBreakdown(userId: string): LockedIncomeBreakdownItem[] {
@@ -1275,13 +1508,42 @@ class Database {
       .filter((t) => t.userId === userId)
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
+    const consumeTxDerivedLockedAcrossLevels = (preferredLevel: number, amount: number) => {
+      let remaining = Math.max(0, amount);
+      if (remaining <= 0) return;
+
+      const levels = Array.from(txLevelMap.keys())
+        .filter((n) => Number.isInteger(n) && n >= 1 && n <= helpDistributionTable.length)
+        .sort((a, b) => a - b);
+      const ordered = levels.includes(preferredLevel)
+        ? [preferredLevel, ...levels.filter((l) => l !== preferredLevel)]
+        : levels;
+
+      // Match backend locked-income consumption order:
+      // first qualification-lock, then first-two lock.
+      for (const level of ordered) {
+        if (remaining <= 0) break;
+        const slot = ensureTxLevel(level);
+        const used = Math.min(Math.max(0, slot.qualification), remaining);
+        slot.qualification -= used;
+        remaining -= used;
+      }
+      for (const level of ordered) {
+        if (remaining <= 0) break;
+        const slot = ensureTxLevel(level);
+        const used = Math.min(Math.max(0, slot.firstTwo), remaining);
+        slot.firstTwo -= used;
+        remaining -= used;
+      }
+    };
+
     for (const tx of txs) {
       const level = this.resolveTransactionLevel(tx);
       if (!level) continue;
       const desc = (tx.description || '').toLowerCase();
       const slot = ensureTxLevel(level);
 
-      if (tx.type === 'get_help' && tx.amount > 0) {
+      if (tx.type === 'receive_help' && tx.amount > 0) {
         if (desc.startsWith('locked first-two help at level')) {
           slot.firstTwo += tx.amount;
         } else if (desc.startsWith('locked receive help at level')) {
@@ -1293,7 +1555,7 @@ class Database {
       }
 
       if (tx.type === 'give_help' && desc.includes('from locked income')) {
-        slot.firstTwo -= Math.abs(tx.amount);
+        consumeTxDerivedLockedAcrossLevels(level, Math.abs(tx.amount));
       }
     }
 
@@ -1303,8 +1565,9 @@ class Database {
       const txDerived = txLevelMap.get(level) || { firstTwo: 0, qualification: 0 };
       const trackerFirstTwo = state?.lockedAmount || 0;
       const trackerQualification = state?.lockedReceiveAmount || 0;
-      const lockedFirstTwoAmount = Math.max(0, Math.max(trackerFirstTwo, txDerived.firstTwo));
-      const lockedQualificationAmount = Math.max(0, Math.max(trackerQualification, txDerived.qualification));
+      const hasTrackerState = !!state;
+      const lockedFirstTwoAmount = Math.max(0, hasTrackerState ? trackerFirstTwo : txDerived.firstTwo);
+      const lockedQualificationAmount = Math.max(0, hasTrackerState ? trackerQualification : txDerived.qualification);
       const lockedAmount = lockedFirstTwoAmount + lockedQualificationAmount;
       if (lockedAmount <= 0) continue;
 
@@ -1406,7 +1669,7 @@ class Database {
     const prefix = `locked first-two help at level ${level}`;
     return this.getTransactions().filter((tx) =>
       tx.userId === userId
-      && tx.type === 'get_help'
+      && tx.type === 'receive_help'
       && tx.amount > 0
       && (tx.description || '').toLowerCase().startsWith(prefix)
     ).length;
@@ -1565,7 +1828,7 @@ class Database {
         this.createTransaction({
           id: `tx_${Date.now()}_upline_help_locked_first_two_${recipientLevel}`,
           userId: recipient.id,
-          type: 'get_help',
+          type: 'receive_help',
           amount: transferAmount,
           fromUserId: userId,
           level: recipientLevel,
@@ -1627,7 +1890,7 @@ class Database {
         this.createTransaction({
           id: `tx_${Date.now()}_upline_help_${recipientLevel}`,
           userId: recipient.id,
-          type: 'get_help',
+          type: 'receive_help',
           amount: transferAmount,
           fromUserId: userId,
           level: recipientLevel,
@@ -1645,7 +1908,7 @@ class Database {
         this.createTransaction({
           id: `tx_${Date.now()}_upline_help_locked_${recipientLevel}`,
           userId: recipient.id,
-          type: 'get_help',
+          type: 'receive_help',
           amount: transferAmount,
           fromUserId: userId,
           level: recipientLevel,
@@ -1858,7 +2121,7 @@ class Database {
       this.createTransaction({
         id: `tx_${Date.now()}_receive_help_${level}`,
         userId: user.id,
-        type: 'get_help',
+        type: 'receive_help',
         amount,
         fromUserId: matchedFromUserId,
         level,
@@ -1918,7 +2181,7 @@ class Database {
       this.createTransaction({
         id: `tx_${Date.now()}_receive_help_5th_${level}`,
         userId: user.id,
-        type: 'get_help',
+        type: 'receive_help',
         amount,
         fromUserId: matchedFromUserId,
         level,
@@ -1952,7 +2215,7 @@ class Database {
       this.createTransaction({
         id: `tx_${Date.now()}_receive_help_${level}`,
         userId: user.id,
-        type: 'get_help',
+        type: 'receive_help',
         amount,
         fromUserId: matchedFromUserId,
         level,
@@ -1973,7 +2236,7 @@ class Database {
       this.createTransaction({
         id: `tx_${Date.now()}_receive_help_locked_${level}`,
         userId: user.id,
-        type: 'get_help',
+        type: 'receive_help',
         amount,
         fromUserId: matchedFromUserId,
         level,
@@ -2165,7 +2428,7 @@ class Database {
       this.createTransaction({
         id: `tx_${Date.now()}_release_receive_${level}`,
         userId,
-        type: 'get_help',
+        type: 'receive_help',
         amount: releaseAmount,
         level,
         status: 'completed',
@@ -2234,7 +2497,7 @@ class Database {
   }
 
   private static isMatrixTransactionForRebuild(tx: Transaction): boolean {
-    if (tx.type === 'get_help' || tx.type === 'give_help') {
+    if (tx.type === 'receive_help' || tx.type === 'give_help') {
       return true;
     }
     if (tx.type === 'level_income' && (tx.description || '').startsWith('Helping amount from ')) {
@@ -2908,8 +3171,6 @@ class Database {
       incomeWallet: 0,
       matrixWallet: 0,
       lockedIncomeWallet: 0,
-      fundWallet: 0,
-      getHelpWallet: 0,
       giveHelpLocked: 0,
       totalReceived: 0,
       totalGiven: 0
@@ -2937,6 +3198,31 @@ class Database {
 
   static savePins(pins: Pin[]): void {
     this.setCached(DB_KEYS.PINS, pins);
+    this.syncPinWalletFromPins(pins);
+  }
+
+  private static syncPinWalletFromPins(pins: Pin[]): void {
+    const wallets = this.getWallets();
+    if (wallets.length === 0) return;
+
+    const unusedPinCountByUserId = new Map<string, number>();
+    for (const pin of pins) {
+      if (pin.status !== 'unused') continue;
+      const current = unusedPinCountByUserId.get(pin.ownerId) || 0;
+      unusedPinCountByUserId.set(pin.ownerId, current + 1);
+    }
+
+    let changed = false;
+    const updatedWallets = wallets.map((wallet) => {
+      const nextPinWallet = unusedPinCountByUserId.get(wallet.userId) || 0;
+      if ((wallet.pinWallet || 0) === nextPinWallet) return wallet;
+      changed = true;
+      return { ...wallet, pinWallet: nextPinWallet };
+    });
+
+    if (changed) {
+      this.saveWallets(updatedWallets);
+    }
   }
 
   static getPinById(id: string): Pin | undefined {
@@ -3332,12 +3618,74 @@ class Database {
   }
 
   // ==================== TRANSACTIONS ====================
+  private static normalizeTransactionType(type: unknown): unknown {
+    if (type === 'get_help') return 'receive_help';
+    return type;
+  }
+
+  static async forceRemoteSyncNow(): Promise<void> {
+    await this.forceRemoteSyncNowWithOptions();
+  }
+
+  static async forceRemoteSyncNowWithOptions(options?: { destructive?: boolean }): Promise<boolean> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return false;
+    }
+
+    if (this.remoteSyncTimer) {
+      clearTimeout(this.remoteSyncTimer);
+      this.remoteSyncTimer = null;
+    }
+
+    // Avoid racing an already-in-flight auto sync.
+    while (this.remoteSyncInFlight) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    this.remoteSyncQueued = false;
+    this.remoteSyncPending = false;
+    try {
+      const response = await fetch(this.getRemoteSyncWriteEndpoint(options), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this.getSyncRequestBody())
+      });
+      if (!response.ok) {
+        if (response.status === 409) {
+          console.warn('[DB Sync] Forced sync rejected due to stale snapshot. Re-hydrating from backend.');
+          await this.hydrateFromServer();
+        }
+        throw new Error(`Remote sync failed with HTTP ${response.status}`);
+      }
+      const payload = await response.json() as { updatedAt?: unknown };
+      this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
+      return true;
+    } catch {
+      console.warn('[DB Sync] Failed to force-push local state to backend.');
+      return false;
+    }
+  }
+
+  private static normalizeTransactionRecord(tx: Transaction): Transaction {
+    const normalizedType = this.normalizeTransactionType((tx as any).type);
+    if (normalizedType === (tx as any).type) return tx;
+    return {
+      ...tx,
+      type: normalizedType as Transaction['type']
+    };
+  }
+
   static getTransactions(): Transaction[] {
     const transactions: Transaction[] = this.getCached<Transaction[]>(DB_KEYS.TRANSACTIONS, []);
     let changed = false;
 
     for (const tx of transactions) {
-      if (tx.type !== 'get_help') continue;
+      const normalized = this.normalizeTransactionRecord(tx);
+      if (normalized !== tx) {
+        Object.assign(tx, normalized);
+        changed = true;
+      }
+      if (tx.type !== 'receive_help') continue;
       if (!tx.fromUserId || !tx.level) continue;
       if (!tx.description || !/^Received help at level \d+$/i.test(tx.description.trim())) continue;
 
@@ -3358,22 +3706,46 @@ class Database {
   }
 
   static saveTransactions(transactions: Transaction[]): void {
-    this.setCached(DB_KEYS.TRANSACTIONS, transactions);
+    const normalized = transactions.map((tx) => this.normalizeTransactionRecord(tx));
+    this.setCached(DB_KEYS.TRANSACTIONS, normalized);
   }
 
   static getUserTransactions(userId: string): Transaction[] {
-    return this.getTransactions()
-      .filter(t => t.userId === userId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const all = this.getTransactions();
+    const indexed = all
+      .map((tx, index) => ({ tx, index }))
+      .filter(({ tx }) => tx.userId === userId);
+
+    const parseIdTime = (id: string | undefined): number => {
+      const match = String(id || '').match(/_(\d{10,13})(?:_|$)/);
+      if (!match) return 0;
+      const n = Number(match[1]);
+      if (!Number.isFinite(n)) return 0;
+      return match[1].length === 10 ? n * 1000 : n;
+    };
+
+    indexed.sort((a, b) => {
+      const timeDiff = new Date(b.tx.createdAt).getTime() - new Date(a.tx.createdAt).getTime();
+      if (timeDiff !== 0) return timeDiff;
+
+      const idTimeDiff = parseIdTime(b.tx.id) - parseIdTime(a.tx.id);
+      if (idTimeDiff !== 0) return idTimeDiff;
+
+      // Final tie-breaker for exact same timestamp/id-time: later inserted first.
+      return b.index - a.index;
+    });
+
+    return indexed.map(({ tx }) => tx);
   }
 
   static createTransaction(transaction: Transaction): Transaction {
     // In bulk rebuild mode, skip creating transaction records to save memory
     if (this._bulkRebuildMode) return transaction;
     const transactions = this.getTransactions();
-    transactions.push(transaction);
+    const normalized = this.normalizeTransactionRecord(transaction);
+    transactions.push(normalized);
     this.saveTransactions(transactions);
-    return transaction;
+    return normalized;
   }
 
   // ==================== MATRIX ====================
@@ -3680,6 +4052,10 @@ class Database {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
+  static getAllCompletedPayments(): Payment[] {
+    return this.getPayments();
+  }
+
   static createPayment(payment: Payment): Payment {
     const payments = this.getPayments();
     payments.push(payment);
@@ -3809,15 +4185,35 @@ class Database {
     // Backward compatibility for legacy sessions stored in localStorage.
     const legacyData = localStorage.getItem(DB_KEYS.CURRENT_USER);
     if (!legacyData) return null;
-    if (tabSession) {
-      tabSession.setItem(DB_KEYS.CURRENT_USER, legacyData);
-    }
     const parsed = JSON.parse(legacyData) as User;
     const fresh = parsed?.id ? this.getUserById(parsed.id) : undefined;
     return fresh || parsed;
   }
 
   // ==================== STATS ====================
+  static getTotalDeposits(): number {
+    return this.getPayments()
+      .filter((p) => p.status === 'completed')
+      .reduce((sum, p) => sum + p.amount, 0);
+  }
+
+  static getTotalWithdrawals(): number {
+    return this.getTransactions()
+      .filter((tx) => tx.type === 'withdrawal' && tx.status === 'completed')
+      .reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
+  }
+
+  static getTotalLockedIncome(): number {
+    return this.getWallets()
+      .reduce((sum, w) => sum + (w.lockedIncomeWallet || 0), 0);
+  }
+
+  static getRequiredDirectsForLevel(level: number): number {
+    return helpDistributionTable
+      .filter((l) => l.level <= level)
+      .reduce((sum, l) => sum + (l.directRequired || 0), 0);
+  }
+
   static getStats() {
     const users = this.getUsers();
     const wallets = this.getWallets();
@@ -3826,7 +4222,7 @@ class Database {
 
     const activeUsers = users.filter(u => u.isActive).length;
     const totalHelpDistributed = transactions
-      .filter(t => t.type === 'get_help' && t.status === 'completed')
+      .filter(t => t.type === 'receive_help' && t.status === 'completed')
       .reduce((sum, t) => sum + t.amount, 0);
 
     const averageEarnings = wallets.length > 0
@@ -3869,28 +4265,41 @@ class Database {
       if (level !== undefined && userLevel !== level) continue;
 
       const userTransactions = transactions.filter(t => t.userId === user.id);
-      const getHelpAmount = userTransactions
-        .filter(t => t.type === 'get_help' && t.status === 'completed')
+      const receiveHelpAmount = userTransactions
+        .filter(t => t.type === 'receive_help' && t.status === 'completed')
         .reduce((sum, t) => sum + t.amount, 0);
       const giveHelpAmount = userTransactions
         .filter(t => t.type === 'give_help' && t.status === 'completed')
         .reduce((sum, t) => sum + t.amount, 0);
+      const directReferralIncome = userTransactions
+        .filter(t => t.type === 'direct_income' && t.status === 'completed')
+        .reduce((sum, t) => sum + t.amount, 0);
 
       // Qualification uses cumulative direct requirement: 0, 2, 5, 9, 14...
       const isQualified = userLevel <= 0 ? true : this.isQualifiedForLevel(user, userLevel);
+      const qualifiedLevel = this.getQualifiedLevel(user.id);
+      const wallet = this.getWallet(user.id);
+      const lockedHelp = (wallet?.lockedIncomeWallet || 0) + (wallet?.giveHelpLocked || 0);
+      const levelProgress = this.getLevelFillProgress(user.id);
+      const levelFilledText = `Level ${levelProgress.level} (${levelProgress.filled}/${levelProgress.required} filled)`;
 
       reports.push({
         level: userLevel,
         userId: user.userId,
         fullName: user.fullName,
-        sponsorId: user.sponsorId || '-',
-        getHelpAmount,
+        receiveHelpAmount,
         giveHelpAmount,
-        netAmount: getHelpAmount - giveHelpAmount,
+        netAmount: receiveHelpAmount - giveHelpAmount,
+        directReferralIncome,
+        incomeWallet: wallet?.incomeWallet || 0,
+        totalEarning: user.totalEarnings || 0,
+        lockedHelp,
+        qualifiedLevel,
         isQualified,
-        directCount: user.directCount,
-        date: user.activatedAt || user.createdAt
-      });
+        directCount: user.directCount || 0,
+        date: user.activatedAt || user.createdAt,
+        levelFilledText
+      } as any);
     }
 
     return reports.sort((a, b) => a.level - b.level || a.userId.localeCompare(b.userId));
@@ -4018,7 +4427,16 @@ class Database {
       blockedReason: null,
       sponsorId: null,
       parentId: null,
-      position: null
+      position: null,
+      level: 0,
+      directCount: 0,
+      totalEarnings: 0,
+      isCapped: false,
+      capLevel: 0,
+      reEntryCount: 0,
+      cycleCount: 0,
+      requiredDirectForNextLevel: 0,
+      completedDirectForCurrentLevel: 0
     }));
     const primaryAdmin = normalizedAdmins.find((u) => u.userId === '1000001') || normalizedAdmins[0];
     const adminIdSet = new Set(normalizedAdmins.map((u) => u.id));
@@ -4037,8 +4455,6 @@ class Database {
         incomeWallet: 0,
         matrixWallet: 0,
         lockedIncomeWallet: 0,
-        fundWallet: 0,
-        getHelpWallet: 0,
         giveHelpLocked: 0,
         totalReceived: 0,
         totalGiven: 0
@@ -4107,10 +4523,12 @@ interface LevelWiseReport {
   userId: string;
   fullName: string;
   sponsorId: string;
-  getHelpAmount: number;
+  receiveHelpAmount: number;
   giveHelpAmount: number;
   netAmount: number;
   isQualified: boolean;
   directCount: number;
   date: string;
 }
+
+

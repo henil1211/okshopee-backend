@@ -32,6 +32,8 @@ const MONGODB_LEGACY_SNAPSHOT_COLLECTION =
   process.env.MONGODB_LEGACY_SNAPSHOT_COLLECTION || 'app_state';
 const SMTP_HOST = process.env.SMTP_HOST || '';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_TIMEOUT_MS_RAW = Number(process.env.SMTP_TIMEOUT_MS || 8000);
+const SMTP_TIMEOUT_MS = Number.isFinite(SMTP_TIMEOUT_MS_RAW) && SMTP_TIMEOUT_MS_RAW > 0 ? SMTP_TIMEOUT_MS_RAW : 8000;
 const SMTP_SECURE = process.env.SMTP_SECURE ? process.env.SMTP_SECURE === 'true' : SMTP_PORT === 465;
 const SMTP_IGNORE_TLS = process.env.SMTP_IGNORE_TLS === 'true';
 const SMTP_REQUIRE_TLS = process.env.SMTP_REQUIRE_TLS === 'true';
@@ -143,8 +145,9 @@ function getSmtpTransporter() {
       host: SMTP_HOST,
       port: SMTP_PORT,
       secure: SMTP_SECURE,
-      connectionTimeout: 15000,
-      greetingTimeout: 15000,
+      connectionTimeout: SMTP_TIMEOUT_MS,
+      greetingTimeout: SMTP_TIMEOUT_MS,
+      socketTimeout: SMTP_TIMEOUT_MS,
       ignoreTLS: SMTP_IGNORE_TLS,
       requireTLS: SMTP_REQUIRE_TLS,
       tls: {
@@ -308,21 +311,20 @@ async function readObjectState(collectionName) {
 async function readStateFromCollections() {
   const state = {};
   let latestUpdatedAt = null;
-
-  for (const [stateKey, config] of Object.entries(STATE_COLLECTIONS)) {
-    if (config.kind === 'array') {
-      const result = await readArrayState(config.collection, config.idField);
-      if (!result.found) continue;
-      state[stateKey] = JSON.stringify(result.value);
-      if (result.updatedAt && (!latestUpdatedAt || result.updatedAt > latestUpdatedAt)) {
-        latestUpdatedAt = result.updatedAt;
+  const results = await Promise.all(
+    Object.entries(STATE_COLLECTIONS).map(async ([stateKey, config]) => {
+      if (config.kind === 'array') {
+        const result = await readArrayState(config.collection, config.idField);
+        return { stateKey, found: result.found, value: result.value, updatedAt: result.updatedAt };
       }
-      continue;
-    }
+      const result = await readObjectState(config.collection);
+      return { stateKey, found: result.found, value: result.value, updatedAt: result.updatedAt };
+    })
+  );
 
-    const result = await readObjectState(config.collection);
+  for (const result of results) {
     if (!result.found) continue;
-    state[stateKey] = JSON.stringify(result.value);
+    state[result.stateKey] = JSON.stringify(result.value);
     if (result.updatedAt && (!latestUpdatedAt || result.updatedAt > latestUpdatedAt)) {
       latestUpdatedAt = result.updatedAt;
     }
@@ -907,8 +909,16 @@ async function start() {
     const smtpErrors = getSmtpConfigErrors();
     if (smtpErrors.length === 0) {
       console.log(
-        `SMTP ready: host=${SMTP_HOST} port=${SMTP_PORT} secure=${SMTP_SECURE} ignoreTLS=${SMTP_IGNORE_TLS} requireTLS=${SMTP_REQUIRE_TLS} from=${SMTP_FROM}`
+        `SMTP ready: host=${SMTP_HOST} port=${SMTP_PORT} secure=${SMTP_SECURE} ignoreTLS=${SMTP_IGNORE_TLS} requireTLS=${SMTP_REQUIRE_TLS} timeoutMs=${SMTP_TIMEOUT_MS} from=${SMTP_FROM}`
       );
+      void getSmtpTransporter().verify()
+        .then(() => {
+          console.log('SMTP verify: connection OK');
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`SMTP verify failed: ${message}`);
+        });
     } else {
       console.log(`SMTP disabled: ${smtpErrors.join(', ')}`);
     }
