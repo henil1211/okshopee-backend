@@ -1575,6 +1575,25 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     const report = Database.deleteAllNonAdminIds();
     const synced = await Database.forceRemoteSyncNowWithOptions({ destructive: true });
+    if (!synced) {
+      try {
+        await Database.hydrateFromServer({ strict: true });
+      } catch {
+        // Keep returning a hard failure if backend state can't be refreshed.
+      }
+      get().loadAllUsers();
+      get().loadAllTransactions();
+      get().loadAllPins();
+      get().loadAllPinRequests();
+      get().loadPendingPinRequests();
+      get().loadStats();
+      return {
+        success: false,
+        message: 'Delete All IDs could not be saved to backend. No permanent changes were applied.',
+        report
+      };
+    }
+
     get().loadAllUsers();
     get().loadAllTransactions();
     get().loadAllPins();
@@ -1582,7 +1601,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     get().loadPendingPinRequests();
     get().loadStats();
 
-    const message = `Deleted ${report.deletedUsers} IDs. Cleared ${report.deletedTransactions} transactions, ${report.deletedPins} PINs, ${report.deletedMatrixNodes} matrix nodes.${synced ? '' : ' Warning: backend sync failed, please retry once.'}`;
+    const message = `Deleted ${report.deletedUsers} IDs. Cleared ${report.deletedTransactions} transactions, ${report.deletedPins} PINs, ${report.deletedMatrixNodes} matrix nodes.`;
     return { success: true, message, report };
   }
 }));
