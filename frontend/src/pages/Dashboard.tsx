@@ -9,9 +9,9 @@ import {
   TrendingUp, Users, ArrowUpRight, ArrowDownLeft,
   Copy, CheckCircle, RefreshCw,
   DollarSign, UserPlus, BarChart3, PlusCircle, LogOut, Shield,
-  Ticket, Plane, Globe, Heart, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Headphones, Mail
+  Ticket, Plane, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Headphones, Mail, Train
 } from 'lucide-react';
-import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText } from '@/utils/helpers';
+import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel } from '@/utils/helpers';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -33,7 +33,15 @@ export default function Dashboard() {
   const [showDirectReferralsDialog, setShowDirectReferralsDialog] = useState(false);
   const [showLockedIncomeDialog, setShowLockedIncomeDialog] = useState(false);
   const [directReferralSearch, setDirectReferralSearch] = useState('');
-  const [transferData, setTransferData] = useState({ userId: '', amount: '' });
+  const [transferData, setTransferData] = useState<{ userId: string; amount: string; source: 'fund' | 'income' }>({
+    userId: '',
+    amount: '',
+    source: 'fund'
+  });
+  const [transferTransactionPassword, setTransferTransactionPassword] = useState('');
+  const [transferOtp, setTransferOtp] = useState('');
+  const [isSendingTransferOtp, setIsSendingTransferOtp] = useState(false);
+  const [isTransferOtpSent, setIsTransferOtpSent] = useState(false);
   const [withdrawData, setWithdrawData] = useState({ amount: '', address: '' });
   const [withdrawTransactionPassword, setWithdrawTransactionPassword] = useState('');
   const [withdrawOtp, setWithdrawOtp] = useState('');
@@ -42,6 +50,9 @@ export default function Dashboard() {
   const [copied, setCopied] = useState(false);
   const settings = Database.getSettings();
   const withdrawalFeePercent = settings.withdrawalFeePercent;
+
+  // External transfer = fund wallet (always needs recipient) OR income wallet with a recipient specified
+  const isExternalTransfer = transferData.source === 'fund' || transferData.userId.trim().length > 0;
 
   const displayUser = impersonatedUser || user;
 
@@ -57,6 +68,26 @@ export default function Dashboard() {
     }
   }, [isAuthenticated, displayUser, navigate, loadWallet, loadUserDownline]);
 
+  const resetTransferSecurity = () => {
+    setTransferTransactionPassword('');
+    setTransferOtp('');
+    setIsSendingTransferOtp(false);
+    setIsTransferOtpSent(false);
+  };
+
+  const handleSendTransferOtp = async () => {
+    if (!displayUser) return;
+    setIsSendingTransferOtp(true);
+    const result = await sendOtp(displayUser.id, displayUser.email, 'transaction');
+    setIsSendingTransferOtp(false);
+    if (result.success) {
+      setIsTransferOtpSent(true);
+      toast.success('OTP sent to your registered email');
+    } else {
+      toast.error(result.message);
+    }
+  };
+
   const handleTransfer = async () => {
     if (!displayUser) return;
     const amount = parseFloat(transferData.amount);
@@ -65,19 +96,42 @@ export default function Dashboard() {
       return;
     }
 
-    if (transferData.userId.length !== 7) {
-      toast.error('User ID must be 7 digits');
+    const targetId = transferData.userId.trim();
+    if (transferData.source === 'fund') {
+      if (targetId.length !== 7) {
+        toast.error('Recipient User ID must be 7 digits');
+        return;
+      }
+    } else if (targetId.length > 0 && targetId.length !== 7) {
+      toast.error('Recipient User ID must be 7 digits');
       return;
     }
 
+    // For external transfers, validate security fields on the frontend too
+    if (isExternalTransfer) {
+      if (!transferTransactionPassword.trim()) {
+        toast.error('Transaction password is required for external transfers');
+        return;
+      }
+      if (!transferOtp.trim()) {
+        toast.error('OTP is required for external transfers');
+        return;
+      }
+    }
+
+    const security = isExternalTransfer
+      ? { transactionPassword: transferTransactionPassword, otp: transferOtp }
+      : undefined;
+
     setIsLoading(true);
-    const result = await transferFunds(displayUser.id, transferData.userId, amount);
+    const result = await transferFunds(displayUser.id, targetId, amount, transferData.source, security);
     setIsLoading(false);
 
     if (result.success) {
       toast.success(result.message);
       setShowTransferDialog(false);
-      setTransferData({ userId: '', amount: '' });
+      setTransferData({ userId: '', amount: '', source: transferData.source });
+      resetTransferSecurity();
     } else {
       toast.error(result.message);
     }
@@ -227,6 +281,7 @@ export default function Dashboard() {
     || tx.type === 'give_help'
     || tx.type === 'safety_pool'
     || tx.type === 'activation'
+    || tx.type === 'pin_used'
     || tx.type === 'admin_debit';
   const getDisplayAmount = (tx: { amount: number; type: string }) =>
     `${isOutflowTransaction(tx) ? '-' : '+'}${formatCurrency(Math.abs(tx.amount))}`;
@@ -239,7 +294,7 @@ export default function Dashboard() {
       key: 'nationalTour',
       label: 'National Tour',
       level: 3,
-      icon: Plane,
+      icon: Train,
       achieved: displayUser.achievements?.nationalTour,
       color: 'text-blue-400',
       bgColor: 'bg-blue-500/20'
@@ -248,7 +303,7 @@ export default function Dashboard() {
       key: 'internationalTour',
       label: 'International Tour',
       level: 4,
-      icon: Globe,
+      icon: Plane,
       achieved: displayUser.achievements?.internationalTour,
       color: 'text-purple-400',
       bgColor: 'bg-purple-500/20'
@@ -257,7 +312,7 @@ export default function Dashboard() {
       key: 'familyTour',
       label: 'Family International Tour',
       level: 5,
-      icon: Heart,
+      icon: Users,
       achieved: displayUser.achievements?.familyTour,
       color: 'text-pink-400',
       bgColor: 'bg-pink-500/20'
@@ -271,10 +326,9 @@ export default function Dashboard() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between min-h-16 py-2 sm:py-0 gap-2">
             <div className="flex items-center gap-3">
-              <BrandLogo className="h-10 w-10 rounded-xl" />
-              <div>
-                <span className="text-base sm:text-xl font-bold text-slate-900 dark:text-white">ReferNex</span>
-                <span className="text-xs text-slate-500 hidden sm:block dark:text-white/50">ID: {displayUser.userId}</span>
+              <BrandLogo variant="full" className="h-10 w-[164px] rounded-md" />
+              <div className="hidden sm:block">
+                <span className="text-xs text-slate-500 dark:text-white/50">ID: {displayUser.userId}</span>
               </div>
             </div>
 
@@ -299,7 +353,10 @@ export default function Dashboard() {
                 </Button>
               )}
 
-              <div className="flex items-center gap-3">
+              <div
+                className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity"
+                onClick={() => navigate('/profile')}
+              >
                 <div className={`dashboard-avatar w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-bold ${generateAvatarColor(displayUser.userId)}`}>
                   {getInitials(displayUser.fullName)}
                 </div>
@@ -483,10 +540,10 @@ export default function Dashboard() {
                     </div>
                     <div>
                       <p className={`font-medium ${achievement.achieved ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-white/60'}`}>
-                        {achievement.label} — <span className="text-xs font-normal text-slate-500 dark:text-white/50">Complete Level {achievement.level}</span>
+                        {achievement.label} — <span className="text-xs font-normal text-slate-500 dark:text-white/50">Level {achievement.level} Qualified</span>
                       </p>
                       <p className="text-xs text-slate-400 dark:text-white/40 mt-1">
-                        You must receive help from all users in your Level {achievement.level} to be considered Level {achievement.level} qualified.
+                        You must receive help from all users in Level {achievement.level} and complete Level {achievement.level} direct referral qualification.
                       </p>
                     </div>
                   </div>
@@ -660,8 +717,8 @@ export default function Dashboard() {
                           )}
                         </div>
                         <div>
-                          <p className="text-sm font-medium text-slate-900 dark:text-white capitalize">
-                            {tx.type.replace('_', ' ')}
+                          <p className="text-sm font-medium text-slate-900 dark:text-white">
+                            {getTransactionTypeLabel(tx.type)}
                           </p>
                           <p className="text-xs text-slate-500 dark:text-white/50 truncate">{truncateText(tx.description, 30)}</p>
                         </div>
@@ -769,17 +826,31 @@ export default function Dashboard() {
       </main>
 
       {/* Transfer Dialog */}
-      <Dialog open={showTransferDialog} onOpenChange={setShowTransferDialog}>
+      <Dialog open={showTransferDialog} onOpenChange={(open) => { setShowTransferDialog(open); if (!open) resetTransferSecurity(); }}>
         <DialogContent className="glass border-white/10 bg-[#111827]">
           <DialogHeader>
-            <DialogTitle className="text-white">Transfer Fund Wallet</DialogTitle>
+            <DialogTitle className="text-white">Wallet Transfer</DialogTitle>
             <DialogDescription className="text-white/60">
-              Transfer fund wallet balance to your upline or downline (7-digit ID required)
+              Transfer from fund wallet to chain members, or from income wallet to your fund wallet / chain members.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label className="text-white/80">Recipient User ID (7 digits)</Label>
+              <Label className="text-white/80">Transfer From</Label>
+              <select
+                value={transferData.source}
+                onChange={(e) => { setTransferData({ ...transferData, source: e.target.value as 'fund' | 'income' }); resetTransferSecurity(); }}
+                className="w-full h-10 rounded-md bg-[#1f2937] border border-white/10 text-white px-3 text-sm"
+              >
+                <option value="fund">Fund Wallet</option>
+                <option value="income">Income Wallet</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-white/80">
+                Recipient User ID
+                {transferData.source === 'income' ? ' (optional)' : ' (7 digits)'}
+              </Label>
               <Input
                 value={transferData.userId}
                 onChange={(e) => {
@@ -787,9 +858,16 @@ export default function Dashboard() {
                   setTransferData({ ...transferData, userId: value });
                 }}
                 maxLength={7}
-                placeholder="Enter 7-digit ID"
+                placeholder={transferData.source === 'income'
+                  ? 'Leave blank for your own fund wallet'
+                  : 'Enter 7-digit ID'}
                 className="bg-[#1f2937] border-white/10 text-white"
               />
+              <p className="text-xs text-white/50">
+                {transferData.source === 'income'
+                  ? 'Blank recipient transfers to your own fund wallet. For member transfer, only upline/downline IDs are allowed.'
+                  : 'Only upline/downline IDs are allowed.'}
+              </p>
             </div>
             <div className="space-y-2">
               <Label className="text-white/80">Amount</Label>
@@ -801,21 +879,77 @@ export default function Dashboard() {
                 className="bg-[#1f2937] border-white/10 text-white"
               />
             </div>
+
+            {/* Security fields — shown only for external transfers */}
+            {isExternalTransfer && (
+              <>
+                <div className="border-t border-white/10 pt-4">
+                  <p className="text-sm text-amber-400 mb-3 flex items-center gap-2">
+                    <Shield className="w-4 h-4" />
+                    Security verification required for external transfers
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-white/80">Transaction Password</Label>
+                  <Input
+                    type="password"
+                    value={transferTransactionPassword}
+                    onChange={(e) => setTransferTransactionPassword(e.target.value)}
+                    placeholder="Enter transaction password"
+                    className="bg-[#1f2937] border-white/10 text-white"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-white/80">Email OTP</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={transferOtp}
+                      onChange={(e) => setTransferOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      maxLength={6}
+                      placeholder="Enter OTP"
+                      className="bg-[#1f2937] border-white/10 text-white"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleSendTransferOtp}
+                      disabled={isSendingTransferOtp || isTransferOtpSent}
+                      className="border-white/20 text-white hover:bg-white/10 whitespace-nowrap"
+                    >
+                      {isSendingTransferOtp ? <RefreshCw className="w-4 h-4 animate-spin" /> : isTransferOtpSent ? 'OTP Sent' : 'Send OTP'}
+                    </Button>
+                  </div>
+                  {isTransferOtpSent && (
+                    <p className="text-xs text-emerald-400">OTP sent to your registered email</p>
+                  )}
+                </div>
+              </>
+            )}
+
             <div className="p-3 rounded-lg bg-[#1f2937]">
               <p className="text-sm text-white/60">Available Fund Wallet Balance: {formatCurrency(wallet?.depositWallet || 0)}</p>
+              <p className="text-sm text-white/60">Available Income Wallet Balance: {formatCurrency(wallet?.incomeWallet || 0)}</p>
             </div>
           </div>
           <div className="flex gap-3">
             <Button
               variant="outline"
-              onClick={() => setShowTransferDialog(false)}
+              onClick={() => { setShowTransferDialog(false); resetTransferSecurity(); }}
               className="flex-1 border-white/20 text-white hover:bg-white/10"
             >
               Cancel
             </Button>
             <Button
               onClick={handleTransfer}
-              disabled={isLoading || transferData.userId.length !== 7}
+              disabled={
+                isLoading
+                || (
+                  transferData.source === 'fund'
+                    ? transferData.userId.length !== 7
+                    : transferData.userId.length > 0 && transferData.userId.length !== 7
+                )
+                || (isExternalTransfer && (!transferTransactionPassword.trim() || !transferOtp.trim()))
+              }
               className="flex-1 btn-primary"
             >
               {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Transfer'}

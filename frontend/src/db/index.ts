@@ -1639,11 +1639,17 @@ class Database {
     return rows.sort((a, b) => a.level - b.level);
   }
 
-  private static isLevelCompleteForTracker(tracker: UserHelpTracker, level: number): boolean {
-    const state = tracker.levels[String(level)];
+  private static isTourQualifiedForLevel(user: User, tracker: UserHelpTracker, level: number): boolean {
     const levelData = helpDistributionTable[level - 1];
-    if (!state || !levelData) return false;
-    return state.receiveEvents >= levelData.users;
+    if (!levelData) return false;
+    const state = tracker.levels[String(level)];
+    const trackerReceiveEvents = state?.receiveEvents || 0;
+    const observedReceiveEvents = this.getObservedReceiveEventCount(user.id, level);
+    const effectiveReceiveEvents = Math.max(trackerReceiveEvents, observedReceiveEvents);
+    const hasFullLevelHelp = effectiveReceiveEvents >= levelData.users;
+    const hasFullMatrixLevel = this.getMatrixNodesCountAtLevel(user.id, level) >= levelData.users;
+    const hasDirectQualification = this.isQualifiedForLevel(user, level);
+    return hasFullLevelHelp && hasFullMatrixLevel && hasDirectQualification;
   }
 
   static syncUserAchievements(userId: string): User | null {
@@ -1660,19 +1666,24 @@ class Database {
     const now = new Date().toISOString();
     let changed = false;
 
-    if (!next.nationalTour && this.isLevelCompleteForTracker(tracker, 3)) {
-      next.nationalTour = true;
-      next.nationalTourDate = now;
+    const nationalTourQualified = this.isTourQualifiedForLevel(user, tracker, 3);
+    if ((!!next.nationalTour) !== nationalTourQualified) {
+      next.nationalTour = nationalTourQualified;
+      next.nationalTourDate = nationalTourQualified ? (next.nationalTourDate || now) : undefined;
       changed = true;
     }
-    if (!next.internationalTour && this.isLevelCompleteForTracker(tracker, 4)) {
-      next.internationalTour = true;
-      next.internationalTourDate = now;
+
+    const internationalTourQualified = this.isTourQualifiedForLevel(user, tracker, 4);
+    if ((!!next.internationalTour) !== internationalTourQualified) {
+      next.internationalTour = internationalTourQualified;
+      next.internationalTourDate = internationalTourQualified ? (next.internationalTourDate || now) : undefined;
       changed = true;
     }
-    if (!next.familyTour && this.isLevelCompleteForTracker(tracker, 5)) {
-      next.familyTour = true;
-      next.familyTourDate = now;
+
+    const familyTourQualified = this.isTourQualifiedForLevel(user, tracker, 5);
+    if ((!!next.familyTour) !== familyTourQualified) {
+      next.familyTour = familyTourQualified;
+      next.familyTourDate = familyTourQualified ? (next.familyTourDate || now) : undefined;
       changed = true;
     }
 
@@ -1712,11 +1723,34 @@ class Database {
     ).length;
   }
 
+  private static getObservedReceiveEventCount(userId: string, level: number): number {
+    // Count only real receive-help events for the level.
+    // Exclude release events because they are wallet unlock bookkeeping, not new receives.
+    return this.getTransactions().filter((tx) => {
+      if (tx.userId !== userId) return false;
+      if (tx.type !== 'receive_help') return false;
+      if (!(tx.amount > 0)) return false;
+      const txLevel = Number(tx.level);
+      if (!Number.isFinite(txLevel) || txLevel !== level) return false;
+      const desc = (tx.description || '').toLowerCase();
+      if (desc.startsWith('released locked receive help at level')) return false;
+      return true;
+    }).length;
+  }
+
   private static canReceiveAtLevel(userId: string, level: number): boolean {
     const levelData = helpDistributionTable[level - 1];
     if (!levelData) return false;
     const tracker = this.getUserHelpTracker(userId);
     const state = this.ensureLevelTrackerState(tracker, level);
+    if (!this._bulkRebuildMode) {
+      const observed = this.getObservedReceiveEventCount(userId, level);
+      if (observed !== (state.receiveEvents || 0)) {
+        state.receiveEvents = observed;
+        tracker.levels[String(level)] = state;
+        this.saveUserHelpTracker(tracker);
+      }
+    }
     return (state.receiveEvents || 0) < levelData.users;
   }
 
@@ -2117,6 +2151,14 @@ class Database {
     const tracker = this.getUserHelpTracker(user.id);
     const key = String(level);
     const levelState = this.ensureLevelTrackerState(tracker, level);
+    if (!this._bulkRebuildMode) {
+      const observed = this.getObservedReceiveEventCount(user.id, level);
+      if (observed !== (levelState.receiveEvents || 0)) {
+        levelState.receiveEvents = observed;
+        tracker.levels[key] = levelState;
+        this.saveUserHelpTracker(tracker);
+      }
+    }
     // Hard cap per level (L1=2, L2=4, L3=8 ...). This prevents overflow receives.
     if ((levelState.receiveEvents || 0) >= levelData.users) {
       tracker.levels[key] = levelState;
