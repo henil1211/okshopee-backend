@@ -63,6 +63,7 @@ export default function Dashboard() {
     }
 
     if (displayUser) {
+      Database.syncUserAchievements(displayUser.id);
       loadWallet(displayUser.id);
       loadUserDownline(displayUser.userId);
     }
@@ -288,6 +289,10 @@ export default function Dashboard() {
 
   if (!displayUser) return null;
 
+  const nationalTourQualified = Database.isTourQualified(displayUser.id, 3);
+  const internationalTourQualified = Database.isTourQualified(displayUser.id, 4);
+  const familyTourQualified = Database.isTourQualified(displayUser.id, 5);
+
   // Check achievements
   const achievements = [
     {
@@ -295,7 +300,7 @@ export default function Dashboard() {
       label: 'National Tour',
       level: 3,
       icon: Train,
-      achieved: displayUser.achievements?.nationalTour,
+      achieved: nationalTourQualified,
       color: 'text-blue-400',
       bgColor: 'bg-blue-500/20'
     },
@@ -304,7 +309,7 @@ export default function Dashboard() {
       label: 'International Tour',
       level: 4,
       icon: Plane,
-      achieved: displayUser.achievements?.internationalTour,
+      achieved: internationalTourQualified,
       color: 'text-purple-400',
       bgColor: 'bg-purple-500/20'
     },
@@ -313,7 +318,7 @@ export default function Dashboard() {
       label: 'Family International Tour',
       level: 5,
       icon: Users,
-      achieved: displayUser.achievements?.familyTour,
+      achieved: familyTourQualified,
       color: 'text-pink-400',
       bgColor: 'bg-pink-500/20'
     }

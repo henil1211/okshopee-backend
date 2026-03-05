@@ -1652,6 +1652,13 @@ class Database {
     return hasFullLevelHelp && hasFullMatrixLevel && hasDirectQualification;
   }
 
+  static isTourQualified(userRef: string, level: number): boolean {
+    const user = this.resolveUserByRef(userRef);
+    if (!user) return false;
+    const tracker = this.getUserHelpTracker(user.id);
+    return this.isTourQualifiedForLevel(user, tracker, level);
+  }
+
   static syncUserAchievements(userId: string): User | null {
     const user = this.getUserById(userId);
     if (!user) return null;
