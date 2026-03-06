@@ -112,6 +112,7 @@ const STATE_COLLECTIONS = {
 const DB_KEYS = Object.keys(STATE_COLLECTIONS);
 const SAFETY_POOL_STATE_KEY = 'mlm_safety_pool';
 const SAFETY_POOL_TRANSACTIONS_COLLECTION = 'safety_pool_transactions';
+const STATE_META_COLLECTION = 'state_meta';
 
 const mongoClient = new MongoClient(MONGODB_URI);
 let mongoDb;
@@ -495,13 +496,40 @@ async function writeSafetyPoolTransactionsMirror(rawValue, now) {
   await collection.deleteMany({ _id: { $nin: ids } });
 }
 
-async function writeStateToCollections(nextState, destructive = false) {
+async function readStateMetaUpdatedAt() {
+  const doc = await mongoDb
+    .collection(STATE_META_COLLECTION)
+    .findOne({ _id: STATE_DOC_ID }, { projection: { updatedAt: 1 } });
+  return doc && typeof doc.updatedAt === 'string' ? doc.updatedAt : null;
+}
+
+async function writeStateMetaUpdatedAt(now) {
+  await mongoDb.collection(STATE_META_COLLECTION).updateOne(
+    { _id: STATE_DOC_ID },
+    {
+      $set: { updatedAt: now },
+      $setOnInsert: { createdAt: now }
+    },
+    { upsert: true }
+  );
+}
+
+function hasFullStateSnapshot(state) {
+  return DB_KEYS.every((key) => typeof state?.[key] === 'string');
+}
+
+async function writeStateToCollections(nextState, destructive = false, replaceMissing = true) {
   const now = new Date().toISOString();
   const tasks = [];
+  const entries = replaceMissing
+    ? Object.entries(STATE_COLLECTIONS).map(([stateKey, config]) => [stateKey, config, nextState[stateKey]])
+    : Object.entries(nextState)
+      .map(([stateKey, rawValue]) => [stateKey, STATE_COLLECTIONS[stateKey], rawValue])
+      .filter(([, config]) => !!config);
 
-  for (const [stateKey, config] of Object.entries(STATE_COLLECTIONS)) {
-    const rawValue = nextState[stateKey];
+  for (const [stateKey, config, rawValue] of entries) {
     if (typeof rawValue !== 'string') {
+      if (!replaceMissing) continue;
       if (config.kind === 'array') {
         tasks.push(mongoDb.collection(config.collection).deleteMany({}));
       } else {
@@ -524,6 +552,7 @@ async function writeStateToCollections(nextState, destructive = false) {
   }
 
   await Promise.all(tasks);
+  await writeStateMetaUpdatedAt(now);
   return { updatedAt: now };
 }
 
@@ -758,8 +787,6 @@ const server = createServer(async (req, res) => {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
       const incomingState = sanitizeIncomingState(parsed?.state);
-      const currentSnapshot = await readStateFromCollections();
-      const currentUsersCount = getStateArrayLength(currentSnapshot.state, 'mlm_users');
       const incomingUsersCount = getStateArrayLength(incomingState, 'mlm_users');
       const forceWrite = url.searchParams.get('force') === '1';
       const destructiveWrite = url.searchParams.get('destructive') === '1';
@@ -768,27 +795,38 @@ const server = createServer(async (req, res) => {
         parsed?.baseUpdatedAt === null
           ? null
           : (typeof parsed?.baseUpdatedAt === 'string' ? parsed.baseUpdatedAt : undefined);
+      let currentUpdatedAt = await readStateMetaUpdatedAt();
+      if (currentUpdatedAt === null && hasBaseUpdatedAt) {
+        const snapshot = await readStateFromCollections();
+        currentUpdatedAt = snapshot.updatedAt || null;
+        if (currentUpdatedAt) {
+          await writeStateMetaUpdatedAt(currentUpdatedAt);
+        }
+      }
+      const includesUsersSnapshot = Object.prototype.hasOwnProperty.call(incomingState, 'mlm_users');
 
-      if (!forceWrite && incomingUsersCount === 0 && (currentUsersCount || 0) > 0) {
-        sendJson(res, 409, {
-          ok: false,
-          error: 'Rejected empty users snapshot to protect existing server data. Retry with ?force=1 only if this is intentional.'
-        });
-        return;
+      if (!forceWrite && includesUsersSnapshot && incomingUsersCount === 0) {
+        const existingUsersCount = await mongoDb.collection(STATE_COLLECTIONS.mlm_users.collection).countDocuments({}, { limit: 1 });
+        if (existingUsersCount > 0) {
+          sendJson(res, 409, {
+            ok: false,
+            error: 'Rejected empty users snapshot to protect existing server data. Retry with ?force=1 only if this is intentional.'
+          });
+          return;
+        }
       }
 
-      if (!forceWrite && hasBaseUpdatedAt && baseUpdatedAt !== (currentSnapshot.updatedAt || null)) {
+      if (!forceWrite && hasBaseUpdatedAt && baseUpdatedAt !== (currentUpdatedAt || null)) {
         sendJson(res, 409, {
           ok: false,
           error: 'Snapshot version conflict. Re-hydrate from backend and retry.',
-          currentUpdatedAt: currentSnapshot.updatedAt || null
+          currentUpdatedAt: currentUpdatedAt || null
         });
         return;
       }
 
-      // Preserve existing keys when client sends partial state payload.
-      const mergedState = { ...currentSnapshot.state, ...incomingState };
-      const saved = await writeStateToCollections(mergedState, destructiveWrite);
+      const replaceMissing = hasFullStateSnapshot(incomingState);
+      const saved = await writeStateToCollections(incomingState, destructiveWrite, replaceMissing);
       sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt, destructive: destructiveWrite });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid request body';
