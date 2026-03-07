@@ -116,7 +116,8 @@ const STATE_META_COLLECTION = 'state_meta';
 let stateSnapshotCache = null;
 
 const mongoClient = new MongoClient(MONGODB_URI, {
-  maxPoolSize: 50,
+  maxPoolSize: 5,
+  minPoolSize: 1,
   serverSelectionTimeoutMS: 60000,
   socketTimeoutMS: 120000,
   connectTimeoutMS: 60000

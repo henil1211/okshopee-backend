@@ -4818,7 +4818,7 @@ class Database {
             ? Array.from(this.REMOTE_SYNC_KEYS)
             : Array.from(this.remoteSyncDirtyKeys);
 
-          const heavyKeys = ['mlm_transactions', 'mlm_help_trackers', 'mlm_matrix', 'mlm_users', 'mlm_payments'];
+          const heavyKeys = ['mlm_transactions', 'mlm_help_trackers', 'mlm_matrix', 'mlm_users', 'mlm_payments', 'mlm_wallets'];
           const batches: string[][] = [];
 
           const others = targetKeys.filter(k => !heavyKeys.includes(k));
