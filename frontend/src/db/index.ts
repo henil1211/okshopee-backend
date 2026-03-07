@@ -4842,7 +4842,11 @@ class Database {
               baseUpdatedAt: finalUpdatedAt
             };
 
-            const response = await fetch(this.getRemoteSyncWriteEndpoint(options), {
+            const endpointUrl = this.getRemoteSyncWriteEndpoint(options);
+            const separator = endpointUrl.includes('?') ? '&' : '?';
+            const finalEndpoint = `${endpointUrl}${separator}chunk=1`;
+
+            const response = await fetch(finalEndpoint, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload),

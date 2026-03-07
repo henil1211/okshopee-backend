@@ -1001,6 +1001,7 @@ const server = createServer(async (req, res) => {
       const incomingUsersCount = getStateArrayLength(incomingState, 'mlm_users');
       const forceWrite = url.searchParams.get('force') === '1';
       const destructiveWrite = url.searchParams.get('destructive') === '1';
+      const isChunked = url.searchParams.get('chunk') === '1';
       const hasBaseUpdatedAt = Object.prototype.hasOwnProperty.call(parsed, 'baseUpdatedAt');
       const baseUpdatedAt =
         parsed?.baseUpdatedAt === null
@@ -1016,7 +1017,7 @@ const server = createServer(async (req, res) => {
       }
       const includesUsersSnapshot = Object.prototype.hasOwnProperty.call(incomingState, 'mlm_users');
 
-      if (!forceWrite && includesUsersSnapshot && incomingUsersCount === 0) {
+      if (!forceWrite && !isChunked && includesUsersSnapshot && incomingUsersCount === 0) {
         const existingUsersCount = await mongoDb.collection(STATE_COLLECTIONS.mlm_users.collection).countDocuments({}, { limit: 1 });
         if (existingUsersCount > 0) {
           sendJson(res, 409, {
@@ -1027,16 +1028,7 @@ const server = createServer(async (req, res) => {
         }
       }
 
-      if (!forceWrite && hasBaseUpdatedAt && baseUpdatedAt !== (currentUpdatedAt || null)) {
-        sendJson(res, 409, {
-          ok: false,
-          error: 'Snapshot version conflict. Re-hydrate from backend and retry.',
-          currentUpdatedAt: currentUpdatedAt || null
-        });
-        return;
-      }
-
-      const replaceMissing = hasFullStateSnapshot(incomingState);
+      const replaceMissing = isChunked ? false : hasFullStateSnapshot(incomingState);
       const saved = await writeStateToCollections(incomingState, destructiveWrite, replaceMissing);
       sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt, destructive: destructiveWrite });
     } catch (error) {
