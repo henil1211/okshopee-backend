@@ -4846,6 +4846,9 @@ class Database {
             const separator = endpointUrl.includes('?') ? '&' : '?';
             const finalEndpoint = `${endpointUrl}${separator}chunk=1`;
 
+            console.log(`[DB Sync Debug] Chunk ${batch.join(',')} -> ${finalEndpoint}`);
+            console.log(`[DB Sync Debug] Using baseUpdatedAt: ${finalUpdatedAt}`);
+
             const response = await fetch(finalEndpoint, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
