@@ -279,21 +279,86 @@ export interface PendingMatrixIncomingDebugReport {
   items: PendingMatrixIncomingDebugItem[];
 }
 
+export type RemoteSyncState = 'synced' | 'syncing' | 'pending' | 'offline';
+
+export interface RemoteSyncStatus {
+  state: RemoteSyncState;
+  message: string;
+  dirtyKeys: number;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastErrorAt: string | null;
+  pendingSinceAt: string | null;
+}
+
+export interface SensitiveActionSyncGate {
+  allowed: boolean;
+  message: string;
+  status: RemoteSyncStatus;
+}
+
 // Generic DB Operations
 class Database {
+  private static readonly MATRIX_REBUILD_LOCK_KEY = '__refernex_matrix_rebuild_lock__';
+  private static readonly MATRIX_REBUILD_LOCK_TTL_MS = 15 * 60 * 1000;
   private static readonly REMOTE_SYNC_BASE_URL = (
     (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || 'http://localhost:4000'
   ).replace(/\/+$/, '');
   private static readonly REMOTE_SYNC_KEYS = new Set<string>(
     Object.values(DB_KEYS).filter((key) => key !== DB_KEYS.CURRENT_USER && key !== DB_KEYS.SESSION)
   );
+  private static readonly STARTUP_REMOTE_SYNC_KEYS = [
+    DB_KEYS.USERS,
+    DB_KEYS.WALLETS,
+    DB_KEYS.SAFETY_POOL,
+    DB_KEYS.SETTINGS
+  ] as const;
+  private static readonly ADMIN_REMOTE_SYNC_BATCHES = [
+    [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.SAFETY_POOL, DB_KEYS.SETTINGS],
+    [DB_KEYS.TRANSACTIONS],
+    [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS, DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.PAYMENT_METHODS, DB_KEYS.PAYMENTS],
+    [DB_KEYS.MATRIX, DB_KEYS.GRACE_PERIODS, DB_KEYS.RE_ENTRIES]
+  ] as const;
   private static remoteSyncTimer: ReturnType<typeof setTimeout> | null = null;
   private static remoteSyncInFlight = false;
   private static remoteSyncQueued = false;
   private static remoteSyncSuspendDepth = 0;
   private static remoteSyncPending = false;
+  private static remoteSyncDirtyKeys = new Set<string>();
+  private static remoteSyncApplyingServerState = false;
+  private static remoteSyncRetryTimer: ReturnType<typeof setInterval> | null = null;
+  private static remoteSyncRetryBound = false;
   private static remoteStateUpdatedAt: string | null = null;
+  private static readonly REMOTE_SYNC_RETRY_INTERVAL_MS = 45_000;
+  private static readonly REMOTE_SYNC_REQUEST_TIMEOUT_MS = 10_000;
+  private static readonly SENSITIVE_ACTION_BLOCK_AFTER_PENDING_MS = 2 * 60 * 1000;
+  // Large, bursty datasets can exceed browser quota and block the main thread.
+  // Keep these keys in-memory and sync to backend in batches.
+  private static readonly MEMORY_ONLY_LOCAL_KEYS = new Set<string>([
+    DB_KEYS.USERS,
+    DB_KEYS.WALLETS,
+    DB_KEYS.MATRIX,
+    DB_KEYS.TRANSACTIONS,
+    DB_KEYS.SAFETY_POOL,
+    DB_KEYS.HELP_TRACKERS,
+    DB_KEYS.MATRIX_PENDING_CONTRIBUTIONS
+  ]);
+  private static remoteSyncListeners = new Set<(status: RemoteSyncStatus) => void>();
+  private static remoteSyncStatus: RemoteSyncStatus = {
+    state: 'pending',
+    message: 'Waiting for first server sync',
+    dirtyKeys: 0,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastErrorAt: null,
+    pendingSinceAt: new Date().toISOString()
+  };
   private static volatileSyncState = new Map<string, string>();
+  private static volatileSyncObjects = new Map<string, unknown>();
+  private static volatileSyncSerialized = new Map<string, string>();
+  private static memoryOnlyLocalKeysPrepared = false;
+  private static localStateTransactionWrites: Map<string, string | null> | null = null;
+  private static localStateTransactionDirtyKeys = new Set<string>();
   // When true, createTransaction/addToSafetyPool become no-ops to save memory
   static _bulkRebuildMode = false;
   private static _bulkSafetyPoolTotal = 0;
@@ -302,9 +367,197 @@ class Database {
   // Eliminates redundant JSON.parse() on hot-path reads.
   private static _cache = new Map<string, unknown>();
 
+  private static acquireMatrixRebuildLock(): boolean {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return true;
+    }
+
+    const now = Date.now();
+    try {
+      const raw = window.localStorage.getItem(this.MATRIX_REBUILD_LOCK_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { startedAt?: number };
+        const startedAt = Number(parsed?.startedAt || 0);
+        if (startedAt > 0 && now - startedAt < this.MATRIX_REBUILD_LOCK_TTL_MS) {
+          return false;
+        }
+      }
+    } catch {
+      // Ignore malformed lock state and overwrite it below.
+    }
+
+    window.localStorage.setItem(this.MATRIX_REBUILD_LOCK_KEY, JSON.stringify({ startedAt: now }));
+    return true;
+  }
+
+  private static releaseMatrixRebuildLock(): void {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+    window.localStorage.removeItem(this.MATRIX_REBUILD_LOCK_KEY);
+  }
+
+  private static emitRemoteSyncStatus(): void {
+    const snapshot: RemoteSyncStatus = {
+      ...this.remoteSyncStatus,
+      dirtyKeys: this.remoteSyncDirtyKeys.size
+    };
+    this.remoteSyncStatus = snapshot;
+    for (const listener of this.remoteSyncListeners) {
+      try {
+        listener(snapshot);
+      } catch {
+        // Listener errors must not break sync flow.
+      }
+    }
+  }
+
+  private static markSyncPending(message: string = 'Changes pending sync'): void {
+    const now = new Date().toISOString();
+    this.remoteSyncStatus = {
+      ...this.remoteSyncStatus,
+      state: 'pending',
+      message,
+      dirtyKeys: this.remoteSyncDirtyKeys.size,
+      pendingSinceAt: this.remoteSyncStatus.pendingSinceAt || now
+    };
+    this.emitRemoteSyncStatus();
+  }
+
+  private static markSyncing(message: string = 'Syncing with server'): void {
+    this.remoteSyncStatus = {
+      ...this.remoteSyncStatus,
+      state: 'syncing',
+      message,
+      lastAttemptAt: new Date().toISOString(),
+      dirtyKeys: this.remoteSyncDirtyKeys.size
+    };
+    this.emitRemoteSyncStatus();
+  }
+
+  private static markSynced(message: string = 'Synced'): void {
+    const now = new Date().toISOString();
+    this.remoteSyncStatus = {
+      ...this.remoteSyncStatus,
+      state: 'synced',
+      message,
+      dirtyKeys: this.remoteSyncDirtyKeys.size,
+      lastAttemptAt: now,
+      lastSuccessAt: now,
+      pendingSinceAt: null
+    };
+    this.emitRemoteSyncStatus();
+  }
+
+  private static markOffline(message: string = 'Backend unreachable. Retrying automatically.'): void {
+    const now = new Date().toISOString();
+    this.remoteSyncStatus = {
+      ...this.remoteSyncStatus,
+      state: 'offline',
+      message,
+      dirtyKeys: this.remoteSyncDirtyKeys.size,
+      lastAttemptAt: now,
+      lastErrorAt: now,
+      pendingSinceAt: this.remoteSyncStatus.pendingSinceAt || now
+    };
+    this.emitRemoteSyncStatus();
+  }
+
+  static getRemoteSyncStatus(): RemoteSyncStatus {
+    return {
+      ...this.remoteSyncStatus,
+      dirtyKeys: this.remoteSyncDirtyKeys.size
+    };
+  }
+
+  static subscribeRemoteSyncStatus(listener: (status: RemoteSyncStatus) => void): () => void {
+    this.remoteSyncListeners.add(listener);
+    listener(this.getRemoteSyncStatus());
+    return () => {
+      this.remoteSyncListeners.delete(listener);
+    };
+  }
+
+  static getSensitiveActionSyncGate(): SensitiveActionSyncGate {
+    const status = this.getRemoteSyncStatus();
+
+    if (status.state === 'offline') {
+      return {
+        allowed: false,
+        message: 'Server sync is offline. Please wait until sync status is synced.',
+        status
+      };
+    }
+
+    if (status.state === 'pending') {
+      const pendingSince = status.pendingSinceAt ? new Date(status.pendingSinceAt).getTime() : 0;
+      if (pendingSince > 0 && Date.now() - pendingSince >= this.SENSITIVE_ACTION_BLOCK_AFTER_PENDING_MS) {
+        return {
+          allowed: false,
+          message: 'Sync has been pending for over 2 minutes. Please wait for sync before transfers or activation.',
+          status
+        };
+      }
+    }
+
+    return {
+      allowed: true,
+      message: '',
+      status
+    };
+  }
+
+  private static async retryBackgroundSyncTick(): Promise<void> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    if (this.remoteSyncSuspendDepth > 0 || this.remoteSyncInFlight) return;
+
+    const hasDirtyWork = this.remoteSyncDirtyKeys.size > 0 || this.remoteSyncPending || this.remoteSyncQueued;
+    if (hasDirtyWork) {
+      await this.flushRemoteSync();
+      return;
+    }
+
+    const status = this.remoteSyncStatus.state;
+    if (status !== 'offline' && status !== 'pending') return;
+
+    try {
+      await this.hydrateFromServer({
+        strict: false,
+        maxAttempts: 1,
+        timeoutMs: 8000,
+        retryDelayMs: 500
+      });
+    } catch {
+      this.markOffline('Backend still unavailable. Retrying automatically.');
+    }
+  }
+
+  static startBackgroundSyncLoop(): void {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    if (!this.remoteSyncRetryBound) {
+      window.addEventListener('online', () => {
+        void this.retryBackgroundSyncTick();
+      });
+      window.addEventListener('offline', () => {
+        this.markOffline('You are offline. Sync will resume when connection returns.');
+      });
+      this.remoteSyncRetryBound = true;
+    }
+    if (this.remoteSyncRetryTimer) return;
+    this.remoteSyncRetryTimer = setInterval(() => {
+      void this.retryBackgroundSyncTick();
+    }, this.REMOTE_SYNC_RETRY_INTERVAL_MS);
+    void this.retryBackgroundSyncTick();
+  }
+
   /** Return cached parsed value or parse from storage and cache it. */
   private static getCached<T>(key: string, fallback: T): T {
     if (this._cache.has(key)) return this._cache.get(key) as T;
+    if (this.MEMORY_ONLY_LOCAL_KEYS.has(key) && this.volatileSyncObjects.has(key)) {
+      const volatileObject = this.volatileSyncObjects.get(key) as T;
+      this._cache.set(key, volatileObject);
+      return volatileObject;
+    }
     const raw = this.getStorageItem(key);
     if (raw === null) return fallback;
     try {
@@ -319,6 +572,18 @@ class Database {
   /** Write to localStorage + update cache with the already-parsed object. */
   private static setCached<T>(key: string, value: T): void {
     this._cache.set(key, value);
+    if (this.MEMORY_ONLY_LOCAL_KEYS.has(key)) {
+      this.ensureMemoryOnlyLocalKeyPolicy();
+      this.volatileSyncObjects.set(key, value as unknown);
+      this.volatileSyncSerialized.delete(key);
+      this.volatileSyncState.delete(key);
+      if (this.localStateTransactionWrites) {
+        this.localStateTransactionDirtyKeys.add(key);
+        return;
+      }
+      this.markKeyDirtyForRemoteSync(key);
+      return;
+    }
     this.setStorageItem(key, JSON.stringify(value));
   }
 
@@ -354,21 +619,30 @@ class Database {
     return this.REMOTE_SYNC_KEYS.has(key);
   }
 
-  private static getRemoteSyncEndpoint(): string {
-    return `${this.REMOTE_SYNC_BASE_URL}/api/state`;
-  }
-
-  private static getRemoteSyncWriteEndpoint(options?: { destructive?: boolean }): string {
-    const base = this.getRemoteSyncEndpoint();
-    if (options?.destructive) {
-      return `${base}?destructive=1`;
+  private static getRemoteSyncEndpoint(keys?: Iterable<string>): string {
+    const base = `${this.REMOTE_SYNC_BASE_URL}/api/state`;
+    const requestedKeys = Array.from(keys || []).filter((key) => this.REMOTE_SYNC_KEYS.has(key));
+    if (requestedKeys.length === 0) {
+      return base;
     }
-    return base;
+    const params = new URLSearchParams();
+    params.set('keys', requestedKeys.join(','));
+    return `${base}?${params.toString()}`;
   }
 
-  private static getPersistedSnapshot(): Record<string, string> {
+  private static getRemoteSyncWriteEndpoint(options?: { destructive?: boolean; force?: boolean }): string {
+    const base = `${this.REMOTE_SYNC_BASE_URL}/api/state`;
+    const params = new URLSearchParams();
+    if (options?.destructive) params.set('destructive', '1');
+    if (options?.force) params.set('force', '1');
+    const qs = params.toString();
+    return qs ? `${base}?${qs}` : base;
+  }
+
+  private static getPersistedSnapshot(keys?: Iterable<string>): Record<string, string> {
     const state: Record<string, string> = {};
-    for (const key of this.REMOTE_SYNC_KEYS) {
+    const keysToRead = keys || this.REMOTE_SYNC_KEYS;
+    for (const key of keysToRead) {
       const value = this.getStorageItem(key);
       if (typeof value === 'string') {
         state[key] = value;
@@ -377,9 +651,10 @@ class Database {
     return state;
   }
 
-  private static getSyncRequestBody(): { state: Record<string, string>; baseUpdatedAt: string | null } {
+  private static getSyncRequestBody(options?: { keys?: Iterable<string>; full?: boolean }): { state: Record<string, string>; baseUpdatedAt: string | null } {
+    const keys = options?.full ? this.REMOTE_SYNC_KEYS : options?.keys;
     return {
-      state: this.getPersistedSnapshot(),
+      state: this.getPersistedSnapshot(keys),
       baseUpdatedAt: this.remoteStateUpdatedAt
     };
   }
@@ -405,12 +680,57 @@ class Database {
   }
 
   private static getStorageItem(key: string): string | null {
+    this.ensureMemoryOnlyLocalKeyPolicy();
+    if (this.localStateTransactionWrites?.has(key)) {
+      return this.localStateTransactionWrites.get(key) ?? null;
+    }
     const volatileValue = this.volatileSyncState.get(key);
     if (typeof volatileValue === 'string') return volatileValue;
+    if (this.volatileSyncObjects.has(key)) {
+      const cachedSerialized = this.volatileSyncSerialized.get(key);
+      if (typeof cachedSerialized === 'string') return cachedSerialized;
+      try {
+        const serialized = JSON.stringify(this.volatileSyncObjects.get(key));
+        this.volatileSyncSerialized.set(key, serialized);
+        return serialized;
+      } catch {
+        return null;
+      }
+    }
     return localStorage.getItem(key);
   }
 
+  private static markKeyDirtyForRemoteSync(key: string): void {
+    if (!this.shouldSyncKey(key) || this.remoteSyncApplyingServerState) return;
+    this.remoteSyncDirtyKeys.add(key);
+    this.scheduleRemoteSync();
+  }
+
   private static setStorageItem(key: string, value: string): void {
+    this.ensureMemoryOnlyLocalKeyPolicy();
+    if (this.localStateTransactionWrites) {
+      this.localStateTransactionWrites.set(key, value);
+      this.localStateTransactionDirtyKeys.add(key);
+      if (this.MEMORY_ONLY_LOCAL_KEYS.has(key)) {
+        this.volatileSyncObjects.delete(key);
+        this.volatileSyncSerialized.delete(key);
+        this.volatileSyncState.set(key, value);
+      }
+      return;
+    }
+    if (this.MEMORY_ONLY_LOCAL_KEYS.has(key)) {
+      // Keep heavy keys out of localStorage to prevent quota exhaustion.
+      this.volatileSyncObjects.delete(key);
+      this.volatileSyncSerialized.delete(key);
+      this.volatileSyncState.set(key, value);
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // ignore
+      }
+      this.markKeyDirtyForRemoteSync(key);
+      return;
+    }
     const shouldSync = this.shouldSyncKey(key);
     try {
       localStorage.setItem(key, value);
@@ -423,20 +743,39 @@ class Database {
       this.volatileSyncState.set(key, value);
       console.warn(`[DB] localStorage quota exceeded while writing ${key}; using in-memory sync state.`);
     }
-    if (shouldSync) this.scheduleRemoteSync();
+    if (shouldSync && !this.remoteSyncApplyingServerState) {
+      this.remoteSyncDirtyKeys.add(key);
+      this.scheduleRemoteSync();
+    }
   }
 
   private static removeStorageItem(key: string): void {
+    this.ensureMemoryOnlyLocalKeyPolicy();
+    if (this.localStateTransactionWrites) {
+      this.localStateTransactionWrites.set(key, null);
+      this.localStateTransactionDirtyKeys.add(key);
+      this.volatileSyncState.delete(key);
+      this.volatileSyncObjects.delete(key);
+      this.volatileSyncSerialized.delete(key);
+      this.invalidateCache(key);
+      return;
+    }
     localStorage.removeItem(key);
     this.volatileSyncState.delete(key);
+    this.volatileSyncObjects.delete(key);
+    this.volatileSyncSerialized.delete(key);
     this.invalidateCache(key);
-    if (this.shouldSyncKey(key)) this.scheduleRemoteSync();
+    if (this.shouldSyncKey(key) && !this.remoteSyncApplyingServerState) {
+      this.remoteSyncDirtyKeys.add(key);
+      this.scheduleRemoteSync();
+    }
   }
 
   private static scheduleRemoteSync(): void {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') {
       return;
     }
+    this.markSyncPending();
 
     if (this.remoteSyncSuspendDepth > 0) {
       this.remoteSyncPending = true;
@@ -450,7 +789,29 @@ class Database {
     this.remoteSyncTimer = setTimeout(() => {
       this.remoteSyncTimer = null;
       void this.flushRemoteSync();
-    }, 250);
+    }, 1200);
+  }
+
+  private static ensureMemoryOnlyLocalKeyPolicy(): void {
+    if (this.memoryOnlyLocalKeysPrepared || typeof localStorage === 'undefined') return;
+    for (const key of this.MEMORY_ONLY_LOCAL_KEYS) {
+      try {
+        const existing = localStorage.getItem(key);
+        if (typeof existing === 'string' && !this.volatileSyncState.has(key) && !this.volatileSyncObjects.has(key)) {
+          try {
+            const parsed = JSON.parse(existing);
+            this.volatileSyncObjects.set(key, parsed);
+            this.volatileSyncSerialized.set(key, existing);
+          } catch {
+            this.volatileSyncState.set(key, existing);
+          }
+        }
+        localStorage.removeItem(key);
+      } catch {
+        // ignore best-effort migration/cleanup
+      }
+    }
+    this.memoryOnlyLocalKeysPrepared = true;
   }
 
 
@@ -463,9 +824,10 @@ class Database {
     return this.flushRemoteSync();
   }
 
-  private static async flushRemoteSync(): Promise<void> {
+  private static async flushRemoteSync(options?: { full?: boolean }): Promise<void> {
     if (this.remoteSyncSuspendDepth > 0) {
       this.remoteSyncPending = true;
+      this.markSyncPending();
       return;
     }
 
@@ -474,24 +836,68 @@ class Database {
       return;
     }
 
+    const keysToSync = options?.full
+      ? new Set<string>(this.REMOTE_SYNC_KEYS)
+      : new Set<string>(this.remoteSyncDirtyKeys);
+
+    if (keysToSync.size === 0) {
+      if (this.remoteSyncStatus.state !== 'synced') {
+        this.markSynced();
+      }
+      return;
+    }
+
     this.remoteSyncInFlight = true;
+    this.markSyncing(`Syncing ${keysToSync.size} update(s)`);
+    let staleConflict = false;
     try {
-      const response = await fetch(this.getRemoteSyncWriteEndpoint(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(this.getSyncRequestBody())
+      const requestBody = this.getSyncRequestBody({
+        keys: keysToSync,
+        full: !!options?.full
       });
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timeout = setTimeout(() => controller?.abort(), this.REMOTE_SYNC_REQUEST_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await fetch(this.getRemoteSyncWriteEndpoint(), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+          signal: controller?.signal
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
       if (!response.ok) {
         if (response.status === 409) {
-          console.warn('[DB Sync] Backend rejected stale local snapshot. Re-hydrating from backend.');
-          void this.hydrateFromServer();
+          staleConflict = true;
+          this.remoteSyncPending = false;
+          this.remoteSyncQueued = false;
+          this.remoteSyncDirtyKeys.clear();
+          this.markSyncing('Refreshing from server');
+          void this.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 15000, retryDelayMs: 500 });
         }
         throw new Error(`Remote sync failed with HTTP ${response.status}`);
       }
       const payload = await response.json() as { updatedAt?: unknown };
       this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
+      if (options?.full) {
+        this.remoteSyncDirtyKeys.clear();
+      } else {
+        for (const key of keysToSync) {
+          this.remoteSyncDirtyKeys.delete(key);
+        }
+      }
+      if (this.remoteSyncDirtyKeys.size > 0) {
+        this.markSyncPending();
+      } else {
+        this.markSynced();
+      }
     } catch {
-      console.warn('[DB Sync] Failed to push local state to backend. App will continue locally.');
+      if (!staleConflict) {
+        console.warn('[DB Sync] Failed to push local state to backend. App will continue locally.');
+        this.markOffline();
+      }
     } finally {
       this.remoteSyncInFlight = false;
       if (this.remoteSyncSuspendDepth > 0) {
@@ -512,6 +918,7 @@ class Database {
       clearTimeout(this.remoteSyncTimer);
       this.remoteSyncTimer = null;
       this.remoteSyncPending = true;
+      this.markSyncPending();
     }
   }
 
@@ -536,24 +943,158 @@ class Database {
     }
   }
 
-  static async hydrateFromServer(options?: { strict?: boolean }): Promise<void> {
+  private static applyRawStateValue(key: string, value: string | null): void {
+    this.invalidateCache(key);
+    if (value === null) {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // ignore
+      }
+      this.volatileSyncState.delete(key);
+      this.volatileSyncObjects.delete(key);
+      this.volatileSyncSerialized.delete(key);
+      return;
+    }
+
+    if (this.MEMORY_ONLY_LOCAL_KEYS.has(key)) {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // ignore
+      }
+      try {
+        const parsed = JSON.parse(value);
+        this.volatileSyncObjects.set(key, parsed);
+        this.volatileSyncSerialized.set(key, value);
+        this.volatileSyncState.delete(key);
+      } catch {
+        this.volatileSyncObjects.delete(key);
+        this.volatileSyncSerialized.delete(key);
+        this.volatileSyncState.set(key, value);
+      }
+      return;
+    }
+
+    try {
+      localStorage.setItem(key, value);
+      this.volatileSyncState.delete(key);
+    } catch (error) {
+      if (!this.isQuotaExceededError(error)) throw error;
+      this.volatileSyncState.set(key, value);
+    }
+  }
+
+  private static restoreRawStateSnapshot(snapshot: Record<string, string | null>): void {
+    this.invalidateAllCaches();
+    for (const key of this.REMOTE_SYNC_KEYS) {
+      this.applyRawStateValue(key, Object.prototype.hasOwnProperty.call(snapshot, key) ? snapshot[key] : null);
+    }
+  }
+
+  static async runWithLocalStateTransaction<T>(
+    work: () => Promise<T> | T,
+    options?: {
+      syncOnCommit?: boolean;
+      syncOptions?: {
+        destructive?: boolean;
+        full?: boolean;
+        force?: boolean;
+        timeoutMs?: number;
+        maxAttempts?: number;
+        retryDelayMs?: number;
+      };
+    }
+  ): Promise<T> {
+    if (this.localStateTransactionWrites) {
+      return await work();
+    }
+
+    const baseSnapshot: Record<string, string | null> = {};
+    for (const key of this.REMOTE_SYNC_KEYS) {
+      baseSnapshot[key] = this.getStorageItem(key);
+    }
+    const remoteSyncDirtySnapshot = new Set(this.remoteSyncDirtyKeys);
+    const remoteSyncStatusSnapshot: RemoteSyncStatus = { ...this.remoteSyncStatus };
+    const remoteStateUpdatedAtSnapshot = this.remoteStateUpdatedAt;
+    const remoteSyncPendingSnapshot = this.remoteSyncPending;
+    const remoteSyncQueuedSnapshot = this.remoteSyncQueued;
+
+    this.localStateTransactionWrites = new Map();
+    this.localStateTransactionDirtyKeys = new Set();
+
+    try {
+      const result = await work();
+      const pendingWrites = new Map(this.localStateTransactionWrites);
+      const pendingDirtyKeys = new Set(this.localStateTransactionDirtyKeys);
+
+      this.localStateTransactionWrites = null;
+      this.localStateTransactionDirtyKeys = new Set();
+
+      this.invalidateAllCaches();
+      for (const [key, value] of pendingWrites) {
+        this.applyRawStateValue(key, value);
+      }
+
+      for (const key of pendingDirtyKeys) {
+        this.remoteSyncDirtyKeys.add(key);
+      }
+
+      if (options?.syncOnCommit && pendingDirtyKeys.size > 0) {
+        const synced = await this.forceRemoteSyncNowWithOptions(options.syncOptions);
+        if (!synced) {
+          throw new Error('Failed to persist rebuilt state to backend');
+        }
+      } else if (pendingDirtyKeys.size > 0) {
+        this.markSyncPending();
+      }
+
+      return result;
+    } catch (error) {
+      this.localStateTransactionWrites = null;
+      this.localStateTransactionDirtyKeys = new Set();
+      this.restoreRawStateSnapshot(baseSnapshot);
+      this.remoteSyncDirtyKeys = new Set(remoteSyncDirtySnapshot);
+      this.remoteSyncStatus = { ...remoteSyncStatusSnapshot };
+      this.remoteStateUpdatedAt = remoteStateUpdatedAtSnapshot;
+      this.remoteSyncPending = remoteSyncPendingSnapshot;
+      this.remoteSyncQueued = remoteSyncQueuedSnapshot;
+      this.emitRemoteSyncStatus();
+      throw error;
+    }
+  }
+
+  static async hydrateFromServer(options?: {
+    strict?: boolean;
+    maxAttempts?: number;
+    timeoutMs?: number;
+    retryDelayMs?: number;
+    keys?: Iterable<string>;
+  }): Promise<void> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') {
       return;
     }
 
     const strict = !!options?.strict;
-    const maxAttempts = strict ? 3 : 1;
+    this.markSyncing('Syncing latest server data');
+    const maxAttempts = Math.max(1, Number(options?.maxAttempts ?? (strict ? 2 : 1)));
+    const timeoutMs = Math.max(1000, Number(options?.timeoutMs ?? (strict ? 15000 : 5000)));
+    const retryDelayMs = Math.max(100, Number(options?.retryDelayMs ?? (strict ? 1500 : 300)));
+    const requestedKeys = Array.from(options?.keys || []);
+    const syncKeys = requestedKeys.length > 0
+      ? requestedKeys.filter((key) => this.REMOTE_SYNC_KEYS.has(key))
+      : Array.from(this.REMOTE_SYNC_KEYS);
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      // First attempt gets 60s for Render cold starts; retries get 30s
-      const timeoutMs = strict ? (attempt === 1 ? 60000 : 30000) : 5000;
       try {
         const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
         const timeout = setTimeout(() => controller?.abort(), timeoutMs);
         let response: Response;
         try {
-          response = await fetch(`${this.getRemoteSyncEndpoint()}?t=${Date.now()}`, {
+          const endpoint = this.getRemoteSyncEndpoint(syncKeys);
+          const separator = endpoint.includes('?') ? '&' : '?';
+          response = await fetch(`${endpoint}${separator}t=${Date.now()}`, {
             method: 'GET',
             signal: controller?.signal
           });
@@ -573,16 +1114,29 @@ class Database {
           // Clear caches before batch update
           this.invalidateAllCaches();
           this.volatileSyncState.clear();
-
-          for (const key of this.REMOTE_SYNC_KEYS) {
-            const value = serverState[key];
-            if (typeof value === 'string') {
-              this.setStorageItem(key, value);
-            } else {
-              this.removeStorageItem(key);
+          this.pauseRemoteSync();
+          this.remoteSyncApplyingServerState = true;
+          this.remoteSyncPending = false;
+          this.remoteSyncQueued = false;
+          this.remoteSyncDirtyKeys.clear();
+          try {
+            for (const key of syncKeys) {
+              const value = serverState[key];
+              if (typeof value === 'string') {
+                this.setStorageItem(key, value);
+              } else {
+                this.removeStorageItem(key);
+              }
             }
+          } finally {
+            this.remoteSyncPending = false;
+            this.remoteSyncQueued = false;
+            this.remoteSyncDirtyKeys.clear();
+            this.remoteSyncApplyingServerState = false;
+            this.resumeRemoteSync(false);
           }
           this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
+          this.markSynced('Synced with server');
           return;
         }
 
@@ -600,7 +1154,7 @@ class Database {
             pushResponse = await fetch(this.getRemoteSyncEndpoint(), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(this.getSyncRequestBody()),
+              body: JSON.stringify(this.getSyncRequestBody({ full: true })),
               signal: pushController?.signal
             });
           } finally {
@@ -614,20 +1168,23 @@ class Database {
         } else {
           this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
         }
+        this.markSynced('Synced with server');
         return;
       } catch (error) {
         lastError = error;
         if (attempt < maxAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, strict ? 3000 : 300));
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
         }
       }
     }
 
     if (strict) {
+      this.markOffline('Could not load server data. Retrying automatically.');
       throw lastError instanceof Error ? lastError : new Error('Backend hydration failed');
     }
 
     console.warn('[DB Sync] Backend unavailable during startup. Using local browser state.');
+    this.markOffline('Using local data. Retrying server sync in background.');
   }
 
   // ==================== USERS ====================
@@ -657,8 +1214,54 @@ class Database {
     return this.getUsers().find(u => u.id === id);
   }
 
+  private static getDuplicateResolutionScore(
+    user: User,
+    txCountByUserId?: Map<string, number>,
+    walletByUserId?: Map<string, Wallet>,
+    matrixUserIds?: Set<string>
+  ): number {
+    const txCount = txCountByUserId?.get(user.id) || 0;
+    const wallet = walletByUserId?.get(user.id);
+    const walletMagnitude = wallet
+      ? (
+        Math.abs(wallet.depositWallet || 0)
+        + Math.abs(wallet.incomeWallet || 0)
+        + Math.abs(wallet.matrixWallet || 0)
+        + Math.abs(wallet.lockedIncomeWallet || 0)
+        + Math.abs(wallet.totalReceived || 0)
+      )
+      : 0;
+
+    let score = 0;
+    if ((user.userId || '').trim() === '1000001') score += 1_000_000_000;
+    if (user.isAdmin) score += 100_000_000;
+    if (user.isActive && user.accountStatus === 'active') score += 10_000_000;
+    score += Math.max(0, user.directCount || 0) * 10_000;
+    score += txCount * 100;
+    score += Math.floor(walletMagnitude);
+    if (matrixUserIds?.has(user.userId)) score += 50_000;
+    return score;
+  }
+
   static getUserByUserId(userId: string): User | undefined {
-    return this.getUsers().find(u => u.userId === userId);
+    const matches = this.getUsers().filter(u => u.userId === userId);
+    if (matches.length <= 1) return matches[0];
+
+    const txCountByUserId = new Map<string, number>();
+    for (const tx of this.getTransactions()) {
+      txCountByUserId.set(tx.userId, (txCountByUserId.get(tx.userId) || 0) + 1);
+    }
+    const walletByUserId = new Map(this.getWallets().map((w) => [w.userId, w]));
+    const matrixUserIds = new Set(this.getMatrix().map((node) => node.userId));
+
+    return [...matches].sort((a, b) => {
+      const scoreDiff = this.getDuplicateResolutionScore(b, txCountByUserId, walletByUserId, matrixUserIds)
+        - this.getDuplicateResolutionScore(a, txCountByUserId, walletByUserId, matrixUserIds);
+      if (scoreDiff !== 0) return scoreDiff;
+      const aCreated = new Date(a.createdAt || 0).getTime();
+      const bCreated = new Date(b.createdAt || 0).getTime();
+      return aCreated - bCreated;
+    })[0];
   }
 
   private static resolveUserByRef(userRef: string): User | undefined {
@@ -679,6 +1282,17 @@ class Database {
 
   static createUser(user: User): User {
     const users = this.getUsers();
+    const existingById = users.find((u) => u.id === user.id);
+    if (existingById) return existingById;
+
+    const existingByUserId = users.find((u) => u.userId === user.userId);
+    if (existingByUserId) {
+      if (!this.getWallet(existingByUserId.id)) {
+        this.createWallet(existingByUserId.id);
+      }
+      return existingByUserId;
+    }
+
     users.push(user);
     this.saveUsers(users);
 
@@ -1746,13 +2360,21 @@ class Database {
   }
 
   private static getLockedFirstTwoReceiveCount(userId: string, level: number): number {
+    if (this._bulkRebuildMode) {
+      const tracker = this.getUserHelpTracker(userId);
+      const state = tracker.levels[String(level)];
+      const receiveEvents = Math.max(0, Math.floor(Number(state?.receiveEvents || 0)));
+      return Math.min(2, receiveEvents);
+    }
+
     const prefix = `locked first-two help at level ${level}`;
-    return this.getTransactions().filter((tx) =>
+    const observed = this.getTransactions().filter((tx) =>
       tx.userId === userId
       && tx.type === 'receive_help'
       && tx.amount > 0
       && (tx.description || '').toLowerCase().startsWith(prefix)
     ).length;
+    return Math.min(2, observed);
   }
 
   private static getObservedReceiveEventCount(userId: string, level: number): number {
@@ -1955,29 +2577,57 @@ class Database {
         });
 
         if (lockedFirstTwoCount + 1 === 2 && recipientState.lockedAmount > 0) {
-          const lockedToTransfer = recipientState.lockedAmount;
-          const transferred = this.executeGiveHelp(
-            recipient.id,
-            lockedToTransfer,
-            recipientLevel,
-            `Auto give help at level ${recipientLevel} from locked income`,
-            { useLockedIncome: true }
-          );
-          if (transferred > 0) {
-            recipientState.givenAmount += transferred;
+          // Keep first-two release routing consistent with processMatchedHelpEvent:
+          // pending matrix contributions must consume the locked amount first so
+          // the help goes to the correct queued upline before fallback routing.
+          recipientTracker.levels[String(recipientLevel)] = recipientState;
+          this.saveUserHelpTracker(recipientTracker);
+          this.processPendingMatrixContributionsForUser(recipient.id, 1);
+
+          const walletAfterPending = this.getWallet(recipient.id);
+          const consumedByPending =
+            (recipientWallet.lockedIncomeWallet || 0) + transferAmount - (walletAfterPending?.lockedIncomeWallet || 0);
+
+          if (consumedByPending > 0) {
+            recipientState.givenAmount += consumedByPending;
             const levelPerUserHelp = helpDistributionTable[recipientLevel - 1]?.perUserHelp || 0;
             if (levelPerUserHelp > 0) {
               recipientState.giveEvents = Math.min(
                 2,
-                recipientState.giveEvents + Math.floor(transferred / levelPerUserHelp)
+                recipientState.giveEvents + Math.floor(consumedByPending / levelPerUserHelp)
               );
             }
-            recipientState.lockedAmount = Math.max(0, recipientState.lockedAmount - transferred);
-            const latestRecipientWallet = this.getWallet(recipient.id);
-            if (latestRecipientWallet) {
+            recipientState.lockedAmount = Math.max(0, recipientState.lockedAmount - consumedByPending);
+            if (walletAfterPending) {
               this.updateWallet(recipient.id, {
-                giveHelpLocked: Math.max(0, (latestRecipientWallet.giveHelpLocked || 0) - transferred)
+                giveHelpLocked: Math.max(0, (walletAfterPending.giveHelpLocked || 0) - consumedByPending)
               });
+            }
+          } else {
+            const lockedToTransfer = recipientState.lockedAmount;
+            const transferred = this.executeGiveHelp(
+              recipient.id,
+              lockedToTransfer,
+              recipientLevel,
+              `Auto give help at level ${recipientLevel} from locked income`,
+              { useLockedIncome: true }
+            );
+            if (transferred > 0) {
+              recipientState.givenAmount += transferred;
+              const levelPerUserHelp = helpDistributionTable[recipientLevel - 1]?.perUserHelp || 0;
+              if (levelPerUserHelp > 0) {
+                recipientState.giveEvents = Math.min(
+                  2,
+                  recipientState.giveEvents + Math.floor(transferred / levelPerUserHelp)
+                );
+              }
+              recipientState.lockedAmount = Math.max(0, recipientState.lockedAmount - transferred);
+              const latestRecipientWallet = this.getWallet(recipient.id);
+              if (latestRecipientWallet) {
+                this.updateWallet(recipient.id, {
+                  giveHelpLocked: Math.max(0, (latestRecipientWallet.giveHelpLocked || 0) - transferred)
+                });
+              }
             }
           }
         }
@@ -2211,7 +2861,10 @@ class Database {
         return false;
       }
 
-      const consumed = this.consumeLockedIncomeAtLevel(fromTracker, level, amount);
+      // Source lock level is one step behind the recipient matrix depth.
+      // Example: level-1 first-two lock ($10) funds level-2 ancestor contribution ($10).
+      const debitLockedLevel = Math.max(1, level - 1);
+      const consumed = this.consumeLockedIncomeAtLevel(fromTracker, debitLockedLevel, amount);
       if (!consumed.success) {
         return false;
       }
@@ -2443,13 +3096,22 @@ class Database {
       if (!this.isQualifiedForLevel(user, item.level)) continue;
 
       const pendingAmount = item.amount;
-      const transferred = this.executeGiveHelp(
-        user.id,
-        pendingAmount,
-        item.level,
-        `Released locked give help at level ${item.level} from locked income`,
-        { useLockedIncome: true }
-      );
+      const walletBefore = this.getWallet(user.id);
+      const lockedBefore = walletBefore?.lockedIncomeWallet || 0;
+      this.processPendingMatrixContributionsForUser(userId, 1);
+      const walletAfter = this.getWallet(user.id);
+      const lockedAfter = walletAfter?.lockedIncomeWallet || 0;
+      let transferred = Math.max(0, lockedBefore - lockedAfter);
+
+      if (transferred <= 0) {
+        transferred = this.executeGiveHelp(
+          user.id,
+          pendingAmount,
+          item.level,
+          `Released locked give help at level ${item.level} from locked income`,
+          { useLockedIncome: true }
+        );
+      }
       if (transferred <= 0) continue;
 
       if (transferred >= pendingAmount) {
@@ -2642,7 +3304,14 @@ class Database {
     if (tx.type === 'level_income' && (tx.description || '').startsWith('Helping amount from ')) {
       return true;
     }
-    if (tx.type === 'safety_pool' && tx.description?.startsWith('Every 5th help deduction at level')) {
+    if (
+      tx.type === 'safety_pool'
+      && (
+        tx.description?.startsWith('Every 5th help deduction at level')
+        || tx.description?.includes('to safety pool')
+        || tx.description?.startsWith('No qualified upline for level')
+      )
+    ) {
       return true;
     }
     return false;
@@ -2905,184 +3574,219 @@ class Database {
   }
 
   static async activateUsersAndRebuildMatrixLogic(
-    onProgress?: (done: number, total: number) => void
+    onProgress?: (done: number, total: number) => void,
+    options?: {
+      preserveMatrixTransactions?: boolean;
+      activateLegacyInactiveUsers?: boolean;
+    }
   ): Promise<MatrixLogicRebuildReport> {
-    return this.runWithRemoteSyncPaused(async () => {
-      const users = this.getUsers();
-      const matrix = this.getMatrix();
+    if (!this.acquireMatrixRebuildLock()) {
+      throw new Error('A matrix rebuild is already running. Wait for it to finish, then refresh once before trying again.');
+    }
 
-      const report: MatrixLogicRebuildReport = {
-        activatedUsers: 0,
-        activatedMatrixNodes: 0,
-        repositionedMatrixNodes: 0,
-        directCountsUpdated: 0,
-        removedMatrixTransactions: 0,
-        removedMatrixSafetyPoolEntries: 0,
-        trackersReset: 0,
-        replayedMembers: 0,
-        backfilledActivationUsers: 0,
-        backfilledDirectIncomeEntries: 0,
-        backfilledAdminFeeEntries: 0,
-        reconciliation: {
-          scannedTrackers: 0,
-          createdTrackers: 0,
-          removedTrackers: 0,
-          repairedLevels: 0,
-          repairedQueueItems: 0,
-          walletSyncs: 0,
-          issues: []
-        }
-      };
+    try {
+      return await this.runWithRemoteSyncPaused(async () => {
+        return this.runWithLocalStateTransaction(async () => {
+          const preserveMatrixTransactions = !!options?.preserveMatrixTransactions;
+          const activateLegacyInactiveUsers = options?.activateLegacyInactiveUsers !== false;
+          const users = this.getUsers();
+          const matrix = this.getMatrix();
 
-      const directCountsBySponsor = new Map<string, number>();
-      for (const member of users) {
-        if (!member.sponsorId) continue;
-        directCountsBySponsor.set(member.sponsorId, (directCountsBySponsor.get(member.sponsorId) || 0) + 1);
-      }
+          const report: MatrixLogicRebuildReport = {
+            activatedUsers: 0,
+            activatedMatrixNodes: 0,
+            repositionedMatrixNodes: 0,
+            directCountsUpdated: 0,
+            removedMatrixTransactions: 0,
+            removedMatrixSafetyPoolEntries: 0,
+            trackersReset: 0,
+            replayedMembers: 0,
+            backfilledActivationUsers: 0,
+            backfilledDirectIncomeEntries: 0,
+            backfilledAdminFeeEntries: 0,
+            reconciliation: {
+              scannedTrackers: 0,
+              createdTrackers: 0,
+              removedTrackers: 0,
+              repairedLevels: 0,
+              repairedQueueItems: 0,
+              walletSyncs: 0,
+              issues: []
+            }
+          };
 
-      const normalizedUsers = users.map((u) => {
-        const next: User = { ...u };
-        const computedDirect = directCountsBySponsor.get(u.userId) || 0;
-        if ((next.directCount || 0) !== computedDirect) {
-          next.directCount = computedDirect;
-          report.directCountsUpdated += 1;
-        }
-
-        const shouldAutoActivate = !next.isAdmin && next.accountStatus !== 'temp_blocked' && next.accountStatus !== 'permanent_blocked';
-        if (shouldAutoActivate) {
-          const wasInactive = !next.isActive || next.accountStatus !== 'active';
-          if (wasInactive) {
-            report.activatedUsers += 1;
+          const directCountsBySponsor = new Map<string, number>();
+          for (const member of users) {
+            if (!member.sponsorId) continue;
+            directCountsBySponsor.set(member.sponsorId, (directCountsBySponsor.get(member.sponsorId) || 0) + 1);
           }
-          next.isActive = true;
-          next.accountStatus = 'active';
-          if (!next.activatedAt) {
-            next.activatedAt = new Date().toISOString();
+
+          const normalizedUsers = users.map((u) => {
+            const next: User = { ...u };
+            const computedDirect = directCountsBySponsor.get(u.userId) || 0;
+            if ((next.directCount || 0) !== computedDirect) {
+              next.directCount = computedDirect;
+              report.directCountsUpdated += 1;
+            }
+
+            const shouldAutoActivate = activateLegacyInactiveUsers
+              && !next.isAdmin
+              && next.accountStatus !== 'temp_blocked'
+              && next.accountStatus !== 'permanent_blocked';
+            if (shouldAutoActivate) {
+              const wasInactive = !next.isActive || next.accountStatus !== 'active';
+              if (wasInactive) {
+                report.activatedUsers += 1;
+              }
+              next.isActive = true;
+              next.accountStatus = 'active';
+              if (!next.activatedAt) {
+                next.activatedAt = new Date().toISOString();
+              }
+            }
+
+            return next;
+          });
+          const rebuiltTopology = this.rebuildMatrixTopology(normalizedUsers);
+          report.repositionedMatrixNodes = rebuiltTopology.repositionedMatrixNodes;
+          const normalizedUsersWithTopology = rebuiltTopology.users;
+          this.saveUsers(normalizedUsersWithTopology);
+
+          const backfill = this.backfillMissingActivationEffects(normalizedUsersWithTopology);
+          report.backfilledActivationUsers = backfill.users;
+          report.backfilledDirectIncomeEntries = backfill.sponsorCredits;
+          report.backfilledAdminFeeEntries = backfill.adminFees;
+
+          const userByUserId = new Map(normalizedUsersWithTopology.map((u) => [u.userId, u]));
+          const previousNodeByUserId = new Map(matrix.map((node) => [node.userId, node]));
+          const normalizedMatrix = rebuiltTopology.matrix.map((node) => {
+            const owner = userByUserId.get(node.userId);
+            if (!owner) return node;
+            const shouldNodeBeActive = owner.isActive && owner.accountStatus === 'active';
+            if (node.isActive !== shouldNodeBeActive) {
+              return { ...node, isActive: shouldNodeBeActive };
+            }
+            return node;
+          });
+          for (const node of normalizedMatrix) {
+            const previous = previousNodeByUserId.get(node.userId);
+            if (previous && previous.isActive !== node.isActive) {
+              report.activatedMatrixNodes += 1;
+            }
           }
-        }
+          this.saveMatrix(normalizedMatrix);
 
-        return next;
-      });
-      const rebuiltTopology = this.rebuildMatrixTopology(normalizedUsers);
-      report.repositionedMatrixNodes = rebuiltTopology.repositionedMatrixNodes;
-      const normalizedUsersWithTopology = rebuiltTopology.users;
-      this.saveUsers(normalizedUsersWithTopology);
-
-      const backfill = this.backfillMissingActivationEffects(normalizedUsersWithTopology);
-      report.backfilledActivationUsers = backfill.users;
-      report.backfilledDirectIncomeEntries = backfill.sponsorCredits;
-      report.backfilledAdminFeeEntries = backfill.adminFees;
-
-      const userByUserId = new Map(normalizedUsersWithTopology.map((u) => [u.userId, u]));
-      const previousNodeByUserId = new Map(matrix.map((node) => [node.userId, node]));
-      const normalizedMatrix = rebuiltTopology.matrix.map((node) => {
-        const owner = userByUserId.get(node.userId);
-        if (!owner) return node;
-        const shouldNodeBeActive = owner.isActive && owner.accountStatus === 'active';
-        if (node.isActive !== shouldNodeBeActive) {
-          return { ...node, isActive: shouldNodeBeActive };
-        }
-        return node;
-      });
-      for (const node of normalizedMatrix) {
-        const previous = previousNodeByUserId.get(node.userId);
-        if (previous && previous.isActive !== node.isActive) {
-          report.activatedMatrixNodes += 1;
-        }
-      }
-      this.saveMatrix(normalizedMatrix);
-
-      const transactions = this.getTransactions();
-      const keptTransactions: Transaction[] = [];
-      for (const tx of transactions) {
-        if (!this.isMatrixTransactionForRebuild(tx)) {
-          keptTransactions.push(tx);
-          continue;
-        }
-        report.removedMatrixTransactions += 1;
-      }
-      this.saveTransactions(keptTransactions);
-
-      // Rebuild baseline wallets deterministically from non-matrix ledger.
-      const wallets = this.getWallets();
-      for (const wallet of wallets) {
-        const computed = this.computeIncomeLedgerFromTransactions(wallet.userId);
-        wallet.incomeWallet = computed.incomeWallet;
-        wallet.matrixWallet = computed.matrixWallet;
-        wallet.totalReceived = computed.totalReceived;
-        wallet.totalGiven = computed.totalGiven;
-        wallet.giveHelpLocked = 0;
-        wallet.lockedIncomeWallet = 0;
-      }
-      this.saveWallets(wallets);
-
-      const pool = this.getSafetyPool();
-      const keptPoolTx = pool.transactions.filter((tx) => !this.isMatrixSafetyPoolReasonForRebuild(tx.reason));
-      report.removedMatrixSafetyPoolEntries = pool.transactions.length - keptPoolTx.length;
-      const rebuiltPoolTotal = keptPoolTx.reduce((sum, tx) => sum + tx.amount, 0);
-      this.saveSafetyPool({
-        totalAmount: rebuiltPoolTotal,
-        transactions: keptPoolTx
-      });
-
-      const resetTrackers: UserHelpTracker[] = normalizedUsersWithTopology.map((u) => ({
-        userId: u.id,
-        levels: {},
-        lockedQueue: []
-      }));
-      this.saveHelpTrackers(resetTrackers);
-      this.savePendingMatrixContributions([]);
-      report.trackersReset = resetTrackers.length;
-
-      const nodeMap = new Map(normalizedMatrix.map((node) => [node.userId, node]));
-      const replayUsers = [...normalizedUsersWithTopology]
-        .filter((u) => !u.isAdmin)
-        .sort((a, b) => this.compareUsersByJoinOrder(a, b));
-
-      // Yield to browser every BATCH_SIZE users to prevent "page unresponsive"
-      const BATCH_SIZE = 50;
-      const yieldToUI = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-      // Enable bulk rebuild mode: skip creating transaction records to save memory
-      this._bulkRebuildMode = true;
-      this._bulkSafetyPoolTotal = 0;
-      try {
-
-        for (let i = 0; i < replayUsers.length; i++) {
-          const replayUser = replayUsers[i];
-          const replayNode = nodeMap.get(replayUser.userId);
-          if (!replayNode?.parentId) continue;
-          this.processMatrixHelpForNewMember(replayUser.userId, replayUser.id);
-          report.replayedMembers += 1;
-
-          // Yield to browser periodically so the page stays responsive
-          if ((i + 1) % BATCH_SIZE === 0) {
-            if (onProgress) onProgress(i + 1, replayUsers.length);
-            await yieldToUI();
+          const transactions = this.getTransactions();
+          const keptTransactions: Transaction[] = [];
+          for (const tx of transactions) {
+            if (!this.isMatrixTransactionForRebuild(tx)) {
+              keptTransactions.push(tx);
+              continue;
+            }
+            report.removedMatrixTransactions += 1;
           }
-        }
-        if (onProgress) onProgress(replayUsers.length, replayUsers.length);
+          this.saveTransactions(keptTransactions);
 
-      } finally {
-        // Disable bulk rebuild mode
-        this._bulkRebuildMode = false;
-      }
+          // Rebuild baseline wallets deterministically from non-matrix ledger.
+          const wallets = this.getWallets();
+          for (const wallet of wallets) {
+            const computed = this.computeIncomeLedgerFromTransactions(wallet.userId);
+            wallet.incomeWallet = computed.incomeWallet;
+            wallet.matrixWallet = computed.matrixWallet;
+            wallet.totalReceived = computed.totalReceived;
+            wallet.totalGiven = computed.totalGiven;
+            wallet.giveHelpLocked = 0;
+            wallet.lockedIncomeWallet = 0;
+          }
+          this.saveWallets(wallets);
 
-      // Write the accumulated safety pool total
-      const currentPool = this.getSafetyPool();
-      currentPool.totalAmount += this._bulkSafetyPoolTotal;
-      this.saveSafetyPool(currentPool);
+          const pool = this.getSafetyPool();
+          const keptPoolTx = pool.transactions.filter((tx) => !this.isMatrixSafetyPoolReasonForRebuild(tx.reason));
+          report.removedMatrixSafetyPoolEntries = pool.transactions.length - keptPoolTx.length;
+          const rebuiltPoolTotal = keptPoolTx.reduce((sum, tx) => sum + tx.amount, 0);
+          this.saveSafetyPool({
+            totalAmount: rebuiltPoolTotal,
+            transactions: keptPoolTx
+          });
 
-      report.reconciliation = this.reconcileHelpTrackers();
-      const finalPool = this.getSafetyPool();
-      const finalPoolTotal = finalPool.transactions.reduce((sum, tx) => sum + tx.amount, 0) + this._bulkSafetyPoolTotal;
-      this.saveSafetyPool({
-        totalAmount: finalPoolTotal,
-        transactions: finalPool.transactions
+          const resetTrackers: UserHelpTracker[] = normalizedUsersWithTopology.map((u) => ({
+            userId: u.id,
+            levels: {},
+            lockedQueue: []
+          }));
+          this.saveHelpTrackers(resetTrackers);
+          this.savePendingMatrixContributions([]);
+          report.trackersReset = resetTrackers.length;
+
+          const nodeMap = new Map(normalizedMatrix.map((node) => [node.userId, node]));
+          const replayUsers = [...normalizedUsersWithTopology]
+            .filter((u) => !u.isAdmin)
+            .sort((a, b) => this.compareUsersByJoinOrder(a, b));
+
+          // Yield to browser every BATCH_SIZE users to prevent "page unresponsive"
+          const BATCH_SIZE = 50;
+          const yieldToUI = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+          const useBulkRebuildMode = !preserveMatrixTransactions;
+          this._bulkSafetyPoolTotal = 0;
+          if (useBulkRebuildMode) {
+            // Bulk mode skips matrix transaction writes to reduce memory/latency on very large datasets.
+            this._bulkRebuildMode = true;
+          }
+          try {
+
+            for (let i = 0; i < replayUsers.length; i++) {
+              const replayUser = replayUsers[i];
+              const replayNode = nodeMap.get(replayUser.userId);
+              if (!replayNode?.parentId) continue;
+              this.processMatrixHelpForNewMember(replayUser.userId, replayUser.id);
+              report.replayedMembers += 1;
+
+              // Yield to browser periodically so the page stays responsive
+              if ((i + 1) % BATCH_SIZE === 0) {
+                if (onProgress) onProgress(i + 1, replayUsers.length);
+                await yieldToUI();
+              }
+            }
+            if (onProgress) onProgress(replayUsers.length, replayUsers.length);
+
+          } finally {
+            if (useBulkRebuildMode) {
+              this._bulkRebuildMode = false;
+            }
+          }
+
+          // Write the accumulated safety pool total
+          if (useBulkRebuildMode) {
+            const currentPool = this.getSafetyPool();
+            currentPool.totalAmount += this._bulkSafetyPoolTotal;
+            this.saveSafetyPool(currentPool);
+          }
+
+          report.reconciliation = this.reconcileHelpTrackers();
+          const finalPool = this.getSafetyPool();
+          const finalPoolTotal = finalPool.transactions.reduce((sum, tx) => sum + tx.amount, 0)
+            + (useBulkRebuildMode ? this._bulkSafetyPoolTotal : 0);
+          this.saveSafetyPool({
+            totalAmount: finalPoolTotal,
+            transactions: finalPool.transactions
+          });
+
+          return report;
+        }, {
+          syncOnCommit: true,
+          syncOptions: {
+            full: true,
+            force: true,
+            timeoutMs: 300000,
+            maxAttempts: 2,
+            retryDelayMs: 5000
+          }
+        });
       });
-
-      return report;
-    });
+    } finally {
+      this.releaseMatrixRebuildLock();
+    }
   }
 
   static reconcileHelpTrackers(): HelpTrackerReconciliationReport {
@@ -4018,7 +4722,67 @@ class Database {
     await this.forceRemoteSyncNowWithOptions();
   }
 
-  static async forceRemoteSyncNowWithOptions(options?: { destructive?: boolean }): Promise<boolean> {
+  static async authenticateUserViaBackend(userId: string, password: string): Promise<{ success: boolean; user?: User; message: string }> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return { success: false, message: 'Backend authentication is unavailable in this environment.' };
+    }
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutMs = 15000;
+    const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(`${this.REMOTE_SYNC_BASE_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller?.signal,
+        body: JSON.stringify({ userId, password })
+      });
+
+      const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+      if (!response.ok || payload?.ok === false) {
+        const message =
+          typeof payload?.error === 'string'
+            ? payload.error
+            : typeof payload?.message === 'string'
+              ? payload.message
+              : `Login failed (HTTP ${response.status})`;
+        return { success: false, message };
+      }
+
+      const user = payload?.user as User | undefined;
+      if (!user || typeof user !== 'object' || !user.id || !user.userId) {
+        return { success: false, message: 'Backend returned invalid user data.' };
+      }
+
+      return { success: true, user, message: 'Login successful' };
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? (error.name === 'AbortError' ? `Login request timed out after ${timeoutMs}ms` : error.message)
+          : 'Failed to contact backend login service.';
+      return { success: false, message };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  static getStartupRemoteSyncKeys(): string[] {
+    return [...this.STARTUP_REMOTE_SYNC_KEYS];
+  }
+
+  static getAdminRemoteSyncBatches(): string[][] {
+    return this.ADMIN_REMOTE_SYNC_BATCHES.map((batch) => [...batch]);
+  }
+
+  static async forceRemoteSyncNowWithOptions(options?: {
+    destructive?: boolean;
+    full?: boolean;
+    force?: boolean;
+    timeoutMs?: number;
+    maxAttempts?: number;
+    retryDelayMs?: number;
+  }): Promise<boolean> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') {
       return false;
     }
@@ -4035,34 +4799,92 @@ class Database {
 
     this.remoteSyncQueued = false;
     this.remoteSyncPending = false;
+    this.markSyncing('Syncing all data to server');
 
-    const maxAttempts = 2;
+    const maxAttempts = Math.max(1, Number(options?.maxAttempts ?? 2));
+    const retryDelayMs = Math.max(100, Number(options?.retryDelayMs ?? 300));
+    const timeoutMs = Math.max(1500, Number(options?.timeoutMs ?? this.REMOTE_SYNC_REQUEST_TIMEOUT_MS));
+    const useFullSnapshot = options?.full !== false;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let finalUpdatedAt = this.remoteStateUpdatedAt;
+      let anyFailed = false;
+
       try {
-        const response = await fetch(this.getRemoteSyncWriteEndpoint(options), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(this.getSyncRequestBody())
-        });
-        if (!response.ok) {
-          if (response.status === 409 && attempt < maxAttempts) {
-            console.warn('[DB Sync] Forced sync rejected due to stale snapshot. Re-hydrating from backend and retrying.');
-            await this.hydrateFromServer();
-            continue;
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+
+        try {
+          const targetKeys = useFullSnapshot
+            ? Array.from(this.REMOTE_SYNC_KEYS)
+            : Array.from(this.remoteSyncDirtyKeys);
+
+          const heavyKeys = ['mlm_transactions', 'mlm_help_trackers', 'mlm_matrix', 'mlm_users', 'mlm_payments'];
+          const batches: string[][] = [];
+
+          const others = targetKeys.filter(k => !heavyKeys.includes(k));
+          if (others.length > 0) batches.push(others);
+
+          heavyKeys.forEach(hk => {
+            if (targetKeys.includes(hk)) batches.push([hk]);
+          });
+
+          for (const batch of batches) {
+            if (batch.length === 0) continue;
+            const batchState: Record<string, string> = {};
+            for (const key of batch) {
+              const val = this.getStorageItem(key);
+              const isObj = key === 'mlm_safety_pool' || key === 'mlm_settings';
+              batchState[key] = typeof val === 'string' ? val : (isObj ? '{}' : '[]');
+            }
+
+            const payload = {
+              state: batchState,
+              baseUpdatedAt: finalUpdatedAt
+            };
+
+            const response = await fetch(this.getRemoteSyncWriteEndpoint(options), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+              signal: controller?.signal
+            });
+
+            if (!response.ok) {
+              if (response.status === 409 && attempt < maxAttempts) {
+                console.warn('[DB Sync] Forced sync rejected due to stale snapshot. Re-hydrating from backend and retrying.');
+                anyFailed = true;
+                break;
+              }
+              throw new Error(`Remote sync failed with HTTP ${response.status}`);
+            }
+
+            const respPayload = await response.json() as { updatedAt?: unknown };
+            if (typeof respPayload?.updatedAt === 'string') {
+              finalUpdatedAt = respPayload.updatedAt;
+            }
           }
-          throw new Error(`Remote sync failed with HTTP ${response.status}`);
+        } finally {
+          clearTimeout(timeout);
         }
-        const payload = await response.json() as { updatedAt?: unknown };
-        this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
+
+        if (anyFailed) {
+          await this.hydrateFromServer();
+          continue;
+        }
+
+        this.remoteStateUpdatedAt = finalUpdatedAt;
+        this.remoteSyncDirtyKeys.clear();
+        this.markSynced('All changes synced');
         return true;
-      } catch {
+      } catch (e) {
         if (attempt < maxAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
           continue;
         }
       }
     }
     console.warn('[DB Sync] Failed to force-push local state to backend.');
+    this.markOffline('Could not sync to backend. Retrying automatically.');
     return false;
   }
 
@@ -4208,18 +5030,31 @@ class Database {
 
   static getUserDownline(userId: string, maxDepth: number = Number.POSITIVE_INFINITY): MatrixNode[] {
     const matrix = this.getMatrix();
+    if (!matrix.length) return [];
+
+    const childrenMap = this.buildMatrixChildrenMap(matrix);
+    const nodeMap = new Map(matrix.map((node) => [node.userId, node]));
+    const limit = Number.isFinite(maxDepth) ? Math.max(1, Math.floor(maxDepth)) : Number.MAX_SAFE_INTEGER;
+    const visited = new Set<string>([userId]);
     const downline: MatrixNode[] = [];
+    const queue: Array<{ userId: string; depth: number }> = [{ userId, depth: 0 }];
 
-    const findDownline = (parentId: string, depth: number) => {
-      if (depth > maxDepth) return;
-      const children = matrix.filter(m => m.parentId === parentId);
-      for (const child of children) {
-        downline.push(child);
-        findDownline(child.userId, depth + 1);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (current.depth >= limit) continue;
+
+      const children = childrenMap.get(current.userId) || [];
+      for (const childUserId of children) {
+        if (visited.has(childUserId)) continue;
+        visited.add(childUserId);
+
+        const childNode = nodeMap.get(childUserId);
+        if (!childNode) continue;
+        downline.push(childNode);
+        queue.push({ userId: childUserId, depth: current.depth + 1 });
       }
-    };
+    }
 
-    findDownline(userId, 1);
     return downline;
   }
 
@@ -4236,21 +5071,24 @@ class Database {
     const countTeam = (nodeId: string | undefined): { total: number; active: number } => {
       if (!nodeId) return { total: 0, active: 0 };
 
-      const node = nodeMap.get(nodeId);
-      if (!node) return { total: 0, active: 0 };
+      const visited = new Set<string>();
+      const stack: string[] = [nodeId];
+      let total = 0;
+      let active = 0;
 
-      let total = 1;
-      let active = node.isActive ? 1 : 0;
+      while (stack.length > 0) {
+        const currentId = stack.pop()!;
+        if (visited.has(currentId)) continue;
+        visited.add(currentId);
 
-      if (node.leftChild) {
-        const leftCounts = countTeam(node.leftChild);
-        total += leftCounts.total;
-        active += leftCounts.active;
-      }
-      if (node.rightChild) {
-        const rightCounts = countTeam(node.rightChild);
-        total += rightCounts.total;
-        active += rightCounts.active;
+        const node = nodeMap.get(currentId);
+        if (!node) continue;
+
+        total += 1;
+        if (node.isActive) active += 1;
+
+        if (node.leftChild) stack.push(node.leftChild);
+        if (node.rightChild) stack.push(node.rightChild);
       }
 
       return { total, active };
@@ -4747,8 +5585,381 @@ class Database {
     return reports.sort((a, b) => a.level - b.level || a.userId.localeCompare(b.userId));
   }
 
+  private static repairDuplicateUserIds(): void {
+    const users = this.getUsers();
+    if (users.length <= 1) return;
+
+    const groupedByUserId = new Map<string, User[]>();
+    for (const user of users) {
+      const key = (user.userId || '').trim();
+      if (!key) continue;
+      const existing = groupedByUserId.get(key) || [];
+      existing.push(user);
+      groupedByUserId.set(key, existing);
+    }
+
+    const duplicateGroups = Array.from(groupedByUserId.values()).filter((group) => group.length > 1);
+    if (duplicateGroups.length === 0) return;
+
+    const transactions = this.getTransactions();
+    const wallets = this.getWallets();
+    const matrix = this.getMatrix();
+
+    const txCountByUserId = new Map<string, number>();
+    for (const tx of transactions) {
+      txCountByUserId.set(tx.userId, (txCountByUserId.get(tx.userId) || 0) + 1);
+    }
+    const walletByUserId = new Map(wallets.map((wallet) => [wallet.userId, wallet]));
+    const matrixUserIds = new Set(matrix.map((node) => node.userId));
+
+    const idRemap = new Map<string, string>();
+    const mergedCanonicalByUserId = new Map<string, User>();
+
+    const getTime = (value?: string | null): number => {
+      if (!value) return Number.POSITIVE_INFINITY;
+      const time = new Date(value).getTime();
+      return Number.isFinite(time) ? time : Number.POSITIVE_INFINITY;
+    };
+
+    for (const group of duplicateGroups) {
+      const sorted = [...group].sort((a, b) => {
+        const scoreDiff = this.getDuplicateResolutionScore(b, txCountByUserId, walletByUserId, matrixUserIds)
+          - this.getDuplicateResolutionScore(a, txCountByUserId, walletByUserId, matrixUserIds);
+        if (scoreDiff !== 0) return scoreDiff;
+        return getTime(a.createdAt) - getTime(b.createdAt);
+      });
+
+      const canonical = sorted[0];
+      const rest = sorted.slice(1);
+      for (const duplicate of rest) {
+        idRemap.set(duplicate.id, canonical.id);
+      }
+
+      const mergedDirectCount = Math.max(...group.map((u) => Number(u.directCount) || 0));
+      const mergedTotalEarnings = Math.max(...group.map((u) => Number(u.totalEarnings) || 0));
+      const earliestCreatedAt = [...group]
+        .map((u) => u.createdAt)
+        .filter(Boolean)
+        .sort((a, b) => getTime(a) - getTime(b))[0] || canonical.createdAt;
+      const earliestActivatedAt = [...group]
+        .map((u) => u.activatedAt)
+        .filter((value): value is string => !!value)
+        .sort((a, b) => getTime(a) - getTime(b))[0] || canonical.activatedAt;
+      const anyActive = group.some((u) => u.isActive && (u.accountStatus || 'active') === 'active');
+      const mergedIsAdmin = group.some((u) => u.isAdmin);
+
+      mergedCanonicalByUserId.set(canonical.userId, {
+        ...canonical,
+        isAdmin: mergedIsAdmin,
+        isActive: anyActive || canonical.isActive,
+        accountStatus: anyActive ? 'active' : (canonical.accountStatus || 'active'),
+        blockedAt: anyActive ? null : (canonical.blockedAt ?? null),
+        blockedUntil: anyActive ? null : (canonical.blockedUntil ?? null),
+        blockedReason: anyActive ? null : (canonical.blockedReason ?? null),
+        directCount: mergedDirectCount,
+        totalEarnings: mergedTotalEarnings,
+        createdAt: earliestCreatedAt,
+        activatedAt: earliestActivatedAt
+      });
+    }
+
+    if (idRemap.size === 0) return;
+
+    const dedupedUsers: User[] = [];
+    for (const user of users) {
+      if (idRemap.has(user.id)) continue;
+      const merged = mergedCanonicalByUserId.get(user.userId);
+      if (merged && merged.id === user.id) {
+        dedupedUsers.push(merged);
+      } else {
+        dedupedUsers.push(user);
+      }
+    }
+    this.saveUsers(dedupedUsers);
+
+    const remapId = (value?: string): string | undefined => {
+      if (!value) return value;
+      return idRemap.get(value) || value;
+    };
+
+    const mergedWalletByUser = new Map<string, Wallet>();
+    for (const wallet of wallets) {
+      const mappedUserId = remapId(wallet.userId) || wallet.userId;
+      const existing = mergedWalletByUser.get(mappedUserId);
+      if (!existing) {
+        mergedWalletByUser.set(mappedUserId, { ...wallet, userId: mappedUserId });
+        continue;
+      }
+      mergedWalletByUser.set(mappedUserId, {
+        ...existing,
+        userId: mappedUserId,
+        depositWallet: (existing.depositWallet || 0) + (wallet.depositWallet || 0),
+        pinWallet: (existing.pinWallet || 0) + (wallet.pinWallet || 0),
+        incomeWallet: (existing.incomeWallet || 0) + (wallet.incomeWallet || 0),
+        matrixWallet: (existing.matrixWallet || 0) + (wallet.matrixWallet || 0),
+        lockedIncomeWallet: (existing.lockedIncomeWallet || 0) + (wallet.lockedIncomeWallet || 0),
+        giveHelpLocked: (existing.giveHelpLocked || 0) + (wallet.giveHelpLocked || 0),
+        totalReceived: (existing.totalReceived || 0) + (wallet.totalReceived || 0),
+        totalGiven: (existing.totalGiven || 0) + (wallet.totalGiven || 0)
+      });
+    }
+    for (const user of dedupedUsers) {
+      if (mergedWalletByUser.has(user.id)) continue;
+      mergedWalletByUser.set(user.id, {
+        userId: user.id,
+        depositWallet: 0,
+        pinWallet: 0,
+        incomeWallet: 0,
+        matrixWallet: 0,
+        lockedIncomeWallet: 0,
+        giveHelpLocked: 0,
+        totalReceived: 0,
+        totalGiven: 0
+      });
+    }
+    this.saveWallets(Array.from(mergedWalletByUser.values()));
+
+    let txChanged = false;
+    const remappedTransactions = transactions.map((tx) => {
+      const userId = remapId(tx.userId) || tx.userId;
+      const fromUserId = remapId(tx.fromUserId);
+      const toUserId = remapId(tx.toUserId);
+      if (userId === tx.userId && fromUserId === tx.fromUserId && toUserId === tx.toUserId) return tx;
+      txChanged = true;
+      return { ...tx, userId, fromUserId, toUserId };
+    });
+    if (txChanged) {
+      this.saveTransactions(remappedTransactions);
+    }
+
+    const mergeLevelState = (
+      base: LevelHelpTrackerState | undefined,
+      incoming: LevelHelpTrackerState
+    ): LevelHelpTrackerState => {
+      if (!base) return { ...incoming };
+      return {
+        ...base,
+        leftEvents: Math.max(base.leftEvents || 0, incoming.leftEvents || 0),
+        rightEvents: Math.max(base.rightEvents || 0, incoming.rightEvents || 0),
+        matchedEvents: Math.max(base.matchedEvents || 0, incoming.matchedEvents || 0),
+        receiveEvents: Math.max(base.receiveEvents || 0, incoming.receiveEvents || 0),
+        receivedAmount: Math.max(base.receivedAmount || 0, incoming.receivedAmount || 0),
+        giveEvents: Math.max(base.giveEvents || 0, incoming.giveEvents || 0),
+        givenAmount: Math.max(base.givenAmount || 0, incoming.givenAmount || 0),
+        lockedAmount: Math.max(base.lockedAmount || 0, incoming.lockedAmount || 0),
+        lockedReceiveAmount: Math.max(base.lockedReceiveAmount || 0, incoming.lockedReceiveAmount || 0),
+        safetyDeducted: Math.max(base.safetyDeducted || 0, incoming.safetyDeducted || 0)
+      };
+    };
+
+    const trackers = this.getHelpTrackers();
+    const mergedTrackers = new Map<string, UserHelpTracker>();
+    for (const tracker of trackers) {
+      const mappedUserId = remapId(tracker.userId) || tracker.userId;
+      const existing = mergedTrackers.get(mappedUserId);
+      if (!existing) {
+        mergedTrackers.set(mappedUserId, {
+          userId: mappedUserId,
+          levels: Object.fromEntries(
+            Object.entries(tracker.levels || {}).map(([level, state]) => [level, { ...state }])
+          ),
+          lockedQueue: [...(tracker.lockedQueue || [])]
+        });
+        continue;
+      }
+
+      const nextLevels: Record<string, LevelHelpTrackerState> = { ...existing.levels };
+      for (const [level, state] of Object.entries(tracker.levels || {})) {
+        nextLevels[level] = mergeLevelState(nextLevels[level], state as LevelHelpTrackerState);
+      }
+
+      const queueById = new Map<string, LockedGiveHelpItem>();
+      for (const item of [...(existing.lockedQueue || []), ...(tracker.lockedQueue || [])]) {
+        queueById.set(item.id, { ...item });
+      }
+
+      mergedTrackers.set(mappedUserId, {
+        userId: mappedUserId,
+        levels: nextLevels,
+        lockedQueue: Array.from(queueById.values())
+      });
+    }
+    this.saveHelpTrackers(Array.from(mergedTrackers.values()));
+
+    const pending = this.getPendingMatrixContributions();
+    let pendingChanged = false;
+    const remappedPending = pending.map((item) => {
+      const fromUserId = remapId(item.fromUserId) || item.fromUserId;
+      const toUserId = remapId(item.toUserId) || item.toUserId;
+      if (fromUserId === item.fromUserId && toUserId === item.toUserId) return item;
+      pendingChanged = true;
+      return { ...item, fromUserId, toUserId };
+    });
+    if (pendingChanged) {
+      this.savePendingMatrixContributions(remappedPending);
+    }
+
+    const pins = this.getPins();
+    let pinsChanged = false;
+    const remappedPins = pins.map((pin) => {
+      const ownerId = remapId(pin.ownerId) || pin.ownerId;
+      const createdBy = remapId(pin.createdBy) || pin.createdBy;
+      const usedById = remapId(pin.usedById);
+      const transferredFrom = remapId(pin.transferredFrom);
+      if (
+        ownerId === pin.ownerId
+        && createdBy === pin.createdBy
+        && usedById === pin.usedById
+        && transferredFrom === pin.transferredFrom
+      ) {
+        return pin;
+      }
+      pinsChanged = true;
+      return { ...pin, ownerId, createdBy, usedById, transferredFrom };
+    });
+    if (pinsChanged) {
+      this.savePins(remappedPins);
+    }
+
+    const transfers = this.getPinTransfers();
+    let transfersChanged = false;
+    const remappedTransfers = transfers.map((transfer) => {
+      const fromUserId = remapId(transfer.fromUserId) || transfer.fromUserId;
+      const toUserId = remapId(transfer.toUserId) || transfer.toUserId;
+      if (fromUserId === transfer.fromUserId && toUserId === transfer.toUserId) return transfer;
+      transfersChanged = true;
+      return { ...transfer, fromUserId, toUserId };
+    });
+    if (transfersChanged) {
+      this.savePinTransfers(remappedTransfers);
+    }
+
+    const requests = this.getPinPurchaseRequests();
+    let requestsChanged = false;
+    const remappedRequests = requests.map((request) => {
+      const userId = remapId(request.userId) || request.userId;
+      const processedBy = remapId(request.processedBy);
+      if (userId === request.userId && processedBy === request.processedBy) return request;
+      requestsChanged = true;
+      return { ...request, userId, processedBy };
+    });
+    if (requestsChanged) {
+      this.savePinPurchaseRequests(remappedRequests);
+    }
+
+    const payments = this.getPayments();
+    let paymentsChanged = false;
+    const remappedPayments = payments.map((payment) => {
+      const userId = remapId(payment.userId) || payment.userId;
+      const verifiedBy = remapId(payment.verifiedBy);
+      if (userId === payment.userId && verifiedBy === payment.verifiedBy) return payment;
+      paymentsChanged = true;
+      return { ...payment, userId, verifiedBy };
+    });
+    if (paymentsChanged) {
+      this.savePayments(remappedPayments);
+    }
+
+    const notifications = this.getNotifications();
+    let notificationsChanged = false;
+    const remappedNotifications = notifications.map((notification) => {
+      const userId = remapId(notification.userId) || notification.userId;
+      if (userId === notification.userId) return notification;
+      notificationsChanged = true;
+      return { ...notification, userId };
+    });
+    if (notificationsChanged) {
+      this.saveNotifications(remappedNotifications);
+    }
+
+    const periods = this.getGracePeriods();
+    let periodsChanged = false;
+    const remappedPeriods = periods.map((period) => {
+      const userId = remapId(period.userId) || period.userId;
+      if (userId === period.userId) return period;
+      periodsChanged = true;
+      return { ...period, userId };
+    });
+    if (periodsChanged) {
+      this.saveGracePeriods(remappedPeriods);
+    }
+
+    const otpRecords = this.getOtpRecords();
+    let otpChanged = false;
+    const remappedOtpRecords = otpRecords.map((record) => {
+      const userId = remapId(record.userId) || record.userId;
+      if (userId === record.userId) return record;
+      otpChanged = true;
+      return { ...record, userId };
+    });
+    if (otpChanged) {
+      this.saveOtpRecords(remappedOtpRecords);
+    }
+
+    const impersonationSessions = this.getImpersonationSessions();
+    let impersonationChanged = false;
+    const remappedSessions = impersonationSessions.map((session) => {
+      const adminId = remapId(session.adminId) || session.adminId;
+      const targetUserId = remapId(session.targetUserId) || session.targetUserId;
+      if (adminId === session.adminId && targetUserId === session.targetUserId) return session;
+      impersonationChanged = true;
+      return { ...session, adminId, targetUserId };
+    });
+    if (impersonationChanged) {
+      this.saveImpersonationSessions(remappedSessions);
+    }
+
+    const matrixByUserId = new Map<string, MatrixNode>();
+    const matrixScore = (node: MatrixNode): number => {
+      let score = 0;
+      if (node.leftChild) score += 5;
+      if (node.rightChild) score += 5;
+      if (!node.parentId) score += 3;
+      if (node.isActive) score += 2;
+      return score;
+    };
+    for (const node of matrix) {
+      const existing = matrixByUserId.get(node.userId);
+      if (!existing || matrixScore(node) > matrixScore(existing)) {
+        matrixByUserId.set(node.userId, { ...node });
+      }
+    }
+    const dedupedMatrix = Array.from(matrixByUserId.values()).map((node) => ({ ...node }));
+    for (const node of dedupedMatrix) {
+      delete node.leftChild;
+      delete node.rightChild;
+    }
+    const matrixNodeByUserId = new Map(dedupedMatrix.map((node) => [node.userId, node]));
+    for (const node of dedupedMatrix) {
+      if (!node.parentId) continue;
+      const parent = matrixNodeByUserId.get(node.parentId);
+      if (!parent) {
+        delete node.parentId;
+        continue;
+      }
+      if (node.position === 0) parent.leftChild = node.userId;
+      if (node.position === 1) parent.rightChild = node.userId;
+    }
+    this.saveMatrix(dedupedMatrix);
+
+    const currentUser = this.getCurrentUser();
+    if (currentUser) {
+      const mappedCurrentUserId = remapId(currentUser.id) || currentUser.id;
+      const freshCurrentUser = dedupedUsers.find((user) => user.id === mappedCurrentUserId)
+        || this.getUserByUserId(currentUser.userId);
+      if (freshCurrentUser) {
+        this.setCurrentUser(freshCurrentUser);
+      }
+    }
+
+    this.repairIncomeWalletConsistency();
+    this.syncLockedIncomeWallet();
+  }
+
   // ==================== INITIALIZATION ====================
   static initializeDemoData(): void {
+    this.repairDuplicateUserIds();
+
     const adminUserId = '1000001';
     const users = this.getUsers();
     let adminUser = users.find((u) => u.userId === adminUserId);
