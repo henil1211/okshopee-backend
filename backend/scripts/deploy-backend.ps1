@@ -5,8 +5,8 @@ param(
   [string]$Pm2Home = "E:\apps\.pm2",
   [string]$LocalHealthUrl = "http://127.0.0.1:4000/api/health",
   [string]$PublicHealthUrl = "https://api.refernex.com/api/health",
-  [int]$HealthRetries = 12,
-  [int]$HealthRetryDelaySec = 3
+  [int]$HealthRetries = 24,
+  [int]$HealthRetryDelaySec = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +58,7 @@ try {
   }
 
   $env:PM2_HOME = $Pm2Home
+  $env:NODE_ENV = "production"
   if (-not (Test-Path $Pm2Home)) {
     New-Item -ItemType Directory -Path $Pm2Home -Force | Out-Null
   }
@@ -87,7 +88,7 @@ try {
 
   if ($pm2PidNum -gt 0) {
     Write-Step "Restarting PM2 process: $Pm2Process"
-    pm2 restart $Pm2Process
+    pm2 restart $Pm2Process --update-env
   } else {
     Write-Step "PM2 process not found. Starting new process: $Pm2Process"
     pm2 start server.js --name $Pm2Process --time

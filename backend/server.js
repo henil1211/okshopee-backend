@@ -1135,7 +1135,6 @@ async function start() {
   await migrateLegacyStateIfNeeded();
   await migrateExistingSingletonArrayCollections();
   await backfillSafetyPoolTransactionsMirror();
-  await getStateSnapshotCached({ forceFresh: true });
 
   server.listen(PORT, HOST, () => {
     console.log(`Backend listening on http://${HOST}:${PORT}`);
@@ -1164,6 +1163,15 @@ async function start() {
     if (process.env.MONGODB_DB && DB_FROM_URI && process.env.MONGODB_DB !== DB_FROM_URI) {
       console.warn(`Mongo DB mismatch: URI path is "${DB_FROM_URI}" but MONGODB_DB is "${process.env.MONGODB_DB}".`);
     }
+
+    void getStateSnapshotCached({ forceFresh: true })
+      .then(() => {
+        console.log('State snapshot cache warmed');
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`State snapshot cache warm failed: ${message}`);
+      });
   });
 }
 
