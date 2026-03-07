@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
 import nodemailer from 'nodemailer';
+import { runMatrixRebuildJob } from './matrixRebuildEngine.js';
 
 const gzipAsync = promisify(zlibGzip);
 
@@ -113,7 +114,10 @@ const DB_KEYS = Object.keys(STATE_COLLECTIONS);
 const SAFETY_POOL_STATE_KEY = 'mlm_safety_pool';
 const SAFETY_POOL_TRANSACTIONS_COLLECTION = 'safety_pool_transactions';
 const STATE_META_COLLECTION = 'state_meta';
+const MATRIX_REBUILD_JOB_COLLECTION = 'matrix_rebuild_jobs';
+const MATRIX_REBUILD_JOB_ID = 'singleton';
 let stateSnapshotCache = null;
+let activeMatrixRebuildPromise = null;
 
 const mongoClient = new MongoClient(MONGODB_URI, {
   maxPoolSize: 5,
@@ -123,6 +127,64 @@ const mongoClient = new MongoClient(MONGODB_URI, {
   connectTimeoutMS: 60000
 });
 let mongoDb;
+
+function getErrorMessage(error, fallback = 'Unknown error') {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function isMongoConnectivityError(error) {
+  if (!error || typeof error !== 'object') return false;
+
+  const name = typeof error.name === 'string' ? error.name : '';
+  const message = getErrorMessage(error, '').toLowerCase();
+
+  if (name.startsWith('Mongo')) {
+    return (
+      message.includes('server selection') ||
+      message.includes('connection') ||
+      message.includes('timed out') ||
+      message.includes('topology') ||
+      message.includes('econnrefused') ||
+      message.includes('enotfound') ||
+      message.includes('ehostunreach') ||
+      message.includes('network timeout')
+    );
+  }
+
+  return (
+    message.includes('mongodb') &&
+    (
+      message.includes('connection') ||
+      message.includes('timed out') ||
+      message.includes('server selection')
+    )
+  );
+}
+
+function getHttpStatusForRequestError(error) {
+  if (getErrorMessage(error) === 'Payload too large') {
+    return 413;
+  }
+  if (error instanceof SyntaxError) {
+    return 400;
+  }
+  if (isMongoConnectivityError(error)) {
+    return 503;
+  }
+  return 500;
+}
+
+async function getMongoHealthDetails() {
+  try {
+    if (!mongoDb) {
+      return { ok: false, error: 'Mongo database handle not initialized' };
+    }
+    await mongoDb.command({ ping: 1 });
+    return { ok: true, error: null };
+  } catch (error) {
+    return { ok: false, error: getErrorMessage(error) };
+  }
+}
 
 function sendJson(res, statusCode, payload, req) {
   const body = JSON.stringify(payload);
@@ -650,6 +712,96 @@ async function writeStateMetaUpdatedAt(now) {
   );
 }
 
+function createDefaultMatrixRebuildJob() {
+  return {
+    status: 'idle',
+    phase: 'idle',
+    processed: 0,
+    total: 0,
+    batchSize: 0,
+    options: null,
+    report: null,
+    error: null,
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: null
+  };
+}
+
+async function readMatrixRebuildJob() {
+  const doc = await mongoDb.collection(MATRIX_REBUILD_JOB_COLLECTION).findOne({ _id: MATRIX_REBUILD_JOB_ID });
+  if (!doc) {
+    return createDefaultMatrixRebuildJob();
+  }
+
+  const out = { ...doc };
+  delete out._id;
+  delete out.createdAt;
+  return {
+    ...createDefaultMatrixRebuildJob(),
+    ...out
+  };
+}
+
+async function writeMatrixRebuildJob(patch, options = {}) {
+  const now = new Date().toISOString();
+  const base = options.reset ? createDefaultMatrixRebuildJob() : await readMatrixRebuildJob();
+  const next = {
+    ...base,
+    ...(patch && typeof patch === 'object' ? patch : {})
+  };
+
+  next.updatedAt = now;
+  if (next.status === 'running') {
+    next.startedAt = next.startedAt || now;
+    next.finishedAt = null;
+    next.error = null;
+  } else if (next.status === 'completed' || next.status === 'failed' || next.status === 'idle') {
+    next.finishedAt = next.finishedAt || now;
+  }
+
+  await mongoDb.collection(MATRIX_REBUILD_JOB_COLLECTION).updateOne(
+    { _id: MATRIX_REBUILD_JOB_ID },
+    {
+      $set: next,
+      $setOnInsert: { createdAt: now }
+    },
+    { upsert: true }
+  );
+
+  return next;
+}
+
+function isMatrixRebuildRunning(job) {
+  return !!job && job.status === 'running' && job.phase !== 'completed' && job.phase !== 'failed';
+}
+
+async function triggerMatrixRebuildJob(options = {}) {
+  if (activeMatrixRebuildPromise) {
+    return activeMatrixRebuildPromise;
+  }
+
+  activeMatrixRebuildPromise = (async () => {
+    try {
+      return await runMatrixRebuildJob({
+        options,
+        batchSize: 25,
+        readSnapshot: async () => readStateFromCollections(),
+        persistState: async (runtime, keys) => {
+          const serialized = runtime.serialize(keys);
+          await writeStateToCollections(serialized, true, false);
+        },
+        readJob: async () => readMatrixRebuildJob(),
+        writeJob: async (patch, writeOptions) => writeMatrixRebuildJob(patch, writeOptions)
+      });
+    } finally {
+      activeMatrixRebuildPromise = null;
+    }
+  })();
+
+  return activeMatrixRebuildPromise;
+}
+
 function hasFullStateSnapshot(state) {
   return DB_KEYS.every((key) => typeof state?.[key] === 'string');
 }
@@ -961,13 +1113,15 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/health') {
-    sendJson(res, 200, {
-      ok: true,
+    const mongoHealth = await getMongoHealthDetails();
+    sendJson(res, mongoHealth.ok ? 200 : 503, {
+      ok: mongoHealth.ok,
       timestamp: new Date().toISOString(),
       storage: 'mongodb',
       mode: 'multi_collection_documents',
       database: MONGODB_DB,
       dbSource: MONGODB_DB_SOURCE,
+      mongo: mongoHealth,
       collections: Object.values(STATE_COLLECTIONS).map((c) => c.collection),
       derivedCollections: [SAFETY_POOL_TRANSACTIONS_COLLECTION],
       legacySnapshotCollection: MONGODB_LEGACY_SNAPSHOT_COLLECTION
@@ -989,7 +1143,10 @@ const server = createServer(async (req, res) => {
         sendStateSnapshot(res, snapshot, req);
       }
     } catch (error) {
-      sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to read state' });
+      const status = getHttpStatusForRequestError(error);
+      const message = getErrorMessage(error, 'Failed to read state');
+      console.error(`[GET /api/state] ${message}`);
+      sendJson(res, status, { ok: false, error: message });
     }
     return;
   }
@@ -1050,8 +1207,9 @@ const server = createServer(async (req, res) => {
       const saved = await writeStateToCollections(incomingState, destructiveWrite, replaceMissing);
       sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt, destructive: destructiveWrite });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Invalid request body';
-      const status = message === 'Payload too large' ? 413 : 400;
+      const message = getErrorMessage(error, 'Failed to persist state');
+      const status = getHttpStatusForRequestError(error);
+      console.error(`[POST /api/state] ${message}`);
       sendJson(res, status, { ok: false, error: message });
     }
     return;
@@ -1063,6 +1221,95 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, { ok: true, report });
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to build admin audit report' });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/rebuild-matrix-job') {
+    try {
+      const job = await readMatrixRebuildJob();
+      sendJson(res, 200, { ok: true, job });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: getErrorMessage(error, 'Failed to read rebuild job state') });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/rebuild-matrix-job') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const jobPatch =
+        parsed?.job && typeof parsed.job === 'object' && !Array.isArray(parsed.job)
+          ? parsed.job
+          : {};
+      const reset = parsed?.reset === true;
+      const job = await writeMatrixRebuildJob(jobPatch, { reset });
+      sendJson(res, 200, { ok: true, job });
+    } catch (error) {
+      const status = error instanceof SyntaxError ? 400 : 500;
+      sendJson(res, status, { ok: false, error: getErrorMessage(error, 'Failed to write rebuild job state') });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/rebuild-matrix/status') {
+    try {
+      const job = await readMatrixRebuildJob();
+      sendJson(res, 200, { ok: true, job, running: !!activeMatrixRebuildPromise || isMatrixRebuildRunning(job) });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: getErrorMessage(error, 'Failed to read matrix rebuild status') });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/rebuild-matrix/start') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const options =
+        parsed?.options && typeof parsed.options === 'object' && !Array.isArray(parsed.options)
+          ? parsed.options
+          : {};
+
+      if (activeMatrixRebuildPromise) {
+        const job = await readMatrixRebuildJob();
+        sendJson(res, 202, { ok: true, started: false, running: true, job });
+        return;
+      }
+
+      const existingJob = await readMatrixRebuildJob();
+      if (existingJob.status === 'running' && existingJob.phase === 'replaying') {
+        void triggerMatrixRebuildJob(existingJob.options || options).catch((error) => {
+          console.error(`[matrix-rebuild] ${getErrorMessage(error, 'Matrix rebuild failed')}`);
+        });
+        sendJson(res, 202, { ok: true, started: true, resumed: true, running: true, job: existingJob });
+        return;
+      }
+
+      const job = await writeMatrixRebuildJob({
+        status: 'running',
+        phase: 'preparing',
+        processed: 0,
+        total: 0,
+        batchSize: 25,
+        options: {
+          preserveMatrixTransactions: options?.preserveMatrixTransactions === true,
+          activateLegacyInactiveUsers: options?.activateLegacyInactiveUsers !== false
+        },
+        report: null,
+        error: null,
+        finishedAt: null
+      }, { reset: true });
+
+      void triggerMatrixRebuildJob(job.options).catch((error) => {
+        console.error(`[matrix-rebuild] ${getErrorMessage(error, 'Matrix rebuild failed')}`);
+      });
+
+      sendJson(res, 202, { ok: true, started: true, running: true, job });
+    } catch (error) {
+      const status = error instanceof SyntaxError ? 400 : 500;
+      sendJson(res, status, { ok: false, error: getErrorMessage(error, 'Failed to start matrix rebuild') });
     }
     return;
   }
