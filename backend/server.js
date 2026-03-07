@@ -533,7 +533,11 @@ async function writeArrayState(collectionName, idField, rawValue, now, destructi
   });
 
   if (operations.length > 0) {
-    await collection.bulkWrite(operations, { ordered: false });
+    const BATCH_SIZE = 500;
+    for (let i = 0; i < operations.length; i += BATCH_SIZE) {
+      const batch = operations.slice(i, i + BATCH_SIZE);
+      await collection.bulkWrite(batch, { ordered: false });
+    }
   }
 
   if (destructive) {
@@ -610,7 +614,11 @@ async function writeSafetyPoolTransactionsMirror(rawValue, now) {
   });
 
   if (operations.length > 0) {
-    await collection.bulkWrite(operations, { ordered: false });
+    const BATCH_SIZE = 500;
+    for (let i = 0; i < operations.length; i += BATCH_SIZE) {
+      const batch = operations.slice(i, i + BATCH_SIZE);
+      await collection.bulkWrite(batch, { ordered: false });
+    }
   }
 
   await collection.deleteMany({ _id: { $nin: ids } });
