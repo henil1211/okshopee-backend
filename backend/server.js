@@ -449,6 +449,33 @@ async function getStateSnapshotCached(options = {}) {
   return setStateSnapshotCache(snapshot);
 }
 
+function filterStateSnapshot(snapshot, requestedKeys) {
+  if (!Array.isArray(requestedKeys) || requestedKeys.length === 0) {
+    return cloneStateSnapshot(snapshot);
+  }
+
+  const allowedKeys = new Set(
+    requestedKeys
+      .filter((key) => typeof key === 'string' && Object.prototype.hasOwnProperty.call(STATE_COLLECTIONS, key))
+  );
+
+  if (allowedKeys.size === 0) {
+    return { state: {}, updatedAt: typeof snapshot?.updatedAt === 'string' ? snapshot.updatedAt : null };
+  }
+
+  const filteredState = {};
+  for (const key of allowedKeys) {
+    if (Object.prototype.hasOwnProperty.call(snapshot?.state || {}, key)) {
+      filteredState[key] = snapshot.state[key];
+    }
+  }
+
+  return {
+    state: filteredState,
+    updatedAt: typeof snapshot?.updatedAt === 'string' ? snapshot.updatedAt : null
+  };
+}
+
 async function writeArrayState(collectionName, idField, rawValue, now, destructive = false) {
   const collection = mongoDb.collection(collectionName);
   const parsed = safeParseJSON(rawValue);
@@ -910,7 +937,15 @@ const server = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/api/state') {
     try {
       const snapshot = await getStateSnapshotCached();
-      sendStateSnapshot(res, snapshot, req);
+      const requestedKeys = (url.searchParams.get('keys') || '')
+        .split(',')
+        .map((key) => key.trim())
+        .filter(Boolean);
+      if (requestedKeys.length > 0) {
+        sendJson(res, 200, filterStateSnapshot(snapshot, requestedKeys), req);
+      } else {
+        sendStateSnapshot(res, snapshot, req);
+      }
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to read state' });
     }
