@@ -728,6 +728,54 @@ async function backfillSafetyPoolTransactionsMirror() {
   await writeSafetyPoolTransactionsMirror(rawValue, now);
 }
 
+async function authenticateUser(userId, password) {
+  const normalizedUserId = typeof userId === 'string' ? userId.trim() : '';
+  const normalizedPassword = typeof password === 'string' ? password : '';
+  if (!/^\d{7}$/.test(normalizedUserId)) {
+    return { ok: false, status: 400, error: 'User ID must be exactly 7 digits' };
+  }
+
+  const userDoc = await mongoDb.collection('users').findOne({ userId: normalizedUserId });
+  if (!userDoc) {
+    return { ok: false, status: 404, error: 'User ID not found' };
+  }
+
+  const user = cleanupReadDoc(userDoc);
+
+  if (user.accountStatus === 'permanent_blocked') {
+    return {
+      ok: false,
+      status: 403,
+      error: `Account permanently blocked${user.blockedReason ? `: ${user.blockedReason}` : ''}`
+    };
+  }
+
+  if (user.accountStatus === 'temp_blocked') {
+    const blockedUntil = user.blockedUntil ? new Date(user.blockedUntil) : null;
+    if (blockedUntil && blockedUntil > new Date()) {
+      return {
+        ok: false,
+        status: 403,
+        error: `Account temporarily blocked until ${blockedUntil.toLocaleString()}${user.blockedReason ? `: ${user.blockedReason}` : ''}`
+      };
+    }
+  }
+
+  if (!user.isActive) {
+    return { ok: false, status: 403, error: 'Account is inactive. Contact admin.' };
+  }
+
+  if (user.password !== normalizedPassword) {
+    return { ok: false, status: 401, error: 'Invalid password' };
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    user
+  };
+}
+
 async function buildAdminAuditReport() {
   const generatedAt = new Date().toISOString();
   const collectionCounts = {};
@@ -865,6 +913,23 @@ const server = createServer(async (req, res) => {
       sendStateSnapshot(res, snapshot, req);
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to read state' });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const result = await authenticateUser(parsed?.userId, parsed?.password);
+      if (!result.ok) {
+        sendJson(res, result.status, { ok: false, error: result.error });
+        return;
+      }
+      sendJson(res, 200, { ok: true, user: result.user });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid request body';
+      sendJson(res, 400, { ok: false, error: message });
     }
     return;
   }
