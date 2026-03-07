@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { useAuthStore, useAdminStore } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -99,6 +99,15 @@ interface LockedIncomeReportRow {
   currentLevel: number;
 }
 
+type BulkCreateProgress = {
+  stage: 'creating' | 'finalizing' | 'syncing' | 'completed' | 'failed';
+  processed: number;
+  total: number;
+  created: number;
+  failed: number;
+  message: string;
+};
+
 const isDateInRange = (date: string, from?: string, to?: string) => {
   const current = new Date(date).getTime();
   if (from) {
@@ -146,7 +155,7 @@ export default function Admin() {
     loadStats, loadSettings, loadAllUsers, loadAllTransactions, loadAllPins, loadAllPinRequests, loadPendingPinRequests,
     updateSettings, addFundsToUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
     suspendPin, unsuspendPin, blockUser, unblockUser, bulkCreateUsersWithoutPin, reconcileHelpTrackers, activateUsersAndRebuildMatrix,
-    deleteAllIdsFromSystem, getLevelWiseReport
+    repairMisroutedSafetyPool, deleteAllIdsFromSystem, getLevelWiseReport
   } = useAdminStore();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -164,6 +173,7 @@ export default function Admin() {
   const [bulkNoPinLoading, setBulkNoPinLoading] = useState(false);
   const [bulkNoPinCreated, setBulkNoPinCreated] = useState<string[]>([]);
   const [bulkNoPinFailed, setBulkNoPinFailed] = useState<string[]>([]);
+  const [bulkNoPinProgress, setBulkNoPinProgress] = useState<BulkCreateProgress | null>(null);
   const [selectedUser, setSelectedUser] = useState<string | null>(null);
   const [fundAmount, setFundAmount] = useState('');
   const [fundWalletType, setFundWalletType] = useState<'deposit' | 'income'>('deposit');
@@ -193,6 +203,9 @@ export default function Admin() {
   const [reportLevel, setReportLevel] = useState<string>('');
   const [levelReport, setLevelReport] = useState<any[]>([]);
   const [reportTab, setReportTab] = useState('member-report');
+  const [activeMainTab, setActiveMainTab] = useState('users');
+  const [reportsDataLoaded, setReportsDataLoaded] = useState(false);
+  const [supportDataLoaded, setSupportDataLoaded] = useState(false);
 
   const [memberFilters, setMemberFilters] = useState({
     dateFrom: '',
@@ -287,45 +300,99 @@ export default function Admin() {
   const [deleteAllIdsPhrase, setDeleteAllIdsPhrase] = useState('');
   const [deleteAllIdsAdminId, setDeleteAllIdsAdminId] = useState('');
   const [isDeletingAllIds, setIsDeletingAllIds] = useState(false);
+  const adminBootstrapUserRef = useRef<string | null>(null);
   const deleteAllIdsArmed =
     deleteAllIdsPhrase.trim().toUpperCase() === DELETE_ALL_IDS_PHRASE
     && deleteAllIdsAdminId.trim() === (user?.userId || '');
 
+  const isReportsTabActive = activeMainTab === 'reports';
+  const isSupportTabActive = activeMainTab === 'support';
+
   useEffect(() => {
     if (!isAuthenticated) {
+      adminBootstrapUserRef.current = null;
       navigate('/login');
       return;
     }
     if (!user?.isAdmin) {
+      adminBootstrapUserRef.current = null;
       navigate('/dashboard');
       return;
     }
+    if (adminBootstrapUserRef.current === user.userId) {
+      return;
+    }
 
-    loadStats();
-    loadSettings();
-    loadAllUsers();
-    loadAllTransactions();
-    loadAllPins();
-    loadAllPinRequests();
-    loadPendingPinRequests();
-    loadPayments();
-    loadPaymentMethods();
-    loadSupportTickets();
+    let cancelled = false;
+    adminBootstrapUserRef.current = user.userId;
+    const initializeAdminData = async () => {
+      if (import.meta.env.PROD) {
+        for (const keys of Database.getAdminRemoteSyncBatches()) {
+          if (cancelled) return;
+          try {
+            await Database.hydrateFromServer({
+              strict: true,
+              maxAttempts: 2,
+              timeoutMs: 45000,
+              retryDelayMs: 1500,
+              keys
+            });
+          } catch (error) {
+            console.warn('Admin bootstrap hydrate failed for keys:', keys, error);
+            break;
+          }
+        }
+      }
+
+      if (cancelled) return;
+      loadStats();
+      loadSettings();
+      loadAllUsers();
+      loadAllPins();
+      loadAllPinRequests();
+      loadPendingPinRequests();
+      loadPayments();
+      loadPaymentMethods();
+    };
+
+    void initializeAdminData();
     setBulkNoPin((prev) => ({
       ...prev,
       sponsorUserId: prev.sponsorUserId || user.userId
     }));
-  }, [isAuthenticated, user, navigate, loadStats, loadSettings, loadAllUsers, loadAllTransactions, loadAllPins, loadAllPinRequests, loadPendingPinRequests]);
 
-  const loadPayments = () => {
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, user, navigate, loadStats, loadSettings, loadAllUsers, loadAllPins, loadAllPinRequests, loadPendingPinRequests, loadPayments, loadPaymentMethods]);
+
+  useEffect(() => {
+    if (!isReportsTabActive || reportsDataLoaded) return;
+    const timer = window.setTimeout(() => {
+      loadAllTransactions();
+      setReportsDataLoaded(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [isReportsTabActive, reportsDataLoaded, loadAllTransactions]);
+
+  useEffect(() => {
+    if (!isSupportTabActive || supportDataLoaded) return;
+    const timer = window.setTimeout(() => {
+      loadSupportTickets();
+      setSupportDataLoaded(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [isSupportTabActive, supportDataLoaded]);
+
+  function loadPayments() {
     const payments = Database.getPendingPayments();
     setPendingPayments(payments);
-  };
+  }
 
-  const loadPaymentMethods = () => {
+  function loadPaymentMethods() {
     const methods = Database.getPaymentMethods();
     setPaymentMethods(methods);
-  };
+  }
 
   const loadSupportTickets = () => {
     const rows = Database.getSupportTickets();
@@ -594,6 +661,24 @@ export default function Admin() {
     }
   };
 
+  const handleRepairMisroutedSafetyPool = async () => {
+    const confirmed = window.confirm(
+      'This will re-run matrix logic to repair old locked give-help entries that were routed to safety pool instead of valid upline. This rebuild rewrites matrix transactions/safety entries. Continue?'
+    );
+    if (!confirmed) return;
+
+    setIsRebuildingMatrix(true);
+    const result = await repairMisroutedSafetyPool();
+    setIsRebuildingMatrix(false);
+
+    if (result.success) {
+      setLastRebuildReport(result.report || null);
+      toast.success(`Repair complete. ${result.message}`);
+    } else {
+      toast.error(result.message);
+    }
+  };
+
   const resetDeleteAllIdsConfirmation = () => {
     setDeleteAllIdsPhrase('');
     setDeleteAllIdsAdminId('');
@@ -661,6 +746,7 @@ export default function Admin() {
   const handleBulkCreateNoPin = async () => {
     setBulkNoPinCreated([]);
     setBulkNoPinFailed([]);
+    setBulkNoPinProgress(null);
 
     if (!bulkNoPin.sponsorUserId || bulkNoPin.sponsorUserId.length !== 7) {
       toast.error('Enter a valid 7-digit sponsor ID');
@@ -668,13 +754,24 @@ export default function Admin() {
     }
 
     setBulkNoPinLoading(true);
+    setBulkNoPinProgress({
+      stage: 'creating',
+      processed: 0,
+      total: Math.max(1, Number(bulkNoPin.quantity) || 1),
+      created: 0,
+      failed: 0,
+      message: 'Starting bulk creation...'
+    });
     const result = await bulkCreateUsersWithoutPin({
       sponsorUserId: bulkNoPin.sponsorUserId,
       quantity: bulkNoPin.quantity,
       namePrefix: bulkNoPin.namePrefix,
       country: bulkNoPin.country,
       password: bulkNoPin.password,
-      transactionPassword: bulkNoPin.transactionPassword
+      transactionPassword: bulkNoPin.transactionPassword,
+      onProgress: (progress) => {
+        setBulkNoPinProgress(progress);
+      }
     });
     setBulkNoPinLoading(false);
 
@@ -827,6 +924,7 @@ export default function Admin() {
   const userByUserId = useMemo(() => new Map(allUsers.map(u => [u.userId, u])), [allUsers]);
 
   const memberReportRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'member-report') return [];
     const rows: MemberReportRow[] = allUsers.map((u) => {
       const sponsor = u.sponsorId ? userByUserId.get(u.sponsorId) : undefined;
       const blockStatus: MemberReportRow['blockStatus'] = u.accountStatus === 'temp_blocked'
@@ -867,9 +965,10 @@ export default function Admin() {
       if (memberFilters.blockStatus && r.blockStatus !== memberFilters.blockStatus) return false;
       return true;
     });
-  }, [allUsers, userByUserId, memberFilters]);
+  }, [allUsers, userByUserId, memberFilters, isReportsTabActive, reportTab]);
 
   const receiveHelpReportRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'receive-help') return [];
     const ordered = [...allTransactions]
       .filter(tx => tx.type === 'receive_help')
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
@@ -901,9 +1000,10 @@ export default function Admin() {
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [allTransactions, userById, receiveFilters]);
+  }, [allTransactions, userById, receiveFilters, isReportsTabActive, reportTab]);
 
   const giveHelpReportRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'give-help') return [];
     const receiveHelpTx = allTransactions.filter(tx => tx.type === 'receive_help' && tx.fromUserId);
     const rows: GiveHelpReportRow[] = allTransactions
       .filter(tx => tx.type === 'give_help')
@@ -948,9 +1048,10 @@ export default function Admin() {
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [allTransactions, userById, giveFilters]);
+  }, [allTransactions, userById, giveFilters, isReportsTabActive, reportTab]);
 
   const offerAchieverRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'offer-achievers') return [];
     const rows: OfferAchieverReportRow[] = [];
 
     allUsers.forEach((u) => {
@@ -1007,9 +1108,10 @@ export default function Admin() {
       if (offerFilters.sponsorName && !safeLower(r.sponsorName).includes(safeLower(offerFilters.sponsorName))) return false;
       return true;
     });
-  }, [allUsers, userByUserId, offerFilters]);
+  }, [allUsers, userByUserId, offerFilters, isReportsTabActive, reportTab]);
 
   const filteredLevelReport = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'all-level') return [];
     return levelReport.filter((row) => {
       if (!isDateInRange(row.date, allLevelFilters.dateFrom, allLevelFilters.dateTo)) return false;
       if (allLevelFilters.userId && !safeText(row.userId).includes(allLevelFilters.userId)) return false;
@@ -1017,9 +1119,10 @@ export default function Admin() {
       if (allLevelFilters.sponsorId && !safeText(row.sponsorId).includes(allLevelFilters.sponsorId)) return false;
       return true;
     });
-  }, [levelReport, allLevelFilters]);
+  }, [levelReport, allLevelFilters, isReportsTabActive, reportTab]);
 
   const depositReportRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'deposit-report') return [];
     // Get all completed payments for deposit report
     const allPayments = Database.getAllCompletedPayments();
     const rows: DepositReportRow[] = allPayments.map(p => ({
@@ -1040,9 +1143,10 @@ export default function Admin() {
       if (depositReportFilters.status && r.status !== depositReportFilters.status) return false;
       return true;
     }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [depositReportFilters]);
+  }, [depositReportFilters, isReportsTabActive, reportTab]);
 
   const withdrawalReportRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'withdrawal-report') return [];
     // Filter transactions for withdrawals
     const rows: WithdrawalReportRow[] = allTransactions
       .filter(tx => tx.type === 'withdrawal')
@@ -1066,9 +1170,10 @@ export default function Admin() {
       if (withdrawalReportFilters.status && r.status !== withdrawalReportFilters.status) return false;
       return true;
     }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [allTransactions, userById, withdrawalReportFilters]);
+  }, [allTransactions, userById, withdrawalReportFilters, isReportsTabActive, reportTab]);
 
   const lockedIncomeRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'locked-income') return [];
     const rows: LockedIncomeReportRow[] = allUsers
       .filter(u => !u.isAdmin)
       .map(u => {
@@ -1092,9 +1197,10 @@ export default function Admin() {
       if (lockedIncomeFilters.minAmount && r.lockedAmount < Number(lockedIncomeFilters.minAmount)) return false;
       return true;
     }).sort((a, b) => b.lockedAmount - a.lockedAmount);
-  }, [allUsers, lockedIncomeFilters]);
+  }, [allUsers, lockedIncomeFilters, isReportsTabActive, reportTab]);
 
   const safetyPoolRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'safety-pool') return [];
     const pool = Database.getSafetyPool();
     return pool.transactions
       .map((t) => {
@@ -1115,7 +1221,7 @@ export default function Admin() {
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [userById, safetyPoolFilters]);
+  }, [userById, safetyPoolFilters, isReportsTabActive, reportTab]);
 
   const filteredPinRequests = useMemo(() => {
     if (pinRequestStatusFilter === 'all') return allPinRequests;
@@ -1463,7 +1569,7 @@ export default function Admin() {
 
 
         {/* Main Content Tabs */}
-        <Tabs defaultValue="users" className="space-y-6">
+        <Tabs value={activeMainTab} onValueChange={setActiveMainTab} className="space-y-6">
           <TabsList className="mobile-bottom-scroll bg-[#1f2937] border border-white/10 h-auto w-full justify-start gap-1 overflow-x-auto whitespace-nowrap">
             <TabsTrigger value="users" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Users</TabsTrigger>
             <TabsTrigger value="pins" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">PIN Management</TabsTrigger>
@@ -1501,7 +1607,7 @@ export default function Admin() {
                     <Input
                       type="number"
                       min={1}
-                      max={500}
+                      max={100}
                       value={bulkNoPin.quantity}
                       onChange={(e) => setBulkNoPin((prev) => ({ ...prev, quantity: Math.max(1, parseInt(e.target.value || '1')) }))}
                       className="bg-[#1f2937] border-white/10 text-white"
@@ -1547,8 +1653,45 @@ export default function Admin() {
 
                 <Button onClick={handleBulkCreateNoPin} disabled={bulkNoPinLoading} className="w-full btn-primary">
                   {bulkNoPinLoading ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Users className="w-4 h-4 mr-2" />}
-                  Create IDs Without PIN
+                  {bulkNoPinLoading && bulkNoPinProgress
+                    ? `${bulkNoPinProgress.processed}/${bulkNoPinProgress.total} Processing...`
+                    : 'Create IDs Without PIN'}
                 </Button>
+                {bulkNoPinProgress && (
+                  <div className="p-3 rounded-lg bg-[#1f2937] border border-white/10 space-y-2">
+                    <div className="flex items-center justify-between text-xs sm:text-sm">
+                      <span className="text-white/80">{bulkNoPinProgress.message}</span>
+                      <span className="text-[#8fcfff]">
+                        {bulkNoPinProgress.processed}/{bulkNoPinProgress.total}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
+                      <div
+                        className={`h-full transition-all duration-300 ${
+                          bulkNoPinProgress.stage === 'failed'
+                            ? 'bg-red-500'
+                            : bulkNoPinProgress.stage === 'completed'
+                              ? 'bg-emerald-500'
+                              : 'bg-[#118bdd]'
+                        }`}
+                        style={{
+                          width: `${Math.max(
+                            3,
+                            Math.min(
+                              100,
+                              Math.round((bulkNoPinProgress.processed / Math.max(1, bulkNoPinProgress.total)) * 100)
+                            )
+                          )}%`
+                        }}
+                      />
+                    </div>
+                    <div className="text-xs text-white/60">
+                      Created: <span className="text-emerald-400">{bulkNoPinProgress.created}</span>
+                      {' '}| Failed: <span className="text-red-400">{bulkNoPinProgress.failed}</span>
+                      {' '}| Stage: <span className="text-[#8fcfff]">{bulkNoPinProgress.stage}</span>
+                    </div>
+                  </div>
+                )}
 
                 {bulkNoPinCreated.length > 0 && (
                   <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
@@ -2608,6 +2751,13 @@ export default function Admin() {
           {/* Support Tab */}
           <TabsContent value="support">
             <div className="space-y-4">
+              {!supportDataLoaded && (
+                <Card className="glass border-white/10">
+                  <CardContent className="p-4 text-white/70 text-sm">
+                    Loading support tickets...
+                  </CardContent>
+                </Card>
+              )}
               <Card className="glass border-white/10">
                 <CardHeader>
                   <CardTitle className="text-white flex items-center gap-2">
@@ -2825,6 +2975,15 @@ export default function Admin() {
                 <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
                   <Button
                     variant="outline"
+                    onClick={handleRepairMisroutedSafetyPool}
+                    disabled={isRebuildingMatrix}
+                    className="w-full sm:w-auto border-orange-500/30 text-orange-300 hover:bg-orange-500/10"
+                  >
+                    {isRebuildingMatrix ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+                    Repair Misrouted Safety Pool
+                  </Button>
+                  <Button
+                    variant="outline"
                     onClick={handleActivateAndRebuildMatrix}
                     disabled={isRebuildingMatrix}
                     className="w-full sm:w-auto border-rose-500/30 text-rose-300 hover:bg-rose-500/10"
@@ -2844,6 +3003,11 @@ export default function Admin() {
                 </div>
               </CardHeader>
               <CardContent>
+                {!reportsDataLoaded && (
+                  <div className="mb-4 rounded-lg border border-[#118bdd]/30 bg-[#118bdd]/10 px-3 py-2 text-sm text-[#a7dcff]">
+                    Loading transaction data for reports...
+                  </div>
+                )}
                 {lastRebuildReport && (
                   <div className="mb-4 p-3 rounded-lg bg-[#1f2937] border border-rose-400/20 text-sm text-white/70">
                     <span className="mr-4">Activated IDs: {lastRebuildReport.activatedUsers}</span>

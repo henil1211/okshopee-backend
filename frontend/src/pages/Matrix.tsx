@@ -15,10 +15,11 @@ import MobileBottomNav from '@/components/MobileBottomNav';
 
 interface TreeNodeProps {
   node: MatrixNode | null;
+  displayName?: string;
   onNodeClick: (node: MatrixNode) => void;
 }
 
-const TreeNode = ({ node, onNodeClick }: TreeNodeProps) => {
+const TreeNode = ({ node, displayName, onNodeClick }: TreeNodeProps) => {
   if (!node) {
     return (
       <div className="flex flex-col items-center">
@@ -30,8 +31,6 @@ const TreeNode = ({ node, onNodeClick }: TreeNodeProps) => {
     );
   }
 
-  const user = Database.getUserByUserId(node.userId);
-
   return (
     <div className="flex flex-col items-center">
       <button
@@ -42,24 +41,28 @@ const TreeNode = ({ node, onNodeClick }: TreeNodeProps) => {
           } hover:scale-110`}
       >
         <span className="text-white font-bold text-sm">
-          {getInitials(user?.fullName || node.username)}
+          {getInitials(displayName || node.username)}
         </span>
         {node.isActive && (
           <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-400 rounded-full border-2 border-[#0a0e17]" />
         )}
       </button>
-      <span className="text-xs text-white/70 mt-2 max-w-[80px] truncate">{node.username}</span>
+      <span className="text-xs text-white/70 mt-2 max-w-[80px] truncate">{displayName || node.username}</span>
       <span className="text-xs text-white/40">ID: {node.userId}</span>
     </div>
   );
 };
 
 export default function Matrix() {
+  const TREE_CHUNK_SIZE = 32;
+  const DOWNLINE_CHUNK_SIZE = 20;
   const navigate = useNavigate();
   const { user, isAuthenticated, logout } = useAuthStore();
   const { matrix, loadMatrix } = useMatrixStore();
   const [selectedNode, setSelectedNode] = useState<MatrixNode | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [downlineVisibleCount, setDownlineVisibleCount] = useState(DOWNLINE_CHUNK_SIZE);
+  const [levelVisibleCounts, setLevelVisibleCounts] = useState<Record<number, number>>({});
   const treeContainerRef = useRef<HTMLDivElement>(null);
   const matrixCardRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -144,63 +147,74 @@ export default function Matrix() {
 
   const matrixViewMaxLevels = Math.max(1, Math.min(Database.getSettings().matrixViewMaxLevels || 20, 20));
 
-  const getUserDownline = (userId: string) => {
-    return Database.getUserDownline(userId, matrixViewMaxLevels);
-  };
-
-  const getTeamCounts = (userId: string) => {
-    return Database.getTeamCounts(userId);
-  };
-
   const handleLogout = () => {
     logout();
     navigate('/login');
   };
 
   const userNode = user ? matrix.find(m => m.userId === user.userId) : null;
+  const usersByUserId = useMemo(() => {
+    const users = Database.getUsers();
+    return new Map(users.map((u) => [u.userId, u]));
+  }, [matrix]);
+  const getDisplayName = (userId: string, fallback: string) => usersByUserId.get(userId)?.fullName || fallback;
+
   const downline = useMemo(() => {
     if (!user) return [] as MatrixNode[];
-    return getUserDownline(user.userId);
+    return Database.getUserDownline(user.userId, matrixViewMaxLevels);
   }, [user, matrix, matrixViewMaxLevels]);
-  const teamStats = user ? getTeamCounts(user.userId) : { left: 0, right: 0, leftActive: 0, rightActive: 0 };
+
+  const teamStats = useMemo(
+    () => (user ? Database.getTeamCounts(user.userId) : { left: 0, right: 0, leftActive: 0, rightActive: 0 }),
+    [user, matrix]
+  );
+
   const levelGroups = useMemo(() => {
-    if (!userNode) return [] as Array<{ level: number; slots: Array<MatrixNode | null>; filled: number; capacity: number }>;
+    if (!userNode) return [] as Array<{ level: number; nodes: MatrixNode[]; filled: number; capacity: number }>;
 
     const nodeMap = new Map(matrix.map((m) => [m.userId, m]));
     const slotViewMaxLevels = matrixViewMaxLevels;
-    const groups: Array<{ level: number; slots: Array<MatrixNode | null>; filled: number; capacity: number }> = [];
-
-    let currentSlots: Array<MatrixNode | null> = [
-      userNode.leftChild ? (nodeMap.get(userNode.leftChild) || null) : null,
-      userNode.rightChild ? (nodeMap.get(userNode.rightChild) || null) : null
-    ];
+    const groups: Array<{ level: number; nodes: MatrixNode[]; filled: number; capacity: number }> = [];
+    let currentLevelNodes: MatrixNode[] = [userNode];
 
     for (let level = 1; level <= slotViewMaxLevels; level++) {
-      const capacity = 2 ** level;
-      const slots = currentSlots.slice(0, capacity);
-      while (slots.length < capacity) slots.push(null);
-
-      const filled = slots.filter(Boolean).length;
-      groups.push({ level, slots, filled, capacity });
-
-      if (level === slotViewMaxLevels) break;
-      const hasChildrenAhead = slots.some((slot) => !!(slot?.leftChild || slot?.rightChild));
-      if (!hasChildrenAhead) break;
-
-      const nextSlots: Array<MatrixNode | null> = [];
-      for (const slot of slots) {
-        if (!slot) {
-          nextSlots.push(null, null);
-          continue;
+      const nextNodes: MatrixNode[] = [];
+      for (const parent of currentLevelNodes) {
+        if (parent.leftChild) {
+          const left = nodeMap.get(parent.leftChild);
+          if (left) nextNodes.push(left);
         }
-        nextSlots.push(slot.leftChild ? (nodeMap.get(slot.leftChild) || null) : null);
-        nextSlots.push(slot.rightChild ? (nodeMap.get(slot.rightChild) || null) : null);
+        if (parent.rightChild) {
+          const right = nodeMap.get(parent.rightChild);
+          if (right) nextNodes.push(right);
+        }
       }
-      currentSlots = nextSlots;
+
+      if (nextNodes.length === 0) break;
+
+      const capacity = 2 ** level;
+      groups.push({
+        level,
+        nodes: nextNodes,
+        filled: nextNodes.length,
+        capacity
+      });
+
+      currentLevelNodes = nextNodes;
     }
 
     return groups;
   }, [userNode, matrix, matrixViewMaxLevels]);
+  const visibleDownline = useMemo(
+    () => downline.slice(0, downlineVisibleCount),
+    [downline, downlineVisibleCount]
+  );
+  const handleLoadMoreLevelNodes = (level: number) => {
+    setLevelVisibleCounts((prev) => ({
+      ...prev,
+      [level]: (prev[level] || TREE_CHUNK_SIZE) + TREE_CHUNK_SIZE
+    }));
+  };
 
   if (!user) return null;
 
@@ -322,29 +336,54 @@ export default function Matrix() {
                 <>
                   <div className="mb-8">
                     <p className="text-center text-white/60 mb-3">Your ID</p>
-                    <TreeNode node={userNode} onNodeClick={setSelectedNode} />
+                    <TreeNode node={userNode} displayName={getDisplayName(userNode.userId, userNode.username)} onNodeClick={setSelectedNode} />
                   </div>
 
                   <div className="w-full space-y-8">
                     {levelGroups.map((group) => (
                       <div key={group.level} className="space-y-3">
+                        {(() => {
+                          const visibleCount = levelVisibleCounts[group.level] || TREE_CHUNK_SIZE;
+                          const visibleNodes = group.nodes.slice(0, visibleCount);
+                          const remaining = Math.max(0, group.nodes.length - visibleNodes.length);
+                          const loadCount = Math.min(TREE_CHUNK_SIZE, remaining);
+                          return (
+                            <>
                         <div className="flex items-center justify-between border-b border-white/10 pb-2">
                           <p className="text-white/70 font-medium">Level {group.level}</p>
                           <Badge variant="outline" className="border-[#118bdd] text-[#118bdd]">
                             {group.filled}/{group.capacity} filled
                           </Badge>
                         </div>
+                        {remaining > 0 && (
+                          <p className="text-xs text-amber-300/90">Showing first {visibleNodes.length} nodes for performance.</p>
+                        )}
                         <div className="overflow-x-auto">
                           <div className="flex items-start justify-center gap-5 min-w-max px-2">
-                            {group.slots.map((node, idx) => (
+                            {visibleNodes.map((node, idx) => (
                               <TreeNode
-                                key={node ? `${node.userId}_${group.level}_${idx}` : `empty_${group.level}_${idx}`}
+                                key={`${node.userId}_${group.level}_${idx}`}
                                 node={node}
+                                displayName={getDisplayName(node.userId, node.username)}
                                 onNodeClick={setSelectedNode}
                               />
                             ))}
                           </div>
                         </div>
+                        {remaining > 0 && (
+                          <div className="text-center">
+                            <Button
+                              variant="outline"
+                              className="border-[#118bdd]/40 text-[#8fcfff] hover:bg-[#118bdd]/10"
+                              onClick={() => handleLoadMoreLevelNodes(group.level)}
+                            >
+                              Show more {loadCount} user{loadCount === 1 ? '' : 's'}
+                            </Button>
+                          </div>
+                        )}
+                            </>
+                          );
+                        })()}
                       </div>
                     ))}
                     {downline.length === 0 && (
@@ -385,8 +424,8 @@ export default function Matrix() {
                   </tr>
                 </thead>
                 <tbody>
-                  {downline.map((member) => {
-                    const memberUser = Database.getUserByUserId(member.userId);
+                  {visibleDownline.map((member) => {
+                    const memberUser = usersByUserId.get(member.userId);
                     const relativeLevel = Math.max(1, member.level - (userNode?.level || 0));
                     return (
                       <tr key={member.userId} className="border-b border-white/5 hover:bg-white/5">
@@ -433,6 +472,23 @@ export default function Matrix() {
                   No downline members yet
                 </div>
               )}
+              {downline.length > visibleDownline.length && (
+                <div className="py-4 text-center">
+                  {(() => {
+                    const remaining = Math.max(0, downline.length - visibleDownline.length);
+                    const loadCount = Math.min(DOWNLINE_CHUNK_SIZE, remaining);
+                    return (
+                  <Button
+                    variant="outline"
+                    className="border-[#118bdd]/40 text-[#8fcfff] hover:bg-[#118bdd]/10"
+                    onClick={() => setDownlineVisibleCount((prev) => Math.min(prev + DOWNLINE_CHUNK_SIZE, downline.length))}
+                  >
+                    Show more {loadCount} user{loadCount === 1 ? '' : 's'}
+                  </Button>
+                    );
+                  })()}
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -453,7 +509,7 @@ export default function Matrix() {
             </CardHeader>
             <CardContent>
               {(() => {
-                const memberUser = Database.getUserByUserId(selectedNode.userId);
+                const memberUser = usersByUserId.get(selectedNode.userId);
                 const memberWallet = Database.getWallet(memberUser?.id || '');
                 const memberStats = Database.getTeamCounts(selectedNode.userId);
                 return (

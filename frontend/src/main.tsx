@@ -111,80 +111,15 @@ async function bootstrap() {
     return;
   }
 
-  // Render immediately so users don't see a blank screen while strict hydration runs.
-  root.render(
-    <StrictMode>
-      <div style={{
-        background: '#0b1220',
-        color: '#e5e7eb',
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontFamily: 'system-ui, sans-serif',
-        gap: '14px',
-        padding: '24px',
-        textAlign: 'center'
-      }}>
-        <h1 style={{ margin: 0, fontSize: '22px' }}>Loading ReferNex...</h1>
-        <p style={{ margin: 0, opacity: 0.85, maxWidth: 640, lineHeight: 1.5 }}>
-          Syncing latest server data. Please wait.
-        </p>
-        <p style={{ margin: 0, opacity: 0.55, maxWidth: 640, lineHeight: 1.5, fontSize: '13px' }}>
-          If the server was inactive, it may take up to a minute to start. Please be patient.
-        </p>
-      </div>
-    </StrictMode>,
-  );
-
-  // Hydrate from backend first, then seed defaults only if still needed.
   const strictSync = import.meta.env.PROD;
-  try {
-    await Database.hydrateFromServer({ strict: strictSync });
+
+  // Never seed demo/admin data in production; it causes stale local snapshots and 409 conflicts.
+  if (!strictSync) {
     Database.initializeDemoData();
-  } catch (e) {
-    if (strictSync) {
-      root.render(
-        <StrictMode>
-          <div style={{
-            background: '#0b1220',
-            color: '#e5e7eb',
-            minHeight: '100vh',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontFamily: 'system-ui, sans-serif',
-            gap: '16px',
-            padding: '24px',
-            textAlign: 'center'
-          }}>
-            <h1 style={{ color: '#ef4444', margin: 0 }}>Data Sync Error</h1>
-            <p style={{ maxWidth: 720, lineHeight: 1.6, margin: 0 }}>
-              Could not load the latest server state. To protect live data integrity,
-              this session is blocked from using stale local data.
-            </p>
-            <button
-              onClick={() => window.location.reload()}
-              style={{
-                padding: '10px 20px',
-                background: '#2563eb',
-                border: 'none',
-                borderRadius: '8px',
-                color: '#fff',
-                cursor: 'pointer'
-              }}
-            >
-              Retry
-            </button>
-          </div>
-        </StrictMode>,
-      );
-      return;
-    }
-    console.warn('Hydration failed, proceeding with local state');
   }
+
+  // Render app immediately; hydration now runs in background so login is not blocked on a full snapshot fetch.
+  Database.startBackgroundSyncLoop();
 
   root.render(
     <StrictMode>
@@ -198,6 +133,14 @@ async function bootstrap() {
       </ThemeProvider>
     </StrictMode>,
   )
+
+  void Database.hydrateFromServer(
+    strictSync
+      ? { strict: true, maxAttempts: 2, timeoutMs: 30000, retryDelayMs: 1200, keys: Database.getStartupRemoteSyncKeys() }
+      : { strict: false, keys: Database.getStartupRemoteSyncKeys() }
+  ).catch((e) => {
+    console.warn('Hydration failed:', e);
+  });
 }
 
 void bootstrap()

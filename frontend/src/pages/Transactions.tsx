@@ -56,6 +56,15 @@ export default function Transactions() {
     }
   };
 
+  const isReleaseUnlockEntry = (tx: Transaction) => {
+    const desc = (tx.description || '').toLowerCase();
+    return tx.type === 'receive_help'
+      && (
+        desc.startsWith('released locked receive help at level')
+        || desc.startsWith('unlocked locked receive help at level')
+      );
+  };
+
   // Pre-build lookup maps for faster transaction processing
   const { nodeMap, userMap } = useMemo(() => {
     const matrix = Database.getMatrix();
@@ -213,6 +222,35 @@ export default function Transactions() {
     const sortedAsc = [...transactions].sort((a, b) => {
       const timeDiff = getTransactionTimestamp(a) - getTransactionTimestamp(b);
       if (timeDiff !== 0) return timeDiff;
+
+      const getLockedFlowPriority = (tx: Transaction): number => {
+        const txDesc = (tx.description || '').toLowerCase();
+        if (
+          tx.type === 'receive_help'
+          && tx.amount > 0
+          && (
+            txDesc.startsWith('locked first-two help at level')
+            || txDesc.startsWith('locked receive help at level')
+          )
+        ) {
+          return 0;
+        }
+        if (
+          (tx.type === 'give_help' && txDesc.includes('from locked income'))
+          || (
+            tx.type === 'receive_help'
+            && tx.amount > 0
+            && txDesc.startsWith('released locked receive help at level')
+          )
+        ) {
+          return 1;
+        }
+        return 2;
+      };
+
+      const priorityDiff = getLockedFlowPriority(a) - getLockedFlowPriority(b);
+      if (priorityDiff !== 0) return priorityDiff;
+
       const indexDiff = (originalIndexById.get(a.id) ?? 0) - (originalIndexById.get(b.id) ?? 0);
       if (indexDiff !== 0) return indexDiff;
       return String(a.id || '').localeCompare(String(b.id || ''));
@@ -259,7 +297,7 @@ export default function Transactions() {
   }, [transactions]);
 
   const filteredTransactions = useMemo(() => {
-    let rows = transactions;
+    let rows = transactions.filter((tx) => !isReleaseUnlockEntry(tx));
 
     if (filterType === 'help') {
       rows = rows.filter((tx) => tx.type === 'give_help' || tx.type === 'receive_help');

@@ -28,9 +28,11 @@ export default function Login() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Initialize demo data on first load
+  // Initialize demo data only in local/dev. Never seed production browser state.
   useEffect(() => {
-    Database.initializeDemoData();
+    if (!import.meta.env.PROD) {
+      Database.initializeDemoData();
+    }
     setMounted(true);
   }, []);
 

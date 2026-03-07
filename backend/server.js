@@ -678,10 +678,11 @@ async function writeStateToCollections(nextState, destructive = false, replaceMi
     const mergedState = {};
     const previousState = stateSnapshotCache?.snapshot?.state || {};
     for (const key of DB_KEYS) {
-      const rawValue = nextState[key];
-      if (typeof rawValue === 'string') {
-        mergedState[key] = rawValue;
+      if (Object.prototype.hasOwnProperty.call(nextState, key) && typeof nextState[key] === 'string') {
+        mergedState[key] = nextState[key];
       } else if (!replaceMissing && typeof previousState[key] === 'string') {
+        mergedState[key] = previousState[key];
+      } else if (typeof previousState[key] === 'string') {
         mergedState[key] = previousState[key];
       }
     }

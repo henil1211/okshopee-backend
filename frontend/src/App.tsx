@@ -2,6 +2,7 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from '@/components/ui/sonner';
 import ThemeToggle from '@/components/ThemeToggle';
+import SyncStatusBadge from '@/components/SyncStatusBadge';
 
 // Pages
 import Landing from '@/pages/Landing';
@@ -31,6 +32,7 @@ function App() {
     <Router>
       <Toaster position="top-right" />
       <ThemeToggle />
+      <SyncStatusBadge />
       <Routes>
         <Route path="/" element={<Landing />} />
         <Route path="/login" element={<Login />} />

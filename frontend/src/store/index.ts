@@ -123,8 +123,45 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   impersonatedUser: null,
 
   login: async (userId: string, password: string) => {
+    if (import.meta.env.PROD) {
+      const backendAuth = await Database.authenticateUserViaBackend(userId, password);
+      if (!backendAuth.success || !backendAuth.user) {
+        return { success: false, message: backendAuth.message };
+      }
+      Database.setCurrentUser(backendAuth.user);
+      set({ user: backendAuth.user, isAuthenticated: true });
+      void Database.hydrateFromServer({
+        strict: true,
+        maxAttempts: 2,
+        timeoutMs: 45000,
+        retryDelayMs: 1500,
+        keys: Database.getStartupRemoteSyncKeys()
+      }).catch((error) => {
+        console.warn('Post-login hydration failed:', error);
+      });
+      return { success: true, message: backendAuth.message };
+    }
+
+    const syncStatusBeforeLogin = Database.getRemoteSyncStatus();
     let user = Database.getUserByUserId(userId);
+    if (!user || syncStatusBeforeLogin.state !== 'synced') {
+      try {
+        await Database.hydrateFromServer({
+          strict: true,
+          maxAttempts: 3,
+          timeoutMs: 45000,
+          retryDelayMs: 1500
+        });
+      } catch {
+        // Retry lookup below. If hydration still fails, return a sync-specific message instead of a false "not found".
+      }
+      user = Database.getUserByUserId(userId);
+    }
     if (!user) {
+      const syncStatus = Database.getRemoteSyncStatus();
+      if (syncStatus.state !== 'synced') {
+        return { success: false, message: 'Server data is still syncing. Please wait a moment and try again.' };
+      }
       return { success: false, message: 'User ID not found' };
     }
     if (user.accountStatus === 'permanent_blocked') {
@@ -195,6 +232,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   register: async (userData: RegisterData) => {
+    const registrationGate = Database.getSensitiveActionSyncGate();
+    if (!registrationGate.allowed) {
+      return { success: false, message: registrationGate.message };
+    }
+
     const { fullName, email, password, transactionPassword, phone, country, sponsorId, pinCode } = userData;
     const normalizedPhone = normalizePhoneNumber(phone);
 
@@ -413,7 +455,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const synced = await Database.forceRemoteSyncNowWithOptions();
     if (!synced) {
       try {
-        await Database.hydrateFromServer({ strict: true });
+        await Database.hydrateFromServer({ strict: true, maxAttempts: 1, timeoutMs: 8000, retryDelayMs: 500 });
       } catch {
         // If hydrate also fails, caller still gets explicit failure.
       }
@@ -528,6 +570,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       otp?: string;
     }
   ) => {
+    const transferGate = Database.getSensitiveActionSyncGate();
+    if (!transferGate.allowed) {
+      return { success: false, message: transferGate.message };
+    }
+
     if (amount <= 0) {
       return { success: false, message: 'Invalid amount' };
     }
@@ -676,6 +723,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
   },
 
   withdraw: async (userId: string, amount: number, walletAddress: string) => {
+    const withdrawalGate = Database.getSensitiveActionSyncGate();
+    if (!withdrawalGate.allowed) {
+      return { success: false, message: withdrawalGate.message };
+    }
+
     const settings = Database.getSettings();
     const wallet = Database.getWallet(userId);
     const user = Database.getUserById(userId);
@@ -1006,10 +1058,19 @@ interface AdminState {
     country: string;
     password: string;
     transactionPassword: string;
+    onProgress?: (progress: {
+      stage: 'creating' | 'finalizing' | 'syncing' | 'completed' | 'failed';
+      processed: number;
+      total: number;
+      created: number;
+      failed: number;
+      message: string;
+    }) => void;
   }) => Promise<{ success: boolean; message: string; createdUserIds?: string[]; failed?: string[] }>;
   getLevelWiseReport: (level?: number, startDate?: string, endDate?: string) => any[];
   reconcileHelpTrackers: () => Promise<{ success: boolean; message: string; report?: any }>;
   activateUsersAndRebuildMatrix: () => Promise<{ success: boolean; message: string; report?: any }>;
+  repairMisroutedSafetyPool: () => Promise<{ success: boolean; message: string; report?: any }>;
   deleteAllIdsFromSystem: () => Promise<{ success: boolean; message: string; report?: any }>;
 }
 
@@ -1290,6 +1351,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   bulkCreateUsersWithoutPin: async (params) => {
+    const bulkActivationGate = Database.getSensitiveActionSyncGate();
+    if (!bulkActivationGate.allowed) {
+      return { success: false, message: bulkActivationGate.message };
+    }
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can create IDs without PIN' };
@@ -1332,9 +1398,18 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const adminFee = 1;
     const deferredTransactions: Transaction[] = [];
     const deferredNotifications: Notification[] = [];
-    const yieldEvery = quantity >= 1000 ? 5 : quantity >= 300 ? 10 : 25;
+    const yieldEvery = quantity >= 500 ? 20 : 10;
+    const progressStep = quantity >= 10 ? 10 : 1;
     const yieldToMainThread = async () => new Promise<void>((resolve) => setTimeout(resolve, 0));
     let sponsorIncomeCredits = 0;
+    params.onProgress?.({
+      stage: 'creating',
+      processed: 0,
+      total: quantity,
+      created: 0,
+      failed: 0,
+      message: `Starting bulk creation (0/${quantity})`
+    });
 
     let remoteSyncResumed = false;
     Database.pauseRemoteSync();
@@ -1457,7 +1532,27 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         if ((i + 1) % yieldEvery === 0) {
           await yieldToMainThread();
         }
+
+        if ((i + 1) % progressStep === 0 || i + 1 === quantity) {
+          params.onProgress?.({
+            stage: 'creating',
+            processed: i + 1,
+            total: quantity,
+            created: createdUserIds.length,
+            failed: failed.length,
+            message: `Creating IDs... (${i + 1}/${quantity})`
+          });
+        }
       }
+
+      params.onProgress?.({
+        stage: 'finalizing',
+        processed: quantity,
+        total: quantity,
+        created: createdUserIds.length,
+        failed: failed.length,
+        message: 'Finalizing batch data...'
+      });
 
       if (deferredTransactions.length > 0) {
         const tx = Database.getTransactions();
@@ -1491,24 +1586,83 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
       if (createdUserIds.length === 0) {
         get().loadAllUsers();
-        get().loadAllTransactions();
+        if (get().allTransactions.length > 0) {
+          get().loadAllTransactions();
+        }
         get().loadStats();
+        params.onProgress?.({
+          stage: 'failed',
+          processed: quantity,
+          total: quantity,
+          created: 0,
+          failed: failed.length,
+          message: 'No IDs were created'
+        });
         return { success: false, message: 'No IDs created', createdUserIds, failed };
       }
 
       // Bulk create must be persisted remotely before reporting success.
       Database.resumeRemoteSync(false);
       remoteSyncResumed = true;
-      const synced = await Database.forceRemoteSyncNowWithOptions();
+      params.onProgress?.({
+        stage: 'syncing',
+        processed: quantity,
+        total: quantity,
+        created: createdUserIds.length,
+        failed: failed.length,
+        message: 'Saving batch to backend...'
+      });
+      const synced = await Database.forceRemoteSyncNowWithOptions({
+        full: false,
+        force: true,
+        timeoutMs: 180_000,
+        maxAttempts: 4,
+        retryDelayMs: 2000
+      });
       if (!synced) {
         try {
-          await Database.hydrateFromServer({ strict: true });
+          await Database.hydrateFromServer({ strict: true, maxAttempts: 3, timeoutMs: 15000, retryDelayMs: 1200 });
+          const missingAfterHydrate = createdUserIds.filter((uid) => !Database.getUserByUserId(uid));
+          if (missingAfterHydrate.length === 0) {
+            get().loadAllUsers();
+            if (get().allTransactions.length > 0) {
+              get().loadAllTransactions();
+            }
+            get().loadStats();
+            const recoveredMessage = failed.length > 0
+              ? `Created ${createdUserIds.length} ID(s), failed ${failed.length}`
+              : `Created ${createdUserIds.length} ID(s) without PIN`;
+            params.onProgress?.({
+              stage: 'completed',
+              processed: quantity,
+              total: quantity,
+              created: createdUserIds.length,
+              failed: failed.length,
+              message: `${recoveredMessage} (saved after retry)`
+            });
+            return {
+              success: true,
+              message: `${recoveredMessage} (saved after retry)`,
+              createdUserIds,
+              failed
+            };
+          }
         } catch {
           // Ignore hydrate failures here; caller still gets a hard failure.
         }
         get().loadAllUsers();
-        get().loadAllTransactions();
+        if (get().allTransactions.length > 0) {
+          get().loadAllTransactions();
+        }
         get().loadStats();
+        params.onProgress?.({
+          stage: 'failed',
+          processed: quantity,
+          total: quantity,
+          created: createdUserIds.length,
+          failed: failed.length + 1,
+          message: 'Backend sync failed for this batch'
+        });
         return {
           success: false,
           message: 'Bulk create could not be saved to backend. No permanent changes were applied.',
@@ -1518,12 +1672,22 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       }
 
       get().loadAllUsers();
-      get().loadAllTransactions();
+      if (get().allTransactions.length > 0) {
+        get().loadAllTransactions();
+      }
       get().loadStats();
 
       const message = failed.length > 0
         ? `Created ${createdUserIds.length} ID(s), failed ${failed.length}`
         : `Created ${createdUserIds.length} ID(s) without PIN`;
+      params.onProgress?.({
+        stage: 'completed',
+        processed: quantity,
+        total: quantity,
+        created: createdUserIds.length,
+        failed: failed.length,
+        message
+      });
 
       return { success: true, message, createdUserIds, failed };
     } finally {
@@ -1545,7 +1709,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     const report = Database.reconcileHelpTrackers();
     get().loadAllUsers();
-    get().loadAllTransactions();
+    if (get().allTransactions.length > 0) {
+      get().loadAllTransactions();
+    }
     get().loadStats();
 
     const message = `Reconciliation complete: scanned ${report.scannedTrackers}, repaired levels ${report.repairedLevels}, repaired queue items ${report.repairedQueueItems}, wallet syncs ${report.walletSyncs}`;
@@ -1558,13 +1724,49 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Only admin can run matrix rebuild' };
     }
 
-    const report = await Database.activateUsersAndRebuildMatrixLogic();
-    get().loadAllUsers();
-    get().loadAllTransactions();
-    get().loadStats();
+    try {
+      const report = await Database.activateUsersAndRebuildMatrixLogic();
+      get().loadAllUsers();
+      if (get().allTransactions.length > 0) {
+        get().loadAllTransactions();
+      }
+      get().loadStats();
 
-    const message = `Rebuild complete: activated users ${report.activatedUsers}, matrix nodes synced ${report.activatedMatrixNodes}, matrix tx rebuilt ${report.removedMatrixTransactions}, replayed members ${report.replayedMembers}, legacy activation backfilled ${report.backfilledActivationUsers}`;
-    return { success: true, message, report };
+      const message = `Rebuild complete: activated users ${report.activatedUsers}, matrix nodes synced ${report.activatedMatrixNodes}, matrix tx rebuilt ${report.removedMatrixTransactions}, replayed members ${report.replayedMembers}, legacy activation backfilled ${report.backfilledActivationUsers}`;
+      return { success: true, message, report };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Matrix rebuild failed'
+      };
+    }
+  },
+
+  repairMisroutedSafetyPool: async () => {
+    const adminUser = Database.getCurrentUser();
+    if (!adminUser?.isAdmin) {
+      return { success: false, message: 'Only admin can run safety-pool repair' };
+    }
+
+    try {
+      const report = await Database.activateUsersAndRebuildMatrixLogic(undefined, {
+        preserveMatrixTransactions: true,
+        activateLegacyInactiveUsers: false
+      });
+      get().loadAllUsers();
+      if (get().allTransactions.length > 0) {
+        get().loadAllTransactions();
+      }
+      get().loadStats();
+
+      const message = `Repair complete: matrix tx rebuilt ${report.removedMatrixTransactions}, safety entries cleaned ${report.removedMatrixSafetyPoolEntries}, replayed members ${report.replayedMembers}`;
+      return { success: true, message, report };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Safety-pool repair failed'
+      };
+    }
   },
 
   deleteAllIdsFromSystem: async () => {
@@ -1577,12 +1779,14 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const synced = await Database.forceRemoteSyncNowWithOptions({ destructive: true });
     if (!synced) {
       try {
-        await Database.hydrateFromServer({ strict: true });
+        await Database.hydrateFromServer({ strict: true, maxAttempts: 1, timeoutMs: 8000, retryDelayMs: 500 });
       } catch {
         // Keep returning a hard failure if backend state can't be refreshed.
       }
       get().loadAllUsers();
-      get().loadAllTransactions();
+      if (get().allTransactions.length > 0) {
+        get().loadAllTransactions();
+      }
       get().loadAllPins();
       get().loadAllPinRequests();
       get().loadPendingPinRequests();
@@ -1595,7 +1799,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     }
 
     get().loadAllUsers();
-    get().loadAllTransactions();
+    if (get().allTransactions.length > 0) {
+      get().loadAllTransactions();
+    }
     get().loadAllPins();
     get().loadAllPinRequests();
     get().loadPendingPinRequests();
