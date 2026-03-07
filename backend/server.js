@@ -416,11 +416,25 @@ async function readObjectState(collectionName) {
   };
 }
 
-async function readStateFromCollections() {
+function normalizeRequestedStateKeys(requestedKeys) {
+  if (!Array.isArray(requestedKeys) || requestedKeys.length === 0) {
+    return [];
+  }
+
+  return requestedKeys.filter(
+    (key) => typeof key === 'string' && Object.prototype.hasOwnProperty.call(STATE_COLLECTIONS, key)
+  );
+}
+
+async function readStateFromCollections(requestedKeys = []) {
   const state = {};
   let latestUpdatedAt = null;
+  const stateEntries =
+    requestedKeys.length > 0
+      ? requestedKeys.map((stateKey) => [stateKey, STATE_COLLECTIONS[stateKey]])
+      : Object.entries(STATE_COLLECTIONS);
   const results = await Promise.all(
-    Object.entries(STATE_COLLECTIONS).map(async ([stateKey, config]) => {
+    stateEntries.map(async ([stateKey, config]) => {
       if (config.kind === 'array') {
         const result = await readArrayState(config.collection, config.idField);
         return { stateKey, found: result.found, value: result.value, updatedAt: result.updatedAt };
@@ -442,10 +456,18 @@ async function readStateFromCollections() {
 }
 
 async function getStateSnapshotCached(options = {}) {
-  if (!options.forceFresh && stateSnapshotCache?.snapshot) {
+  const requestedKeys = normalizeRequestedStateKeys(options.keys);
+  const isFullSnapshot = requestedKeys.length === 0;
+
+  if (isFullSnapshot && !options.forceFresh && stateSnapshotCache?.snapshot) {
     return cloneStateSnapshot(stateSnapshotCache.snapshot);
   }
-  const snapshot = await readStateFromCollections();
+
+  const snapshot = await readStateFromCollections(requestedKeys);
+  if (!isFullSnapshot) {
+    return cloneStateSnapshot(snapshot);
+  }
+
   return setStateSnapshotCache(snapshot);
 }
 
@@ -936,14 +958,15 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/api/state') {
     try {
-      const snapshot = await getStateSnapshotCached();
       const requestedKeys = (url.searchParams.get('keys') || '')
         .split(',')
         .map((key) => key.trim())
         .filter(Boolean);
       if (requestedKeys.length > 0) {
-        sendJson(res, 200, filterStateSnapshot(snapshot, requestedKeys), req);
+        const snapshot = await getStateSnapshotCached({ keys: requestedKeys });
+        sendJson(res, 200, snapshot, req);
       } else {
+        const snapshot = await getStateSnapshotCached();
         sendStateSnapshot(res, snapshot, req);
       }
     } catch (error) {
