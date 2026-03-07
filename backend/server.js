@@ -113,6 +113,7 @@ const DB_KEYS = Object.keys(STATE_COLLECTIONS);
 const SAFETY_POOL_STATE_KEY = 'mlm_safety_pool';
 const SAFETY_POOL_TRANSACTIONS_COLLECTION = 'safety_pool_transactions';
 const STATE_META_COLLECTION = 'state_meta';
+let stateSnapshotCache = null;
 
 const mongoClient = new MongoClient(MONGODB_URI);
 let mongoDb;
@@ -149,6 +150,68 @@ function sendJson(res, statusCode, payload, req) {
   headers['Content-Length'] = Buffer.byteLength(body);
   res.writeHead(statusCode, headers);
   res.end(body);
+}
+
+function cloneStateSnapshot(snapshot) {
+  return {
+    state: { ...(snapshot?.state || {}) },
+    updatedAt: typeof snapshot?.updatedAt === 'string' ? snapshot.updatedAt : null
+  };
+}
+
+async function setStateSnapshotCache(snapshot) {
+  const cloned = cloneStateSnapshot(snapshot);
+  const jsonBody = JSON.stringify(cloned);
+  let gzipBody = null;
+  if (jsonBody.length > 1024) {
+    try {
+      gzipBody = await gzipAsync(Buffer.from(jsonBody));
+    } catch {
+      gzipBody = null;
+    }
+  }
+  stateSnapshotCache = {
+    snapshot: cloned,
+    jsonBody,
+    gzipBody
+  };
+  return cloneStateSnapshot(cloned);
+}
+
+function invalidateStateSnapshotCache() {
+  stateSnapshotCache = null;
+}
+
+function sendStateSnapshot(res, snapshot, req) {
+  const cached = stateSnapshotCache;
+  if (!cached || cached.snapshot.updatedAt !== (snapshot?.updatedAt || null)) {
+    sendJson(res, 200, snapshot, req);
+    return;
+  }
+
+  const headers = {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    'Pragma': 'no-cache',
+    'Expires': '0'
+  };
+
+  const acceptEncoding = (req && req.headers && req.headers['accept-encoding']) || '';
+  const supportsGzip = typeof acceptEncoding === 'string' && acceptEncoding.includes('gzip');
+  if (supportsGzip && cached.gzipBody) {
+    headers['Content-Encoding'] = 'gzip';
+    headers['Content-Length'] = cached.gzipBody.length;
+    res.writeHead(200, headers);
+    res.end(cached.gzipBody);
+    return;
+  }
+
+  headers['Content-Length'] = Buffer.byteLength(cached.jsonBody);
+  res.writeHead(200, headers);
+  res.end(cached.jsonBody);
 }
 
 function safeParseJSON(value) {
@@ -378,6 +441,14 @@ async function readStateFromCollections() {
   return { state, updatedAt: latestUpdatedAt };
 }
 
+async function getStateSnapshotCached(options = {}) {
+  if (!options.forceFresh && stateSnapshotCache?.snapshot) {
+    return cloneStateSnapshot(stateSnapshotCache.snapshot);
+  }
+  const snapshot = await readStateFromCollections();
+  return setStateSnapshotCache(snapshot);
+}
+
 async function writeArrayState(collectionName, idField, rawValue, now, destructive = false) {
   const collection = mongoDb.collection(collectionName);
   const parsed = safeParseJSON(rawValue);
@@ -553,6 +624,22 @@ async function writeStateToCollections(nextState, destructive = false, replaceMi
 
   await Promise.all(tasks);
   await writeStateMetaUpdatedAt(now);
+  const canUpdateCacheFromWrite = replaceMissing || !!stateSnapshotCache?.snapshot;
+  if (canUpdateCacheFromWrite) {
+    const mergedState = {};
+    const previousState = stateSnapshotCache?.snapshot?.state || {};
+    for (const key of DB_KEYS) {
+      const rawValue = nextState[key];
+      if (typeof rawValue === 'string') {
+        mergedState[key] = rawValue;
+      } else if (!replaceMissing && typeof previousState[key] === 'string') {
+        mergedState[key] = previousState[key];
+      }
+    }
+    await setStateSnapshotCache({ state: mergedState, updatedAt: now });
+  } else {
+    invalidateStateSnapshotCache();
+  }
   return { updatedAt: now };
 }
 
@@ -774,8 +861,8 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/api/state') {
     try {
-      const snapshot = await readStateFromCollections();
-      sendJson(res, 200, snapshot, req);
+      const snapshot = await getStateSnapshotCached();
+      sendStateSnapshot(res, snapshot, req);
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to read state' });
     }
@@ -983,6 +1070,7 @@ async function start() {
   await migrateLegacyStateIfNeeded();
   await migrateExistingSingletonArrayCollections();
   await backfillSafetyPoolTransactionsMirror();
+  await getStateSnapshotCached({ forceFresh: true });
 
   server.listen(PORT, HOST, () => {
     console.log(`Backend listening on http://${HOST}:${PORT}`);
