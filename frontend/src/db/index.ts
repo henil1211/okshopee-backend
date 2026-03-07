@@ -4857,6 +4857,9 @@ class Database {
             });
 
             if (!response.ok) {
+              const errText = await response.text().catch(() => '');
+              console.error(`[DB Sync Error] HTTP ${response.status} from backend. Body: ${errText}`);
+
               if (response.status === 409 && attempt < maxAttempts) {
                 console.warn('[DB Sync] Forced sync rejected due to stale snapshot. Re-hydrating from backend and retrying.');
                 anyFailed = true;
