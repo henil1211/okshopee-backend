@@ -651,27 +651,29 @@ async function writeStateToCollections(nextState, destructive = false, replaceMi
     if (typeof rawValue !== 'string') {
       if (!replaceMissing) continue;
       if (config.kind === 'array') {
-        tasks.push(mongoDb.collection(config.collection).deleteMany({}));
+        tasks.push(() => mongoDb.collection(config.collection).deleteMany({}));
       } else {
-        tasks.push(mongoDb.collection(config.collection).deleteOne({ _id: STATE_DOC_ID }));
+        tasks.push(() => mongoDb.collection(config.collection).deleteOne({ _id: STATE_DOC_ID }));
         if (stateKey === SAFETY_POOL_STATE_KEY) {
-          tasks.push(mongoDb.collection(SAFETY_POOL_TRANSACTIONS_COLLECTION).deleteMany({}));
+          tasks.push(() => mongoDb.collection(SAFETY_POOL_TRANSACTIONS_COLLECTION).deleteMany({}));
         }
       }
       continue;
     }
 
     if (config.kind === 'array') {
-      tasks.push(writeArrayState(config.collection, config.idField, rawValue, now, destructive));
+      tasks.push(() => writeArrayState(config.collection, config.idField, rawValue, now, destructive));
     } else {
-      tasks.push(writeObjectState(config.collection, rawValue, now));
+      tasks.push(() => writeObjectState(config.collection, rawValue, now));
       if (stateKey === SAFETY_POOL_STATE_KEY) {
-        tasks.push(writeSafetyPoolTransactionsMirror(rawValue, now));
+        tasks.push(() => writeSafetyPoolTransactionsMirror(rawValue, now));
       }
     }
   }
 
-  await Promise.all(tasks);
+  for (const taskFn of tasks) {
+    await taskFn();
+  }
   await writeStateMetaUpdatedAt(now);
   const canUpdateCacheFromWrite = replaceMissing || !!stateSnapshotCache?.snapshot;
   if (canUpdateCacheFromWrite) {
