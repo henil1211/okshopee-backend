@@ -115,7 +115,12 @@ const SAFETY_POOL_TRANSACTIONS_COLLECTION = 'safety_pool_transactions';
 const STATE_META_COLLECTION = 'state_meta';
 let stateSnapshotCache = null;
 
-const mongoClient = new MongoClient(MONGODB_URI);
+const mongoClient = new MongoClient(MONGODB_URI, {
+  maxPoolSize: 50,
+  serverSelectionTimeoutMS: 60000,
+  socketTimeoutMS: 120000,
+  connectTimeoutMS: 60000
+});
 let mongoDb;
 
 function sendJson(res, statusCode, payload, req) {
@@ -533,10 +538,11 @@ async function writeArrayState(collectionName, idField, rawValue, now, destructi
   });
 
   if (operations.length > 0) {
-    const BATCH_SIZE = 500;
+    const BATCH_SIZE = 100;
     for (let i = 0; i < operations.length; i += BATCH_SIZE) {
       const batch = operations.slice(i, i + BATCH_SIZE);
       await collection.bulkWrite(batch, { ordered: false });
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
@@ -614,10 +620,11 @@ async function writeSafetyPoolTransactionsMirror(rawValue, now) {
   });
 
   if (operations.length > 0) {
-    const BATCH_SIZE = 500;
+    const BATCH_SIZE = 100;
     for (let i = 0; i < operations.length; i += BATCH_SIZE) {
       const batch = operations.slice(i, i + BATCH_SIZE);
       await collection.bulkWrite(batch, { ordered: false });
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
