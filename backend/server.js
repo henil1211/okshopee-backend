@@ -141,6 +141,11 @@ function createBackupFileName(prefix = 'state-backup') {
   return `${prefix}-${stamp}.json`;
 }
 
+function createBackupDirName(prefix = 'state-backup') {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${prefix}-${stamp}`;
+}
+
 function isMongoConnectivityError(error) {
   if (!error || typeof error !== 'object') return false;
 
@@ -783,50 +788,237 @@ async function ensureStateBackupDir() {
   await fs.mkdir(STATE_BACKUP_DIR, { recursive: true });
 }
 
+async function writeArrayStateBackupFile(stateKey, config, dirPath, options = {}) {
+  const collection = mongoDb.collection(config.collection);
+  const fileName = `${stateKey}.json`;
+  const stateFilePath = path.join(dirPath, fileName);
+  const cursor = collection.find({ _id: { $ne: STATE_DOC_ID } }, { batchSize: 250 });
+  const fileHandle = await fs.open(stateFilePath, 'w');
+  let found = false;
+  let latestUpdatedAt = null;
+  let docCount = 0;
+
+  try {
+    await fileHandle.writeFile('[\n', 'utf-8');
+    let first = true;
+
+    if (typeof options.onProgress === 'function') {
+      await options.onProgress({ itemCount: 0 });
+    }
+
+    for await (const doc of cursor) {
+      found = true;
+      docCount += 1;
+
+      const item = cleanupReadDoc(doc);
+      if (config.idField && (item[config.idField] === undefined || item[config.idField] === null || String(item[config.idField]).length === 0)) {
+        item[config.idField] = String(doc._id);
+      }
+      if (typeof doc.__syncUpdatedAt === 'string' && (!latestUpdatedAt || doc.__syncUpdatedAt > latestUpdatedAt)) {
+        latestUpdatedAt = doc.__syncUpdatedAt;
+      }
+
+      const prefix = first ? '  ' : ',\n  ';
+      await fileHandle.writeFile(prefix, 'utf-8');
+      await fileHandle.writeFile(JSON.stringify(item), 'utf-8');
+      first = false;
+
+      if (typeof options.onProgress === 'function' && docCount % 250 === 0) {
+        await options.onProgress({ itemCount: docCount });
+      }
+    }
+
+    if (found) {
+      await fileHandle.writeFile('\n]\n', 'utf-8');
+      if (typeof options.onProgress === 'function') {
+        await options.onProgress({ itemCount: docCount });
+      }
+      return {
+        found: true,
+        updatedAt: latestUpdatedAt,
+        fileName,
+        filePath: stateFilePath,
+        itemCount: docCount
+      };
+    }
+  } finally {
+    await cursor.close().catch(() => {});
+    await fileHandle.close().catch(() => {});
+  }
+
+  const legacyDoc = await collection.findOne({ _id: STATE_DOC_ID }, { projection: { value: 1, updatedAt: 1 } });
+  if (legacyDoc && Array.isArray(legacyDoc.value)) {
+    await fs.writeFile(stateFilePath, JSON.stringify(legacyDoc.value, null, 2), 'utf-8');
+    if (typeof options.onProgress === 'function') {
+      await options.onProgress({ itemCount: legacyDoc.value.length });
+    }
+    return {
+      found: true,
+      updatedAt: typeof legacyDoc.updatedAt === 'string' ? legacyDoc.updatedAt : null,
+      fileName,
+      filePath: stateFilePath,
+      itemCount: legacyDoc.value.length
+    };
+  }
+
+  await fs.rm(stateFilePath, { force: true }).catch(() => {});
+  return { found: false, updatedAt: null, fileName, filePath: stateFilePath, itemCount: 0 };
+}
+
+async function writeObjectStateBackupFile(stateKey, config, dirPath) {
+  const result = await readObjectState(config.collection);
+  const fileName = `${stateKey}.json`;
+  const stateFilePath = path.join(dirPath, fileName);
+
+  if (!result.found) {
+    return { found: false, updatedAt: null, fileName, filePath: stateFilePath, itemCount: 0 };
+  }
+
+  await fs.writeFile(stateFilePath, JSON.stringify(result.value, null, 2), 'utf-8');
+  return {
+    found: true,
+    updatedAt: result.updatedAt,
+    fileName,
+    filePath: stateFilePath,
+    itemCount: result.value && typeof result.value === 'object' ? Object.keys(result.value).length : 1
+  };
+}
+
 async function createStateBackup(options = {}) {
   await ensureStateBackupDir();
-  const snapshot = await readStateFromCollections();
   const now = new Date().toISOString();
-  const fileName = createBackupFileName(options.prefix || 'state-backup');
-  const filePath = path.join(STATE_BACKUP_DIR, fileName);
-  const payload = {
-    formatVersion: 1,
+  const dirName = createBackupDirName(options.prefix || 'state-backup');
+  const dirPath = path.join(STATE_BACKUP_DIR, dirName);
+  const manifestPath = path.join(dirPath, 'manifest.json');
+  const requestedKeys = normalizeRequestedStateKeys(options.keys);
+  const stateEntries =
+    requestedKeys.length > 0
+      ? requestedKeys.map((stateKey) => [stateKey, STATE_COLLECTIONS[stateKey]])
+      : Object.entries(STATE_COLLECTIONS);
+
+  await fs.mkdir(dirPath, { recursive: true });
+
+  let latestUpdatedAt = null;
+  const keys = [];
+  const files = [];
+  const total = stateEntries.length;
+  let processed = 0;
+
+  for (const [stateKey, config] of stateEntries) {
+    if (typeof options.onProgress === 'function') {
+      await options.onProgress({
+        phase: 'snapshotting',
+        stage: 'collection_started',
+        processed,
+        total,
+        stateKey,
+        collection: config.collection,
+        itemCount: 0
+      });
+    }
+
+    const result =
+      config.kind === 'array'
+        ? await writeArrayStateBackupFile(stateKey, config, dirPath, {
+            onProgress:
+              typeof options.onProgress === 'function'
+                ? async ({ itemCount = 0 } = {}) => {
+                    await options.onProgress({
+                      phase: 'snapshotting',
+                      stage: 'collection_streaming',
+                      processed,
+                      total,
+                      stateKey,
+                      collection: config.collection,
+                      itemCount
+                    });
+                  }
+                : null
+          })
+        : await writeObjectStateBackupFile(stateKey, config, dirPath);
+
+    processed += 1;
+
+    if (typeof options.onProgress === 'function') {
+      await options.onProgress({
+        phase: 'snapshotting',
+        stage: 'collection_completed',
+        processed,
+        total,
+        stateKey,
+        collection: config.collection,
+        itemCount: result.itemCount || 0
+      });
+    }
+
+    if (!result.found) {
+      continue;
+    }
+
+    keys.push(stateKey);
+    files.push({
+      stateKey,
+      collection: config.collection,
+      fileName: result.fileName,
+      updatedAt: result.updatedAt || null,
+      itemCount: result.itemCount || 0
+    });
+    if (result.updatedAt && (!latestUpdatedAt || result.updatedAt > latestUpdatedAt)) {
+      latestUpdatedAt = result.updatedAt;
+    }
+  }
+
+  const manifest = {
+    formatVersion: 2,
     createdAt: now,
     source: options.source || 'manual',
     reason: options.reason || null,
-    updatedAt: snapshot.updatedAt || null,
-    state: snapshot.state || {}
+    updatedAt: latestUpdatedAt,
+    keys,
+    files
   };
 
-  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8');
 
   return {
-    fileName,
-    filePath,
+    fileName: dirName,
+    filePath: dirPath,
     createdAt: now,
-    updatedAt: snapshot.updatedAt || null,
-    keys: Object.keys(snapshot.state || {})
+    updatedAt: latestUpdatedAt,
+    keys
   };
 }
 
 async function listStateBackups(limit = 20) {
   await ensureStateBackupDir();
   const entries = await fs.readdir(STATE_BACKUP_DIR, { withFileTypes: true });
-  const files = entries
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.json'))
+  const directories = entries
+    .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort((a, b) => b.localeCompare(a))
     .slice(0, Math.max(1, Math.min(100, Number(limit) || 20)));
 
   const items = [];
-  for (const fileName of files) {
+  for (const fileName of directories) {
     const filePath = path.join(STATE_BACKUP_DIR, fileName);
+    const manifestPath = path.join(filePath, 'manifest.json');
     const stat = await fs.stat(filePath);
+    let manifest = null;
+
+    try {
+      manifest = JSON.parse(await fs.readFile(manifestPath, 'utf-8'));
+    } catch {
+      manifest = null;
+    }
+
     items.push({
       fileName,
       filePath,
       size: stat.size,
-      modifiedAt: stat.mtime.toISOString()
+      modifiedAt: stat.mtime.toISOString(),
+      createdAt: typeof manifest?.createdAt === 'string' ? manifest.createdAt : null,
+      updatedAt: typeof manifest?.updatedAt === 'string' ? manifest.updatedAt : null,
+      keys: Array.isArray(manifest?.keys) ? manifest.keys.filter((key) => typeof key === 'string') : []
     });
   }
 
@@ -837,6 +1029,11 @@ function createDefaultStateBackupJob() {
   return {
     status: 'idle',
     phase: 'idle',
+    processed: 0,
+    total: 0,
+    stateKey: null,
+    collection: null,
+    itemCount: 0,
     backup: null,
     error: null,
     startedAt: null,
@@ -893,20 +1090,64 @@ async function triggerStateBackupJob(options = {}) {
     return activeStateBackupPromise;
   }
 
+  const requestedKeys = normalizeRequestedStateKeys(options.keys);
+  const total = requestedKeys.length > 0 ? requestedKeys.length : Object.keys(STATE_COLLECTIONS).length;
+
   activeStateBackupPromise = (async () => {
     try {
       await writeStateBackupJob({
         status: 'running',
         phase: 'snapshotting',
+        processed: 0,
+        total,
+        stateKey: null,
+        collection: null,
+        itemCount: 0,
         backup: null,
         error: null
       }, { reset: true });
 
-      const backup = await createStateBackup(options);
+      const backup = await createStateBackup({
+        ...options,
+        onProgress:
+          typeof options.onProgress === 'function'
+            ? async (progress) => {
+                await options.onProgress(progress);
+                await writeStateBackupJob({
+                  status: 'running',
+                  phase: typeof progress?.phase === 'string' ? progress.phase : 'snapshotting',
+                  processed: Number.isFinite(Number(progress?.processed)) ? Number(progress.processed) : 0,
+                  total: Number.isFinite(Number(progress?.total)) ? Number(progress.total) : total,
+                  stateKey: typeof progress?.stateKey === 'string' ? progress.stateKey : null,
+                  collection: typeof progress?.collection === 'string' ? progress.collection : null,
+                  itemCount: Number.isFinite(Number(progress?.itemCount)) ? Number(progress.itemCount) : 0,
+                  backup: null,
+                  error: null
+                });
+              }
+            : async (progress) => {
+                await writeStateBackupJob({
+                  status: 'running',
+                  phase: typeof progress?.phase === 'string' ? progress.phase : 'snapshotting',
+                  processed: Number.isFinite(Number(progress?.processed)) ? Number(progress.processed) : 0,
+                  total: Number.isFinite(Number(progress?.total)) ? Number(progress.total) : total,
+                  stateKey: typeof progress?.stateKey === 'string' ? progress.stateKey : null,
+                  collection: typeof progress?.collection === 'string' ? progress.collection : null,
+                  itemCount: Number.isFinite(Number(progress?.itemCount)) ? Number(progress.itemCount) : 0,
+                  backup: null,
+                  error: null
+                });
+              }
+      });
 
       await writeStateBackupJob({
         status: 'completed',
         phase: 'completed',
+        processed: total,
+        total,
+        stateKey: null,
+        collection: null,
+        itemCount: 0,
         backup,
         error: null
       });
@@ -916,6 +1157,8 @@ async function triggerStateBackupJob(options = {}) {
       await writeStateBackupJob({
         status: 'failed',
         phase: 'failed',
+        stateKey: null,
+        collection: null,
         backup: null,
         error: getErrorMessage(error, 'Backup failed')
       }).catch(() => {});
