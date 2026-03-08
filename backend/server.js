@@ -779,12 +779,22 @@ async function triggerMatrixRebuildJob(options = {}) {
     return activeMatrixRebuildPromise;
   }
 
+  const rebuildStateKeys = [
+    'mlm_users',
+    'mlm_wallets',
+    'mlm_transactions',
+    'mlm_matrix',
+    'mlm_safety_pool',
+    'mlm_help_trackers',
+    'mlm_matrix_pending_contributions'
+  ];
+
   activeMatrixRebuildPromise = (async () => {
     try {
       return await runMatrixRebuildJob({
         options,
         batchSize: 25,
-        readSnapshot: async () => readStateFromCollections(),
+        readSnapshot: async () => readStateFromCollections(rebuildStateKeys),
         persistState: async (runtime, keys) => {
           const serialized = runtime.serialize(keys);
           await writeStateToCollections(serialized, true, false);
