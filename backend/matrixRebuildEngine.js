@@ -2156,17 +2156,57 @@ export async function runMatrixRebuildJob(config = {}) {
   let total = 0;
 
   try {
-    const snapshot = await readSnapshot();
-    const runtime = new MatrixRebuildRuntime(snapshot?.state || snapshot || {});
     const existingJob = normalizeJobState(await readJob());
     const canResume = existingJob.status === 'running'
       && existingJob.phase === 'replaying'
       && sameJobOptions(existingJob.options, normalizedOptions);
 
+    if (!canResume) {
+      await writeJob({
+        status: 'running',
+        phase: 'preparing_snapshot',
+        processed: 0,
+        total: 4,
+        batchSize: normalizedBatchSize,
+        options: normalizedOptions,
+        report,
+        error: null,
+        finishedAt: null
+      });
+    }
+
+    const snapshot = await readSnapshot();
+    const runtime = new MatrixRebuildRuntime(snapshot?.state || snapshot || {});
+
     if (canResume) {
       report = normalizeMatrixRebuildReport(existingJob.report);
     } else {
+      await writeJob({
+        status: 'running',
+        phase: 'preparing_rebuild',
+        processed: 1,
+        total: 4,
+        batchSize: normalizedBatchSize,
+        options: normalizedOptions,
+        report,
+        error: null,
+        finishedAt: null
+      });
+
       report = runtime.prepareMatrixRebuildState(normalizedOptions);
+
+      await writeJob({
+        status: 'running',
+        phase: 'preparing_persist',
+        processed: 2,
+        total: 4,
+        batchSize: normalizedBatchSize,
+        options: normalizedOptions,
+        report,
+        error: null,
+        finishedAt: null
+      });
+
       await persistState(runtime, [
         STATE_KEYS.USERS,
         STATE_KEYS.WALLETS,
@@ -2240,7 +2280,30 @@ export async function runMatrixRebuildJob(config = {}) {
       }
     }
 
+    await writeJob({
+      status: 'running',
+      phase: 'finalizing',
+      processed: total,
+      total,
+      batchSize: normalizedBatchSize,
+      options: normalizedOptions,
+      report,
+      error: null
+    });
+
     report = runtime.finalizeMatrixRebuildState(report, normalizedOptions);
+
+    await writeJob({
+      status: 'running',
+      phase: 'finalizing_persist',
+      processed: total,
+      total,
+      batchSize: normalizedBatchSize,
+      options: normalizedOptions,
+      report,
+      error: null
+    });
+
     await persistState(runtime, [
       STATE_KEYS.USERS,
       STATE_KEYS.WALLETS,
