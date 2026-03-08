@@ -302,6 +302,7 @@ export default function Admin() {
   const [deleteAllIdsAdminId, setDeleteAllIdsAdminId] = useState('');
   const [isDeletingAllIds, setIsDeletingAllIds] = useState(false);
   const adminBootstrapUserRef = useRef<string | null>(null);
+  const zeroStateRecoveryRef = useRef(false);
   const deleteAllIdsArmed =
     deleteAllIdsPhrase.trim().toUpperCase() === DELETE_ALL_IDS_PHRASE
     && deleteAllIdsAdminId.trim() === (user?.userId || '');
@@ -309,14 +310,41 @@ export default function Admin() {
   const isReportsTabActive = activeMainTab === 'reports';
   const isSupportTabActive = activeMainTab === 'support';
 
+  const reloadAdminDataFromBrowserState = () => {
+    loadStats();
+    loadSettings();
+    loadAllUsers();
+    loadAllPins();
+    loadAllPinRequests();
+    loadPendingPinRequests();
+    loadPayments();
+    loadPaymentMethods();
+  };
+
+  const hydrateCriticalAdminState = async () => {
+    await Database.hydrateFromServerBatches(Database.getStartupRemoteSyncBatches(), {
+      strict: true,
+      maxAttempts: 3,
+      timeoutMs: 60000,
+      retryDelayMs: 1500,
+      continueOnError: true,
+      requireAnySuccess: true,
+      onBatchError: (keys, error) => {
+        console.warn('Critical admin hydrate failed for keys:', keys, error);
+      }
+    });
+  };
+
   useEffect(() => {
     if (!isAuthenticated) {
       adminBootstrapUserRef.current = null;
+      zeroStateRecoveryRef.current = false;
       navigate('/login');
       return;
     }
     if (!user?.isAdmin) {
       adminBootstrapUserRef.current = null;
+      zeroStateRecoveryRef.current = false;
       navigate('/dashboard');
       return;
     }
@@ -346,14 +374,19 @@ export default function Admin() {
       }
 
       if (cancelled) return;
-      loadStats();
-      loadSettings();
-      loadAllUsers();
-      loadAllPins();
-      loadAllPinRequests();
-      loadPendingPinRequests();
-      loadPayments();
-      loadPaymentMethods();
+      reloadAdminDataFromBrowserState();
+
+      if (import.meta.env.PROD && Database.getUsers().length === 0 && !zeroStateRecoveryRef.current) {
+        zeroStateRecoveryRef.current = true;
+        try {
+          await hydrateCriticalAdminState();
+          if (!cancelled) {
+            reloadAdminDataFromBrowserState();
+          }
+        } catch (error) {
+          console.warn('Admin zero-state recovery failed:', error);
+        }
+      }
     };
 
     void initializeAdminData();
@@ -366,6 +399,18 @@ export default function Admin() {
       cancelled = true;
     };
   }, [isAuthenticated, user, navigate, loadStats, loadSettings, loadAllUsers, loadAllPins, loadAllPinRequests, loadPendingPinRequests, loadPayments, loadPaymentMethods]);
+
+  useEffect(() => {
+    if (!import.meta.env.PROD) {
+      return;
+    }
+
+    return Database.subscribeRemoteSyncStatus((status) => {
+      if (status.state === 'synced' && user?.isAdmin && Database.getUsers().length > 0) {
+        reloadAdminDataFromBrowserState();
+      }
+    });
+  }, [user, loadStats, loadSettings, loadAllUsers, loadAllPins, loadAllPinRequests, loadPendingPinRequests, loadPaymentMethods]);
 
   useEffect(() => {
     if (!isReportsTabActive || reportsDataLoaded) return;
@@ -1389,14 +1434,27 @@ export default function Admin() {
               </Button>
               <Button
                 variant="outline"
-                onClick={() => {
-                  loadStats();
-                  loadAllUsers();
+                onClick={async () => {
+                  if (import.meta.env.PROD) {
+                    try {
+                      await Database.hydrateFromServerBatches(Database.getAdminRemoteSyncBatches(), {
+                        strict: true,
+                        maxAttempts: 2,
+                        timeoutMs: 120000,
+                        retryDelayMs: 1500,
+                        continueOnError: true,
+                        requireAnySuccess: true,
+                        onBatchError: (keys, error) => {
+                          console.warn('Manual admin refresh hydrate failed for keys:', keys, error);
+                        }
+                      });
+                    } catch (error) {
+                      console.warn('Manual admin refresh failed to hydrate backend state:', error);
+                    }
+                  }
+
+                  reloadAdminDataFromBrowserState();
                   loadAllTransactions();
-                  loadAllPins();
-                  loadAllPinRequests();
-                  loadPendingPinRequests();
-                  loadPayments();
                   loadSupportTickets();
                   toast.success('Data refreshed');
                 }}
