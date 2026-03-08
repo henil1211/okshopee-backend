@@ -117,8 +117,11 @@ const SAFETY_POOL_TRANSACTIONS_COLLECTION = 'safety_pool_transactions';
 const STATE_META_COLLECTION = 'state_meta';
 const MATRIX_REBUILD_JOB_COLLECTION = 'matrix_rebuild_jobs';
 const MATRIX_REBUILD_JOB_ID = 'singleton';
+const STATE_BACKUP_JOB_COLLECTION = 'state_backup_jobs';
+const STATE_BACKUP_JOB_ID = 'singleton';
 let stateSnapshotCache = null;
 let activeMatrixRebuildPromise = null;
+let activeStateBackupPromise = null;
 
 const mongoClient = new MongoClient(MONGODB_URI, {
   maxPoolSize: 5,
@@ -830,6 +833,101 @@ async function listStateBackups(limit = 20) {
   return items;
 }
 
+function createDefaultStateBackupJob() {
+  return {
+    status: 'idle',
+    phase: 'idle',
+    backup: null,
+    error: null,
+    startedAt: null,
+    finishedAt: null,
+    updatedAt: null
+  };
+}
+
+async function readStateBackupJob() {
+  const doc = await mongoDb.collection(STATE_BACKUP_JOB_COLLECTION).findOne({ _id: STATE_BACKUP_JOB_ID });
+  if (!doc) {
+    return createDefaultStateBackupJob();
+  }
+  const out = { ...doc };
+  delete out._id;
+  delete out.createdAt;
+  return {
+    ...createDefaultStateBackupJob(),
+    ...out
+  };
+}
+
+async function writeStateBackupJob(patch, options = {}) {
+  const now = new Date().toISOString();
+  const base = options.reset ? createDefaultStateBackupJob() : await readStateBackupJob();
+  const next = {
+    ...base,
+    ...(patch && typeof patch === 'object' ? patch : {})
+  };
+
+  next.updatedAt = now;
+  if (next.status === 'running') {
+    next.startedAt = next.startedAt || now;
+    next.finishedAt = null;
+    next.error = null;
+  } else if (next.status === 'completed' || next.status === 'failed' || next.status === 'idle') {
+    next.finishedAt = next.finishedAt || now;
+  }
+
+  await mongoDb.collection(STATE_BACKUP_JOB_COLLECTION).updateOne(
+    { _id: STATE_BACKUP_JOB_ID },
+    {
+      $set: next,
+      $setOnInsert: { createdAt: now }
+    },
+    { upsert: true }
+  );
+
+  return next;
+}
+
+async function triggerStateBackupJob(options = {}) {
+  if (activeStateBackupPromise) {
+    return activeStateBackupPromise;
+  }
+
+  activeStateBackupPromise = (async () => {
+    try {
+      await writeStateBackupJob({
+        status: 'running',
+        phase: 'snapshotting',
+        backup: null,
+        error: null
+      }, { reset: true });
+
+      const backup = await createStateBackup(options);
+
+      await writeStateBackupJob({
+        status: 'completed',
+        phase: 'completed',
+        backup,
+        error: null
+      });
+
+      return backup;
+    } catch (error) {
+      await writeStateBackupJob({
+        status: 'failed',
+        phase: 'failed',
+        backup: null,
+        error: getErrorMessage(error, 'Backup failed')
+      }).catch(() => {});
+      throw error;
+    } finally {
+      activeStateBackupPromise = null;
+    }
+  })();
+
+  return activeStateBackupPromise;
+}
+
 function isMatrixRebuildRunning(job) {
   return !!job && job.status === 'running' && job.phase !== 'completed' && job.phase !== 'failed';
 }
@@ -1304,16 +1402,45 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/backups/status') {
+    try {
+      const job = await readStateBackupJob();
+      sendJson(res, 200, { ok: true, job, running: !!activeStateBackupPromise || job.status === 'running' });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: getErrorMessage(error, 'Failed to read backup status') });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/backups/create') {
     try {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
-      const backup = await createStateBackup({
+
+      if (activeStateBackupPromise) {
+        const job = await readStateBackupJob();
+        sendJson(res, 202, { ok: true, started: false, running: true, job });
+        return;
+      }
+
+      const backupOptions = {
         prefix: typeof parsed?.prefix === 'string' && parsed.prefix.trim() ? parsed.prefix.trim() : 'state-backup',
         source: typeof parsed?.source === 'string' && parsed.source.trim() ? parsed.source.trim() : 'manual',
         reason: typeof parsed?.reason === 'string' && parsed.reason.trim() ? parsed.reason.trim() : null
+      };
+
+      const job = await writeStateBackupJob({
+        status: 'running',
+        phase: 'queued',
+        backup: null,
+        error: null
+      }, { reset: true });
+
+      void triggerStateBackupJob(backupOptions).catch((error) => {
+        console.error(`[state-backup] ${getErrorMessage(error, 'Backup failed')}`);
       });
-      sendJson(res, 200, { ok: true, backup });
+
+      sendJson(res, 202, { ok: true, started: true, running: true, job });
     } catch (error) {
       const status = error instanceof SyntaxError ? 400 : 500;
       sendJson(res, status, { ok: false, error: getErrorMessage(error, 'Failed to create backup') });

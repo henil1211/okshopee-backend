@@ -98,17 +98,42 @@ async function createServerStateBackup(params?: {
   if (!response.ok || payload?.ok === false) {
     throw new Error(normalizeRemoteRebuildError(payload, `Failed to create backup (HTTP ${response.status})`));
   }
-  const backup = payload?.backup as Record<string, unknown> | undefined;
-  if (!backup || typeof backup.fileName !== 'string' || typeof backup.filePath !== 'string' || typeof backup.createdAt !== 'string') {
-    throw new Error('Backend returned invalid backup metadata');
+
+  const deadline = Date.now() + (30 * 60 * 1000);
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const statusResponse = await fetch(`${apiBase}/api/backups/status?t=${Date.now()}`, {
+      method: 'GET'
+    });
+    const statusPayload = await statusResponse.json().catch(() => ({} as Record<string, unknown>));
+    if (!statusResponse.ok || statusPayload?.ok === false) {
+      throw new Error(normalizeRemoteRebuildError(statusPayload, `Failed to read backup status (HTTP ${statusResponse.status})`));
+    }
+
+    const job = statusPayload?.job as Record<string, unknown> | undefined;
+    if (!job || typeof job !== 'object') continue;
+    if (job.status === 'failed') {
+      throw new Error(typeof job.error === 'string' && job.error ? job.error : 'Backup failed');
+    }
+    if (job.status !== 'completed') {
+      continue;
+    }
+
+    const backup = job.backup as Record<string, unknown> | undefined;
+    if (!backup || typeof backup.fileName !== 'string' || typeof backup.filePath !== 'string' || typeof backup.createdAt !== 'string') {
+      throw new Error('Backend returned invalid backup metadata');
+    }
+
+    return {
+      fileName: backup.fileName,
+      filePath: backup.filePath,
+      createdAt: backup.createdAt,
+      updatedAt: typeof backup.updatedAt === 'string' ? backup.updatedAt : null,
+      keys: Array.isArray(backup.keys) ? backup.keys.filter((key): key is string => typeof key === 'string') : []
+    };
   }
-  return {
-    fileName: backup.fileName,
-    filePath: backup.filePath,
-    createdAt: backup.createdAt,
-    updatedAt: typeof backup.updatedAt === 'string' ? backup.updatedAt : null,
-    keys: Array.isArray(backup.keys) ? backup.keys.filter((key): key is string => typeof key === 'string') : []
-  };
+
+  throw new Error('Backup is still running after 30 minutes. Check backend status and backup folder.');
 }
 
 async function dispatchSystemEmail(params: {
