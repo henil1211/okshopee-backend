@@ -320,6 +320,20 @@ export default function Admin() {
     loadPaymentMethods();
   };
 
+  const hydrateDeferredAdminState = async () => {
+    await Database.hydrateFromServerBatches(Database.getAdminDeferredRemoteSyncBatches(), {
+      strict: true,
+      maxAttempts: 1,
+      timeoutMs: 30000,
+      retryDelayMs: 1000,
+      continueOnError: true,
+      requireAnySuccess: false,
+      onBatchError: (keys, error) => {
+        console.warn('Deferred admin hydrate failed for keys:', keys, error);
+      }
+    });
+  };
+
   useEffect(() => {
     if (!isAuthenticated) {
       adminBootstrapUserRef.current = null;
@@ -340,10 +354,10 @@ export default function Admin() {
     const initializeAdminData = async () => {
       if (import.meta.env.PROD) {
         try {
-          await Database.hydrateFromServerBatches(Database.getAdminRemoteSyncBatches(), {
+          await Database.hydrateFromServerBatches(Database.getAdminCriticalRemoteSyncBatches(), {
             strict: true,
             maxAttempts: 2,
-            timeoutMs: 120000,
+            timeoutMs: 45000,
             retryDelayMs: 1500,
             continueOnError: true,
             requireAnySuccess: true,
@@ -358,6 +372,19 @@ export default function Admin() {
 
       if (cancelled) return;
       reloadAdminDataFromBrowserState();
+
+      if (import.meta.env.PROD) {
+        void hydrateDeferredAdminState().then(() => {
+          if (!cancelled) {
+            loadAllTransactions();
+            loadAllPins();
+            loadAllPinRequests();
+            loadPendingPinRequests();
+            loadPayments();
+            loadPaymentMethods();
+          }
+        });
+      }
     };
 
     void initializeAdminData();
@@ -1396,10 +1423,10 @@ export default function Admin() {
                 onClick={async () => {
                   if (import.meta.env.PROD) {
                     try {
-                      await Database.hydrateFromServerBatches(Database.getAdminRemoteSyncBatches(), {
+                      await Database.hydrateFromServerBatches(Database.getAdminCriticalRemoteSyncBatches(), {
                         strict: true,
                         maxAttempts: 2,
-                        timeoutMs: 120000,
+                        timeoutMs: 45000,
                         retryDelayMs: 1500,
                         continueOnError: true,
                         requireAnySuccess: true,
@@ -1413,8 +1440,19 @@ export default function Admin() {
                   }
 
                   reloadAdminDataFromBrowserState();
-                  loadAllTransactions();
                   loadSupportTickets();
+                  if (import.meta.env.PROD) {
+                    void hydrateDeferredAdminState().then(() => {
+                      loadAllTransactions();
+                      loadAllPins();
+                      loadAllPinRequests();
+                      loadPendingPinRequests();
+                      loadPayments();
+                      loadPaymentMethods();
+                    });
+                  } else {
+                    loadAllTransactions();
+                  }
                   toast.success('Data refreshed');
                 }}
                 className="border-white/20 text-white hover:bg-white/10"

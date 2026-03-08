@@ -5044,6 +5044,25 @@ class Database {
     return this.STARTUP_REMOTE_SYNC_BATCHES.map((batch) => [...batch]);
   }
 
+  static getAdminCriticalRemoteSyncBatches(): string[][] {
+    return [
+      [DB_KEYS.USERS],
+      [DB_KEYS.WALLETS],
+      [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL]
+    ];
+  }
+
+  static getAdminDeferredRemoteSyncBatches(): string[][] {
+    return this.ADMIN_REMOTE_SYNC_BATCHES
+      .map((batch) => [...batch])
+      .filter((batch) => {
+        const joined = batch.join(',');
+        return joined !== DB_KEYS.USERS
+          && joined !== DB_KEYS.WALLETS
+          && joined !== `${DB_KEYS.SETTINGS},${DB_KEYS.SAFETY_POOL}`;
+      });
+  }
+
   static getAdminRemoteSyncBatches(): string[][] {
     return this.ADMIN_REMOTE_SYNC_BATCHES.map((batch) => [...batch]);
   }
