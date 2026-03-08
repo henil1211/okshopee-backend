@@ -1131,7 +1131,6 @@ class Database {
         if (hasServerState) {
           // Clear caches before batch update
           this.invalidateAllCaches();
-          this.volatileSyncState.clear();
           this.pauseRemoteSync();
           this.remoteSyncApplyingServerState = true;
           this.remoteSyncPending = false;
