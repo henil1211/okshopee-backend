@@ -154,7 +154,7 @@ export default function Admin() {
     stats, settings, allUsers, allTransactions, safetyPoolAmount, allPins, allPinRequests, pendingPinRequests,
     loadStats, loadSettings, loadAllUsers, loadAllTransactions, loadAllPins, loadAllPinRequests, loadPendingPinRequests,
     updateSettings, addFundsToUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
-    suspendPin, unsuspendPin, blockUser, unblockUser, bulkCreateUsersWithoutPin, reconcileHelpTrackers, activateUsersAndRebuildMatrix,
+    suspendPin, unsuspendPin, blockUser, unblockUser, bulkCreateUsersWithoutPin, createServerBackup, reconcileHelpTrackers, activateUsersAndRebuildMatrix,
     repairMisroutedSafetyPool, deleteAllIdsFromSystem, getLevelWiseReport
   } = useAdminStore();
 
@@ -295,6 +295,7 @@ export default function Admin() {
   const [isReconciling, setIsReconciling] = useState(false);
   const [lastReconcileReport, setLastReconcileReport] = useState<any | null>(null);
   const [isRebuildingMatrix, setIsRebuildingMatrix] = useState(false);
+  const [isCreatingBackup, setIsCreatingBackup] = useState(false);
   const [lastRebuildReport, setLastRebuildReport] = useState<any | null>(null);
   const [showDeleteAllIdsDialog, setShowDeleteAllIdsDialog] = useState(false);
   const [deleteAllIdsPhrase, setDeleteAllIdsPhrase] = useState('');
@@ -333,7 +334,7 @@ export default function Admin() {
             await Database.hydrateFromServer({
               strict: true,
               maxAttempts: 2,
-              timeoutMs: 45000,
+              timeoutMs: 120000,
               retryDelayMs: 1500,
               keys
             });
@@ -638,6 +639,19 @@ export default function Admin() {
     if (result.success) {
       setLastReconcileReport(result.report || null);
       toast.success(result.message);
+    } else {
+      toast.error(result.message);
+    }
+  };
+
+  const handleCreateServerBackup = async () => {
+    setIsCreatingBackup(true);
+    const result = await createServerBackup();
+    setIsCreatingBackup(false);
+
+    if (result.success) {
+      const path = typeof result.backup?.filePath === 'string' ? result.backup.filePath : '';
+      toast.success(path ? `${result.message} at ${path}` : result.message);
     } else {
       toast.error(result.message);
     }
@@ -1356,6 +1370,15 @@ export default function Admin() {
             </div>
 
             <div className="flex w-full sm:w-auto items-center justify-end gap-2 sm:gap-3 flex-wrap sm:flex-nowrap">
+              <Button
+                variant="outline"
+                onClick={handleCreateServerBackup}
+                disabled={isCreatingBackup}
+                className="border-emerald-400/30 text-emerald-200 hover:bg-emerald-500/10"
+              >
+                {isCreatingBackup ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+                <span className="hidden sm:inline">Create Backup</span>
+              </Button>
               <Button
                 variant="outline"
                 onClick={exportData}

@@ -8,6 +8,109 @@ import { isValidPhoneNumber, normalizePhoneNumber } from '@/utils/helpers';
 
 type SystemEmailPurpose = 'otp' | 'welcome' | 'system';
 
+function getBackendApiBase(): string {
+  const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
+  const configured = typeof env.VITE_BACKEND_URL === 'string' ? env.VITE_BACKEND_URL.trim() : '';
+  if (configured) {
+    return configured.replace(/\/+$/, '');
+  }
+  if (typeof window !== 'undefined') {
+    return window.location.origin.replace(/\/+$/, '');
+  }
+  return 'http://127.0.0.1:4000';
+}
+
+function normalizeRemoteRebuildError(payload: Record<string, unknown>, fallback: string): string {
+  return typeof payload?.error === 'string'
+    ? payload.error
+    : typeof payload?.message === 'string'
+      ? payload.message
+      : fallback;
+}
+
+async function runBackendMatrixRebuild(options?: {
+  preserveMatrixTransactions?: boolean;
+  activateLegacyInactiveUsers?: boolean;
+}): Promise<any> {
+  const apiBase = getBackendApiBase();
+  const startResponse = await fetch(`${apiBase}/api/rebuild-matrix/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ options: options || {} })
+  });
+  const startPayload = await startResponse.json().catch(() => ({} as Record<string, unknown>));
+  if (!startResponse.ok || startPayload?.ok === false) {
+    throw new Error(normalizeRemoteRebuildError(startPayload, `Failed to start matrix rebuild (HTTP ${startResponse.status})`));
+  }
+
+  const deadline = Date.now() + (60 * 60 * 1000);
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const statusResponse = await fetch(`${apiBase}/api/rebuild-matrix/status?t=${Date.now()}`, {
+      method: 'GET'
+    });
+    const statusPayload = await statusResponse.json().catch(() => ({} as Record<string, unknown>));
+    if (!statusResponse.ok || statusPayload?.ok === false) {
+      throw new Error(normalizeRemoteRebuildError(statusPayload, `Failed to read matrix rebuild status (HTTP ${statusResponse.status})`));
+    }
+
+    const job = statusPayload?.job as Record<string, any> | undefined;
+    if (!job || typeof job !== 'object') continue;
+    if (job.status === 'completed') {
+      return job.report || null;
+    }
+    if (job.status === 'failed') {
+      throw new Error(typeof job.error === 'string' && job.error ? job.error : 'Matrix rebuild failed');
+    }
+  }
+
+  throw new Error('Matrix rebuild is still running after 60 minutes. Check backend status and retry.');
+}
+
+async function hydrateAdminStateFromBackend(): Promise<void> {
+  for (const keys of Database.getAdminRemoteSyncBatches()) {
+    await Database.hydrateFromServer({
+      strict: true,
+      maxAttempts: 2,
+      timeoutMs: 120000,
+      retryDelayMs: 2000,
+      keys
+    });
+  }
+}
+
+async function createServerStateBackup(params?: {
+  prefix?: string;
+  source?: string;
+  reason?: string;
+}): Promise<{ fileName: string; filePath: string; createdAt: string; updatedAt: string | null; keys: string[] }> {
+  const apiBase = getBackendApiBase();
+  const response = await fetch(`${apiBase}/api/backups/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prefix: params?.prefix || 'manual-backup',
+      source: params?.source || 'admin',
+      reason: params?.reason || 'manual_backup'
+    })
+  });
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(normalizeRemoteRebuildError(payload, `Failed to create backup (HTTP ${response.status})`));
+  }
+  const backup = payload?.backup as Record<string, unknown> | undefined;
+  if (!backup || typeof backup.fileName !== 'string' || typeof backup.filePath !== 'string' || typeof backup.createdAt !== 'string') {
+    throw new Error('Backend returned invalid backup metadata');
+  }
+  return {
+    fileName: backup.fileName,
+    filePath: backup.filePath,
+    createdAt: backup.createdAt,
+    updatedAt: typeof backup.updatedAt === 'string' ? backup.updatedAt : null,
+    keys: Array.isArray(backup.keys) ? backup.keys.filter((key): key is string => typeof key === 'string') : []
+  };
+}
+
 async function dispatchSystemEmail(params: {
   to: string;
   subject: string;
@@ -1068,6 +1171,7 @@ interface AdminState {
     }) => void;
   }) => Promise<{ success: boolean; message: string; createdUserIds?: string[]; failed?: string[] }>;
   getLevelWiseReport: (level?: number, startDate?: string, endDate?: string) => any[];
+  createServerBackup: () => Promise<{ success: boolean; message: string; backup?: any }>;
   reconcileHelpTrackers: () => Promise<{ success: boolean; message: string; report?: any }>;
   activateUsersAndRebuildMatrix: () => Promise<{ success: boolean; message: string; report?: any }>;
   repairMisroutedSafetyPool: () => Promise<{ success: boolean; message: string; report?: any }>;
@@ -1701,6 +1805,31 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     return Database.getLevelWiseReport(level, startDate, endDate);
   },
 
+  createServerBackup: async () => {
+    const adminUser = Database.getCurrentUser();
+    if (!adminUser?.isAdmin) {
+      return { success: false, message: 'Only admin can create backups' };
+    }
+
+    try {
+      const backup = await createServerStateBackup({
+        prefix: 'manual-backup',
+        source: 'admin',
+        reason: 'manual_backup'
+      });
+      return {
+        success: true,
+        message: `Backup created: ${backup.fileName}`,
+        backup
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Backup creation failed'
+      };
+    }
+  },
+
   reconcileHelpTrackers: async () => {
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
@@ -1725,7 +1854,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     }
 
     try {
-      const report = await Database.activateUsersAndRebuildMatrixLogic();
+      const report = await runBackendMatrixRebuild();
+      await hydrateAdminStateFromBackend();
       get().loadAllUsers();
       if (get().allTransactions.length > 0) {
         get().loadAllTransactions();
@@ -1749,10 +1879,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     }
 
     try {
-      const report = await Database.activateUsersAndRebuildMatrixLogic(undefined, {
+      const report = await runBackendMatrixRebuild({
         preserveMatrixTransactions: true,
         activateLegacyInactiveUsers: false
       });
+      await hydrateAdminStateFromBackend();
       get().loadAllUsers();
       if (get().allTransactions.length > 0) {
         get().loadAllTransactions();

@@ -56,6 +56,7 @@ const SMTP_PASS = process.env.SMTP_PASS || '';
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || '';
 const STATE_DOC_ID = 'singleton';
 const LEGACY_STATE_FILE = path.join(__dirname, 'data', 'app-state.json');
+const STATE_BACKUP_DIR = path.join(__dirname, 'data', 'backups');
 let smtpTransporter;
 
 function extractDbNameFromMongoUri(uri) {
@@ -130,6 +131,11 @@ let mongoDb;
 
 function getErrorMessage(error, fallback = 'Unknown error') {
   return error instanceof Error ? error.message : fallback;
+}
+
+function createBackupFileName(prefix = 'state-backup') {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${prefix}-${stamp}.json`;
 }
 
 function isMongoConnectivityError(error) {
@@ -770,6 +776,60 @@ async function writeMatrixRebuildJob(patch, options = {}) {
   return next;
 }
 
+async function ensureStateBackupDir() {
+  await fs.mkdir(STATE_BACKUP_DIR, { recursive: true });
+}
+
+async function createStateBackup(options = {}) {
+  await ensureStateBackupDir();
+  const snapshot = await readStateFromCollections();
+  const now = new Date().toISOString();
+  const fileName = createBackupFileName(options.prefix || 'state-backup');
+  const filePath = path.join(STATE_BACKUP_DIR, fileName);
+  const payload = {
+    formatVersion: 1,
+    createdAt: now,
+    source: options.source || 'manual',
+    reason: options.reason || null,
+    updatedAt: snapshot.updatedAt || null,
+    state: snapshot.state || {}
+  };
+
+  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+
+  return {
+    fileName,
+    filePath,
+    createdAt: now,
+    updatedAt: snapshot.updatedAt || null,
+    keys: Object.keys(snapshot.state || {})
+  };
+}
+
+async function listStateBackups(limit = 20) {
+  await ensureStateBackupDir();
+  const entries = await fs.readdir(STATE_BACKUP_DIR, { withFileTypes: true });
+  const files = entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.json'))
+    .map((entry) => entry.name)
+    .sort((a, b) => b.localeCompare(a))
+    .slice(0, Math.max(1, Math.min(100, Number(limit) || 20)));
+
+  const items = [];
+  for (const fileName of files) {
+    const filePath = path.join(STATE_BACKUP_DIR, fileName);
+    const stat = await fs.stat(filePath);
+    items.push({
+      fileName,
+      filePath,
+      size: stat.size,
+      modifiedAt: stat.mtime.toISOString()
+    });
+  }
+
+  return items;
+}
+
 function isMatrixRebuildRunning(job) {
   return !!job && job.status === 'running' && job.phase !== 'completed' && job.phase !== 'failed';
 }
@@ -1233,6 +1293,34 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/backups') {
+    try {
+      const limit = Number(url.searchParams.get('limit') || 20);
+      const backups = await listStateBackups(limit);
+      sendJson(res, 200, { ok: true, backups });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: getErrorMessage(error, 'Failed to list backups') });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/backups/create') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const backup = await createStateBackup({
+        prefix: typeof parsed?.prefix === 'string' && parsed.prefix.trim() ? parsed.prefix.trim() : 'state-backup',
+        source: typeof parsed?.source === 'string' && parsed.source.trim() ? parsed.source.trim() : 'manual',
+        reason: typeof parsed?.reason === 'string' && parsed.reason.trim() ? parsed.reason.trim() : null
+      });
+      sendJson(res, 200, { ok: true, backup });
+    } catch (error) {
+      const status = error instanceof SyntaxError ? 400 : 500;
+      sendJson(res, status, { ok: false, error: getErrorMessage(error, 'Failed to create backup') });
+    }
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/rebuild-matrix-job') {
     try {
       const job = await readMatrixRebuildJob();
@@ -1279,6 +1367,7 @@ const server = createServer(async (req, res) => {
         parsed?.options && typeof parsed.options === 'object' && !Array.isArray(parsed.options)
           ? parsed.options
           : {};
+      const skipBackup = parsed?.skipBackup === true;
 
       if (activeMatrixRebuildPromise) {
         const job = await readMatrixRebuildJob();
@@ -1293,6 +1382,15 @@ const server = createServer(async (req, res) => {
         });
         sendJson(res, 202, { ok: true, started: true, resumed: true, running: true, job: existingJob });
         return;
+      }
+
+      let backup = null;
+      if (!skipBackup) {
+        backup = await createStateBackup({
+          prefix: 'pre-rebuild-backup',
+          source: 'automatic',
+          reason: 'pre_rebuild_matrix'
+        });
       }
 
       const job = await writeMatrixRebuildJob({
@@ -1314,7 +1412,7 @@ const server = createServer(async (req, res) => {
         console.error(`[matrix-rebuild] ${getErrorMessage(error, 'Matrix rebuild failed')}`);
       });
 
-      sendJson(res, 202, { ok: true, started: true, running: true, job });
+      sendJson(res, 202, { ok: true, started: true, running: true, job, backup });
     } catch (error) {
       const status = error instanceof SyntaxError ? 400 : 500;
       sendJson(res, status, { ok: false, error: getErrorMessage(error, 'Failed to start matrix rebuild') });
