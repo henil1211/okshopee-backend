@@ -328,20 +328,20 @@ export default function Admin() {
     adminBootstrapUserRef.current = user.userId;
     const initializeAdminData = async () => {
       if (import.meta.env.PROD) {
-        for (const keys of Database.getAdminRemoteSyncBatches()) {
-          if (cancelled) return;
-          try {
-            await Database.hydrateFromServer({
-              strict: true,
-              maxAttempts: 2,
-              timeoutMs: 120000,
-              retryDelayMs: 1500,
-              keys
-            });
-          } catch (error) {
-            console.warn('Admin bootstrap hydrate failed for keys:', keys, error);
-            break;
-          }
+        try {
+          await Database.hydrateFromServerBatches(Database.getAdminRemoteSyncBatches(), {
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 120000,
+            retryDelayMs: 1500,
+            continueOnError: true,
+            requireAnySuccess: true,
+            onBatchError: (keys, error) => {
+              console.warn('Admin bootstrap hydrate failed for keys:', keys, error);
+            }
+          });
+        } catch (error) {
+          console.warn('Admin bootstrap could not hydrate any backend batches:', error);
         }
       }
 

@@ -214,6 +214,23 @@ interface MatrixLogicRebuildReport {
   reconciliation: HelpTrackerReconciliationReport;
 }
 
+interface RemoteMatrixRebuildJob {
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  phase: 'idle' | 'preparing' | 'replaying' | 'finalizing' | 'completed' | 'failed';
+  processed: number;
+  total: number;
+  batchSize: number;
+  options: {
+    preserveMatrixTransactions: boolean;
+    activateLegacyInactiveUsers: boolean;
+  } | null;
+  report: MatrixLogicRebuildReport | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface LockedIncomeBreakdownItem {
   level: number;
   lockedAmount: number;
@@ -307,17 +324,18 @@ class Database {
   private static readonly REMOTE_SYNC_KEYS = new Set<string>(
     Object.values(DB_KEYS).filter((key) => key !== DB_KEYS.CURRENT_USER && key !== DB_KEYS.SESSION)
   );
-  private static readonly STARTUP_REMOTE_SYNC_KEYS = [
-    DB_KEYS.USERS,
-    DB_KEYS.WALLETS,
-    DB_KEYS.SAFETY_POOL,
-    DB_KEYS.SETTINGS
+  private static readonly STARTUP_REMOTE_SYNC_BATCHES = [
+    [DB_KEYS.USERS],
+    [DB_KEYS.WALLETS],
+    [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL]
   ] as const;
   private static readonly ADMIN_REMOTE_SYNC_BATCHES = [
-    [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.SAFETY_POOL, DB_KEYS.SETTINGS],
+    [DB_KEYS.USERS],
+    [DB_KEYS.WALLETS],
+    [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL],
     [DB_KEYS.TRANSACTIONS],
     [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS, DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.PAYMENT_METHODS, DB_KEYS.PAYMENTS],
-    [DB_KEYS.MATRIX, DB_KEYS.GRACE_PERIODS, DB_KEYS.RE_ENTRIES]
+    [DB_KEYS.MATRIX, DB_KEYS.HELP_TRACKERS, DB_KEYS.MATRIX_PENDING_CONTRIBUTIONS, DB_KEYS.GRACE_PERIODS, DB_KEYS.RE_ENTRIES]
   ] as const;
   private static remoteSyncTimer: ReturnType<typeof setTimeout> | null = null;
   private static remoteSyncInFlight = false;
@@ -3573,6 +3591,360 @@ class Database {
     };
   }
 
+  private static createEmptyHelpTrackerReconciliationReport(): HelpTrackerReconciliationReport {
+    return {
+      scannedTrackers: 0,
+      createdTrackers: 0,
+      removedTrackers: 0,
+      repairedLevels: 0,
+      repairedQueueItems: 0,
+      walletSyncs: 0,
+      issues: []
+    };
+  }
+
+  private static createEmptyMatrixRebuildReport(): MatrixLogicRebuildReport {
+    return {
+      activatedUsers: 0,
+      activatedMatrixNodes: 0,
+      repositionedMatrixNodes: 0,
+      directCountsUpdated: 0,
+      removedMatrixTransactions: 0,
+      removedMatrixSafetyPoolEntries: 0,
+      trackersReset: 0,
+      replayedMembers: 0,
+      backfilledActivationUsers: 0,
+      backfilledDirectIncomeEntries: 0,
+      backfilledAdminFeeEntries: 0,
+      reconciliation: this.createEmptyHelpTrackerReconciliationReport()
+    };
+  }
+
+  private static normalizeMatrixRebuildReport(value?: Partial<MatrixLogicRebuildReport> | null): MatrixLogicRebuildReport {
+    const empty = this.createEmptyMatrixRebuildReport();
+    if (!value || typeof value !== 'object') {
+      return empty;
+    }
+
+    return {
+      ...empty,
+      ...value,
+      reconciliation: {
+        ...empty.reconciliation,
+        ...(value.reconciliation || {})
+      }
+    };
+  }
+
+  private static createDefaultRemoteMatrixRebuildJob(): RemoteMatrixRebuildJob {
+    return {
+      status: 'idle',
+      phase: 'idle',
+      processed: 0,
+      total: 0,
+      batchSize: 0,
+      options: null,
+      report: null,
+      error: null,
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: null
+    };
+  }
+
+  private static getReplayUsersForMatrixRebuild(): User[] {
+    const nodeMap = new Map(this.getMatrix().map((node) => [node.userId, node]));
+    return [...this.getUsers()]
+      .filter((user) => !user.isAdmin && !!nodeMap.get(user.userId)?.parentId)
+      .sort((a, b) => this.compareUsersByJoinOrder(a, b));
+  }
+
+  private static getRemoteMatrixRebuildJobEndpoint(): string {
+    return `${this.REMOTE_SYNC_BASE_URL}/api/rebuild-matrix-job`;
+  }
+
+  private static async readRemoteMatrixRebuildJob(timeoutMs: number = 15000): Promise<RemoteMatrixRebuildJob> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return this.createDefaultRemoteMatrixRebuildJob();
+    }
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+    try {
+      const response = await fetch(this.getRemoteMatrixRebuildJobEndpoint(), {
+        method: 'GET',
+        signal: controller?.signal
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to load rebuild job state (HTTP ${response.status})`);
+      }
+      const payload = await response.json() as { job?: Partial<RemoteMatrixRebuildJob> };
+      const empty = this.createDefaultRemoteMatrixRebuildJob();
+      const job = payload?.job && typeof payload.job === 'object' ? payload.job : {};
+      return {
+        ...empty,
+        ...job,
+        report: this.normalizeMatrixRebuildReport(job.report)
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private static async writeRemoteMatrixRebuildJob(
+    job: Partial<RemoteMatrixRebuildJob>,
+    options?: { reset?: boolean; timeoutMs?: number }
+  ): Promise<RemoteMatrixRebuildJob> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return {
+        ...this.createDefaultRemoteMatrixRebuildJob(),
+        ...job,
+        report: this.normalizeMatrixRebuildReport(job.report)
+      };
+    }
+
+    const timeoutMs = Math.max(1500, Number(options?.timeoutMs ?? 15000));
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+    try {
+      const response = await fetch(this.getRemoteMatrixRebuildJobEndpoint(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job, reset: options?.reset === true }),
+        signal: controller?.signal
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to persist rebuild job state (HTTP ${response.status})`);
+      }
+      const payload = await response.json() as { job?: Partial<RemoteMatrixRebuildJob> };
+      const empty = this.createDefaultRemoteMatrixRebuildJob();
+      const nextJob = payload?.job && typeof payload.job === 'object' ? payload.job : {};
+      return {
+        ...empty,
+        ...nextJob,
+        report: this.normalizeMatrixRebuildReport(nextJob.report)
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private static async prepareMatrixRebuildState(options?: {
+    preserveMatrixTransactions?: boolean;
+    activateLegacyInactiveUsers?: boolean;
+  }): Promise<MatrixLogicRebuildReport> {
+    return await this.runWithRemoteSyncPaused(async () => {
+      return this.runWithLocalStateTransaction(async () => {
+        const activateLegacyInactiveUsers = options?.activateLegacyInactiveUsers !== false;
+        const users = this.getUsers();
+        const matrix = this.getMatrix();
+
+        if (users.length === 0) {
+          throw new Error('Matrix rebuild aborted: no users were loaded from the backend. Refresh admin data and retry.');
+        }
+
+        const report = this.createEmptyMatrixRebuildReport();
+        const directCountsBySponsor = new Map<string, number>();
+        for (const member of users) {
+          if (!member.sponsorId) continue;
+          directCountsBySponsor.set(member.sponsorId, (directCountsBySponsor.get(member.sponsorId) || 0) + 1);
+        }
+
+        const normalizedUsers = users.map((user) => {
+          const next: User = { ...user };
+          const computedDirect = directCountsBySponsor.get(user.userId) || 0;
+          if ((next.directCount || 0) !== computedDirect) {
+            next.directCount = computedDirect;
+            report.directCountsUpdated += 1;
+          }
+
+          const shouldAutoActivate = activateLegacyInactiveUsers
+            && !next.isAdmin
+            && next.accountStatus !== 'temp_blocked'
+            && next.accountStatus !== 'permanent_blocked';
+          if (shouldAutoActivate) {
+            const wasInactive = !next.isActive || next.accountStatus !== 'active';
+            if (wasInactive) {
+              report.activatedUsers += 1;
+            }
+            next.isActive = true;
+            next.accountStatus = 'active';
+            if (!next.activatedAt) {
+              next.activatedAt = new Date().toISOString();
+            }
+          }
+
+          return next;
+        });
+
+        const rebuiltTopology = this.rebuildMatrixTopology(normalizedUsers);
+        report.repositionedMatrixNodes = rebuiltTopology.repositionedMatrixNodes;
+        const normalizedUsersWithTopology = rebuiltTopology.users;
+        this.saveUsers(normalizedUsersWithTopology);
+
+        const backfill = this.backfillMissingActivationEffects(normalizedUsersWithTopology);
+        report.backfilledActivationUsers = backfill.users;
+        report.backfilledDirectIncomeEntries = backfill.sponsorCredits;
+        report.backfilledAdminFeeEntries = backfill.adminFees;
+
+        const userByUserId = new Map(normalizedUsersWithTopology.map((u) => [u.userId, u]));
+        const previousNodeByUserId = new Map(matrix.map((node) => [node.userId, node]));
+        const normalizedMatrix = rebuiltTopology.matrix.map((node) => {
+          const owner = userByUserId.get(node.userId);
+          if (!owner) return node;
+          const shouldNodeBeActive = owner.isActive && owner.accountStatus === 'active';
+          if (node.isActive !== shouldNodeBeActive) {
+            return { ...node, isActive: shouldNodeBeActive };
+          }
+          return node;
+        });
+        for (const node of normalizedMatrix) {
+          const previous = previousNodeByUserId.get(node.userId);
+          if (previous && previous.isActive !== node.isActive) {
+            report.activatedMatrixNodes += 1;
+          }
+        }
+        this.saveMatrix(normalizedMatrix);
+
+        const transactions = this.getTransactions();
+        const keptTransactions: Transaction[] = [];
+        for (const tx of transactions) {
+          if (!this.isMatrixTransactionForRebuild(tx)) {
+            keptTransactions.push(tx);
+            continue;
+          }
+          report.removedMatrixTransactions += 1;
+        }
+        this.saveTransactions(keptTransactions);
+
+        const wallets = this.getWallets();
+        for (const wallet of wallets) {
+          const computed = this.computeIncomeLedgerFromTransactions(wallet.userId);
+          wallet.incomeWallet = computed.incomeWallet;
+          wallet.matrixWallet = computed.matrixWallet;
+          wallet.totalReceived = computed.totalReceived;
+          wallet.totalGiven = computed.totalGiven;
+          wallet.giveHelpLocked = 0;
+          wallet.lockedIncomeWallet = 0;
+        }
+        this.saveWallets(wallets);
+
+        const pool = this.getSafetyPool();
+        const keptPoolTx = pool.transactions.filter((tx) => !this.isMatrixSafetyPoolReasonForRebuild(tx.reason));
+        report.removedMatrixSafetyPoolEntries = pool.transactions.length - keptPoolTx.length;
+        const rebuiltPoolTotal = keptPoolTx.reduce((sum, tx) => sum + tx.amount, 0);
+        this.saveSafetyPool({
+          totalAmount: rebuiltPoolTotal,
+          transactions: keptPoolTx
+        });
+
+        const resetTrackers: UserHelpTracker[] = normalizedUsersWithTopology.map((u) => ({
+          userId: u.id,
+          levels: {},
+          lockedQueue: []
+        }));
+        this.saveHelpTrackers(resetTrackers);
+        this.savePendingMatrixContributions([]);
+        report.trackersReset = resetTrackers.length;
+
+        return report;
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: true,
+          force: true,
+          timeoutMs: 300000,
+          maxAttempts: 2,
+          retryDelayMs: 5000
+        }
+      });
+    });
+  }
+
+  private static async replayMatrixRebuildBatch(
+    replayUserIds: string[],
+    report: MatrixLogicRebuildReport,
+    options?: { preserveMatrixTransactions?: boolean }
+  ): Promise<MatrixLogicRebuildReport> {
+    const preserveMatrixTransactions = !!options?.preserveMatrixTransactions;
+    const nextReport = this.normalizeMatrixRebuildReport(report);
+
+    return await this.runWithRemoteSyncPaused(async () => {
+      return this.runWithLocalStateTransaction(async () => {
+        const useBulkRebuildMode = !preserveMatrixTransactions;
+        if (useBulkRebuildMode) {
+          this._bulkRebuildMode = true;
+        }
+        this._bulkSafetyPoolTotal = 0;
+
+        try {
+          const userByUserId = new Map(this.getUsers().map((user) => [user.userId, user]));
+          const nodeMap = new Map(this.getMatrix().map((node) => [node.userId, node]));
+
+          for (const replayUserId of replayUserIds) {
+            const replayUser = userByUserId.get(replayUserId);
+            const replayNode = nodeMap.get(replayUserId);
+            if (!replayUser || !replayNode?.parentId) continue;
+            this.processMatrixHelpForNewMember(replayUser.userId, replayUser.id);
+            nextReport.replayedMembers += 1;
+          }
+
+          if (useBulkRebuildMode && this._bulkSafetyPoolTotal > 0) {
+            const currentPool = this.getSafetyPool();
+            currentPool.totalAmount += this._bulkSafetyPoolTotal;
+            this.saveSafetyPool(currentPool);
+          }
+
+          return nextReport;
+        } finally {
+          this._bulkSafetyPoolTotal = 0;
+          this._bulkRebuildMode = false;
+        }
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 300000,
+          maxAttempts: 2,
+          retryDelayMs: 5000
+        }
+      });
+    });
+  }
+
+  private static async finalizeMatrixRebuildState(
+    report: MatrixLogicRebuildReport,
+    options?: { preserveMatrixTransactions?: boolean }
+  ): Promise<MatrixLogicRebuildReport> {
+    const preserveMatrixTransactions = !!options?.preserveMatrixTransactions;
+    const nextReport = this.normalizeMatrixRebuildReport(report);
+
+    return await this.runWithRemoteSyncPaused(async () => {
+      return this.runWithLocalStateTransaction(async () => {
+        nextReport.reconciliation = this.reconcileHelpTrackers();
+        if (preserveMatrixTransactions) {
+          const finalPool = this.getSafetyPool();
+          const finalPoolTotal = finalPool.transactions.reduce((sum, tx) => sum + tx.amount, 0);
+          this.saveSafetyPool({
+            totalAmount: finalPoolTotal,
+            transactions: finalPool.transactions
+          });
+        }
+        return nextReport;
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 300000,
+          maxAttempts: 2,
+          retryDelayMs: 5000
+        }
+      });
+    });
+  }
+
   static async activateUsersAndRebuildMatrixLogic(
     onProgress?: (done: number, total: number) => void,
     options?: {
@@ -3584,206 +3956,104 @@ class Database {
       throw new Error('A matrix rebuild is already running. Wait for it to finish, then refresh once before trying again.');
     }
 
+    const preserveMatrixTransactions = !!options?.preserveMatrixTransactions;
+    const activateLegacyInactiveUsers = options?.activateLegacyInactiveUsers !== false;
+    const jobOptions = { preserveMatrixTransactions, activateLegacyInactiveUsers };
+    const batchSize = 25;
+    let report = this.createEmptyMatrixRebuildReport();
+    let processed = 0;
+    let total = 0;
+
     try {
-      return await this.runWithRemoteSyncPaused(async () => {
-        return this.runWithLocalStateTransaction(async () => {
-          const preserveMatrixTransactions = !!options?.preserveMatrixTransactions;
-          const activateLegacyInactiveUsers = options?.activateLegacyInactiveUsers !== false;
-          const users = this.getUsers();
-          const matrix = this.getMatrix();
+      await this.ensureAdminStateHydratedForRebuild();
+      const existingJob = await this.readRemoteMatrixRebuildJob();
+      const canResume = existingJob.status === 'running'
+        && existingJob.phase === 'replaying'
+        && existingJob.options?.preserveMatrixTransactions === preserveMatrixTransactions
+        && existingJob.options?.activateLegacyInactiveUsers === activateLegacyInactiveUsers;
 
-          const report: MatrixLogicRebuildReport = {
-            activatedUsers: 0,
-            activatedMatrixNodes: 0,
-            repositionedMatrixNodes: 0,
-            directCountsUpdated: 0,
-            removedMatrixTransactions: 0,
-            removedMatrixSafetyPoolEntries: 0,
-            trackersReset: 0,
-            replayedMembers: 0,
-            backfilledActivationUsers: 0,
-            backfilledDirectIncomeEntries: 0,
-            backfilledAdminFeeEntries: 0,
-            reconciliation: {
-              scannedTrackers: 0,
-              createdTrackers: 0,
-              removedTrackers: 0,
-              repairedLevels: 0,
-              repairedQueueItems: 0,
-              walletSyncs: 0,
-              issues: []
-            }
-          };
+      if (canResume) {
+        report = this.normalizeMatrixRebuildReport(existingJob.report);
+      } else {
+        report = await this.prepareMatrixRebuildState({ preserveMatrixTransactions, activateLegacyInactiveUsers });
+        const initialReplayUsers = this.getReplayUsersForMatrixRebuild();
+        total = initialReplayUsers.length;
+        processed = 0;
+        await this.writeRemoteMatrixRebuildJob({
+          status: 'running',
+          phase: 'replaying',
+          processed,
+          total,
+          batchSize,
+          options: jobOptions,
+          report,
+          error: null,
+          finishedAt: null
+        }, { reset: true });
+      }
 
-          const directCountsBySponsor = new Map<string, number>();
-          for (const member of users) {
-            if (!member.sponsorId) continue;
-            directCountsBySponsor.set(member.sponsorId, (directCountsBySponsor.get(member.sponsorId) || 0) + 1);
-          }
+      const replayUsers = this.getReplayUsersForMatrixRebuild();
+      total = replayUsers.length;
+      processed = canResume ? Math.min(Math.max(0, existingJob.processed || 0), total) : 0;
+      if (onProgress) onProgress(processed, total);
 
-          const normalizedUsers = users.map((u) => {
-            const next: User = { ...u };
-            const computedDirect = directCountsBySponsor.get(u.userId) || 0;
-            if ((next.directCount || 0) !== computedDirect) {
-              next.directCount = computedDirect;
-              report.directCountsUpdated += 1;
-            }
-
-            const shouldAutoActivate = activateLegacyInactiveUsers
-              && !next.isAdmin
-              && next.accountStatus !== 'temp_blocked'
-              && next.accountStatus !== 'permanent_blocked';
-            if (shouldAutoActivate) {
-              const wasInactive = !next.isActive || next.accountStatus !== 'active';
-              if (wasInactive) {
-                report.activatedUsers += 1;
-              }
-              next.isActive = true;
-              next.accountStatus = 'active';
-              if (!next.activatedAt) {
-                next.activatedAt = new Date().toISOString();
-              }
-            }
-
-            return next;
-          });
-          const rebuiltTopology = this.rebuildMatrixTopology(normalizedUsers);
-          report.repositionedMatrixNodes = rebuiltTopology.repositionedMatrixNodes;
-          const normalizedUsersWithTopology = rebuiltTopology.users;
-          this.saveUsers(normalizedUsersWithTopology);
-
-          const backfill = this.backfillMissingActivationEffects(normalizedUsersWithTopology);
-          report.backfilledActivationUsers = backfill.users;
-          report.backfilledDirectIncomeEntries = backfill.sponsorCredits;
-          report.backfilledAdminFeeEntries = backfill.adminFees;
-
-          const userByUserId = new Map(normalizedUsersWithTopology.map((u) => [u.userId, u]));
-          const previousNodeByUserId = new Map(matrix.map((node) => [node.userId, node]));
-          const normalizedMatrix = rebuiltTopology.matrix.map((node) => {
-            const owner = userByUserId.get(node.userId);
-            if (!owner) return node;
-            const shouldNodeBeActive = owner.isActive && owner.accountStatus === 'active';
-            if (node.isActive !== shouldNodeBeActive) {
-              return { ...node, isActive: shouldNodeBeActive };
-            }
-            return node;
-          });
-          for (const node of normalizedMatrix) {
-            const previous = previousNodeByUserId.get(node.userId);
-            if (previous && previous.isActive !== node.isActive) {
-              report.activatedMatrixNodes += 1;
-            }
-          }
-          this.saveMatrix(normalizedMatrix);
-
-          const transactions = this.getTransactions();
-          const keptTransactions: Transaction[] = [];
-          for (const tx of transactions) {
-            if (!this.isMatrixTransactionForRebuild(tx)) {
-              keptTransactions.push(tx);
-              continue;
-            }
-            report.removedMatrixTransactions += 1;
-          }
-          this.saveTransactions(keptTransactions);
-
-          // Rebuild baseline wallets deterministically from non-matrix ledger.
-          const wallets = this.getWallets();
-          for (const wallet of wallets) {
-            const computed = this.computeIncomeLedgerFromTransactions(wallet.userId);
-            wallet.incomeWallet = computed.incomeWallet;
-            wallet.matrixWallet = computed.matrixWallet;
-            wallet.totalReceived = computed.totalReceived;
-            wallet.totalGiven = computed.totalGiven;
-            wallet.giveHelpLocked = 0;
-            wallet.lockedIncomeWallet = 0;
-          }
-          this.saveWallets(wallets);
-
-          const pool = this.getSafetyPool();
-          const keptPoolTx = pool.transactions.filter((tx) => !this.isMatrixSafetyPoolReasonForRebuild(tx.reason));
-          report.removedMatrixSafetyPoolEntries = pool.transactions.length - keptPoolTx.length;
-          const rebuiltPoolTotal = keptPoolTx.reduce((sum, tx) => sum + tx.amount, 0);
-          this.saveSafetyPool({
-            totalAmount: rebuiltPoolTotal,
-            transactions: keptPoolTx
-          });
-
-          const resetTrackers: UserHelpTracker[] = normalizedUsersWithTopology.map((u) => ({
-            userId: u.id,
-            levels: {},
-            lockedQueue: []
-          }));
-          this.saveHelpTrackers(resetTrackers);
-          this.savePendingMatrixContributions([]);
-          report.trackersReset = resetTrackers.length;
-
-          const nodeMap = new Map(normalizedMatrix.map((node) => [node.userId, node]));
-          const replayUsers = [...normalizedUsersWithTopology]
-            .filter((u) => !u.isAdmin)
-            .sort((a, b) => this.compareUsersByJoinOrder(a, b));
-
-          // Yield to browser every BATCH_SIZE users to prevent "page unresponsive"
-          const BATCH_SIZE = 50;
-          const yieldToUI = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-          const useBulkRebuildMode = !preserveMatrixTransactions;
-          this._bulkSafetyPoolTotal = 0;
-          if (useBulkRebuildMode) {
-            // Bulk mode skips matrix transaction writes to reduce memory/latency on very large datasets.
-            this._bulkRebuildMode = true;
-          }
-          try {
-
-            for (let i = 0; i < replayUsers.length; i++) {
-              const replayUser = replayUsers[i];
-              const replayNode = nodeMap.get(replayUser.userId);
-              if (!replayNode?.parentId) continue;
-              this.processMatrixHelpForNewMember(replayUser.userId, replayUser.id);
-              report.replayedMembers += 1;
-
-              // Yield to browser periodically so the page stays responsive
-              if ((i + 1) % BATCH_SIZE === 0) {
-                if (onProgress) onProgress(i + 1, replayUsers.length);
-                await yieldToUI();
-              }
-            }
-            if (onProgress) onProgress(replayUsers.length, replayUsers.length);
-
-          } finally {
-            if (useBulkRebuildMode) {
-              this._bulkRebuildMode = false;
-            }
-          }
-
-          // Write the accumulated safety pool total
-          if (useBulkRebuildMode) {
-            const currentPool = this.getSafetyPool();
-            currentPool.totalAmount += this._bulkSafetyPoolTotal;
-            this.saveSafetyPool(currentPool);
-          }
-
-          report.reconciliation = this.reconcileHelpTrackers();
-          const finalPool = this.getSafetyPool();
-          const finalPoolTotal = finalPool.transactions.reduce((sum, tx) => sum + tx.amount, 0)
-            + (useBulkRebuildMode ? this._bulkSafetyPoolTotal : 0);
-          this.saveSafetyPool({
-            totalAmount: finalPoolTotal,
-            transactions: finalPool.transactions
-          });
-
-          return report;
-        }, {
-          syncOnCommit: true,
-          syncOptions: {
-            full: true,
-            force: true,
-            timeoutMs: 300000,
-            maxAttempts: 2,
-            retryDelayMs: 5000
-          }
+      if (canResume) {
+        await this.writeRemoteMatrixRebuildJob({
+          status: 'running',
+          phase: 'replaying',
+          processed,
+          total,
+          batchSize,
+          options: jobOptions,
+          report,
+          error: null
         });
+      }
+
+      for (let start = processed; start < total; start += batchSize) {
+        const end = Math.min(start + batchSize, total);
+        const replayBatch = replayUsers.slice(start, end).map((user) => user.userId);
+        report = await this.replayMatrixRebuildBatch(replayBatch, report, { preserveMatrixTransactions });
+        processed = end;
+        await this.writeRemoteMatrixRebuildJob({
+          status: 'running',
+          phase: 'replaying',
+          processed,
+          total,
+          batchSize,
+          options: jobOptions,
+          report,
+          error: null
+        });
+        if (onProgress) onProgress(processed, total);
+      }
+
+      report = await this.finalizeMatrixRebuildState(report, { preserveMatrixTransactions });
+      await this.writeRemoteMatrixRebuildJob({
+        status: 'completed',
+        phase: 'completed',
+        processed: total,
+        total,
+        batchSize,
+        options: jobOptions,
+        report,
+        error: null
       });
+      return report;
+    } catch (error) {
+      await this.writeRemoteMatrixRebuildJob({
+        status: 'failed',
+        phase: 'failed',
+        processed,
+        total,
+        batchSize,
+        options: jobOptions,
+        report,
+        error: error instanceof Error ? error.message : 'Matrix rebuild failed'
+      }).catch(() => {
+        // Best-effort checkpoint update only.
+      });
+      throw error;
     } finally {
       this.releaseMatrixRebuildLock();
     }
@@ -4768,11 +5038,74 @@ class Database {
   }
 
   static getStartupRemoteSyncKeys(): string[] {
-    return [...this.STARTUP_REMOTE_SYNC_KEYS];
+    return this.STARTUP_REMOTE_SYNC_BATCHES.flatMap((batch) => [...batch]);
+  }
+
+  static getStartupRemoteSyncBatches(): string[][] {
+    return this.STARTUP_REMOTE_SYNC_BATCHES.map((batch) => [...batch]);
   }
 
   static getAdminRemoteSyncBatches(): string[][] {
     return this.ADMIN_REMOTE_SYNC_BATCHES.map((batch) => [...batch]);
+  }
+
+  static async hydrateFromServerBatches(
+    batches: Iterable<Iterable<string>>,
+    options?: {
+      strict?: boolean;
+      maxAttempts?: number;
+      timeoutMs?: number;
+      retryDelayMs?: number;
+      continueOnError?: boolean;
+      requireAnySuccess?: boolean;
+      onBatchError?: (keys: string[], error: unknown) => void;
+    }
+  ): Promise<void> {
+    const normalizedBatches = Array.from(batches || [])
+      .map((batch) => Array.from(batch || []).filter((key) => this.REMOTE_SYNC_KEYS.has(key)));
+    let successCount = 0;
+    let lastError: unknown = null;
+
+    for (const keys of normalizedBatches) {
+      if (keys.length === 0) {
+        continue;
+      }
+
+      try {
+        await this.hydrateFromServer({
+          strict: options?.strict,
+          maxAttempts: options?.maxAttempts,
+          timeoutMs: options?.timeoutMs,
+          retryDelayMs: options?.retryDelayMs,
+          keys
+        });
+        successCount += 1;
+      } catch (error) {
+        lastError = error;
+        options?.onBatchError?.(keys, error);
+        if (!options?.continueOnError) {
+          throw error;
+        }
+      }
+    }
+
+    if (options?.requireAnySuccess && successCount === 0) {
+      throw lastError instanceof Error ? lastError : new Error('Backend hydration failed for all requested batches');
+    }
+  }
+
+  private static async ensureAdminStateHydratedForRebuild(): Promise<void> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return;
+    }
+
+    await this.hydrateFromServerBatches(this.getAdminRemoteSyncBatches(), {
+      strict: true,
+      maxAttempts: 2,
+      timeoutMs: 120000,
+      retryDelayMs: 2000,
+      requireAnySuccess: true
+    });
   }
 
   static async forceRemoteSyncNowWithOptions(options?: {

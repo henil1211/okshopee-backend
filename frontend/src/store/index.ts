@@ -68,15 +68,17 @@ async function runBackendMatrixRebuild(options?: {
 }
 
 async function hydrateAdminStateFromBackend(): Promise<void> {
-  for (const keys of Database.getAdminRemoteSyncBatches()) {
-    await Database.hydrateFromServer({
-      strict: true,
-      maxAttempts: 2,
-      timeoutMs: 120000,
-      retryDelayMs: 2000,
-      keys
-    });
-  }
+  await Database.hydrateFromServerBatches(Database.getAdminRemoteSyncBatches(), {
+    strict: true,
+    maxAttempts: 2,
+    timeoutMs: 120000,
+    retryDelayMs: 2000,
+    continueOnError: true,
+    requireAnySuccess: true,
+    onBatchError: (keys, error) => {
+      console.warn('Admin hydrate batch failed for keys:', keys, error);
+    }
+  });
 }
 
 async function createServerStateBackup(params?: {
@@ -258,12 +260,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
       Database.setCurrentUser(backendAuth.user);
       set({ user: backendAuth.user, isAuthenticated: true });
-      void Database.hydrateFromServer({
+      void Database.hydrateFromServerBatches(Database.getStartupRemoteSyncBatches(), {
         strict: true,
         maxAttempts: 2,
         timeoutMs: 45000,
         retryDelayMs: 1500,
-        keys: Database.getStartupRemoteSyncKeys()
+        continueOnError: true,
+        requireAnySuccess: true
       }).catch((error) => {
         console.warn('Post-login hydration failed:', error);
       });

@@ -134,10 +134,11 @@ async function bootstrap() {
     </StrictMode>,
   )
 
-  void Database.hydrateFromServer(
+  void Database.hydrateFromServerBatches(
+    strictSync ? Database.getStartupRemoteSyncBatches() : [Database.getStartupRemoteSyncKeys()],
     strictSync
-      ? { strict: true, maxAttempts: 2, timeoutMs: 30000, retryDelayMs: 1200, keys: Database.getStartupRemoteSyncKeys() }
-      : { strict: false, keys: Database.getStartupRemoteSyncKeys() }
+      ? { strict: true, maxAttempts: 2, timeoutMs: 45000, retryDelayMs: 1200, continueOnError: true, requireAnySuccess: true }
+      : { strict: false, continueOnError: true }
   ).catch((e) => {
     console.warn('Hydration failed:', e);
   });
