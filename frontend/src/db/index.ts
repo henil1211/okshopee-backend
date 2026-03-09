@@ -3562,8 +3562,6 @@ class Database {
     // Use transaction history as source of truth for last fee date
     const allTx = this.getUserTransactions(userId);
     const feeTxs = allTx.filter(t => (t.type as string) === 'system_fee' && t.status === 'completed');
-    const lastFeeTx = feeTxs.length > 0 ? feeTxs[0] : null; // sorted by createdAt desc
-    const lastFeeDate = lastFeeTx ? new Date(lastFeeTx.createdAt) : null;
 
     // Count how many monthly fees are owed
     // Starting from activatedAt + 1 month, each month a $1 fee is due
@@ -3597,7 +3595,6 @@ class Database {
       return { deducted: false, pending: false, alreadyCurrent: true };
     }
 
-    const totalOwed = unpaidMonths; // $1 per month
     let totalDeducted = 0;
 
     // Re-read wallet for freshest balances
@@ -5499,7 +5496,9 @@ class Database {
         lockedIncomeWallet: 0,
         giveHelpLocked: 0,
         totalReceived: 0,
-        totalGiven: 0
+        totalGiven: 0,
+        pendingSystemFee: 0,
+        lastSystemFeeDate: null
       });
     }
     this.saveWallets(Array.from(mergedWalletByUser.values()));
@@ -5911,7 +5910,9 @@ class Database {
         lockedIncomeWallet: 0,
         giveHelpLocked: 0,
         totalReceived: 0,
-        totalGiven: 0
+        totalGiven: 0,
+        pendingSystemFee: 0,
+        lastSystemFeeDate: null
       }))
     );
     this.saveMatrix([
