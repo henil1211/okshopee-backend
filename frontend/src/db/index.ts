@@ -121,6 +121,13 @@ const defaultPaymentMethods: PaymentMethod[] = [
 ];
 
 const SUPPORT_TICKET_CATEGORIES: SupportTicketCategory[] = [
+  'profile_update',
+  'deposit_withdrawal',
+  'network_matrix',
+  'activation_pin',
+  'affiliate_shopping',
+  'other',
+  // Legacy
   'account_issues',
   'deposit_payment_issues',
   'withdrawal_issues',
@@ -187,48 +194,6 @@ interface MatrixHelpEventOptions {
 
 interface GiveHelpExecuteOptions {
   useLockedIncome?: boolean;
-}
-
-interface HelpTrackerReconciliationReport {
-  scannedTrackers: number;
-  createdTrackers: number;
-  removedTrackers: number;
-  repairedLevels: number;
-  repairedQueueItems: number;
-  walletSyncs: number;
-  issues: string[];
-}
-
-interface MatrixLogicRebuildReport {
-  activatedUsers: number;
-  activatedMatrixNodes: number;
-  repositionedMatrixNodes: number;
-  directCountsUpdated: number;
-  removedMatrixTransactions: number;
-  removedMatrixSafetyPoolEntries: number;
-  trackersReset: number;
-  replayedMembers: number;
-  backfilledActivationUsers: number;
-  backfilledDirectIncomeEntries: number;
-  backfilledAdminFeeEntries: number;
-  reconciliation: HelpTrackerReconciliationReport;
-}
-
-interface RemoteMatrixRebuildJob {
-  status: 'idle' | 'running' | 'completed' | 'failed';
-  phase: 'idle' | 'preparing' | 'replaying' | 'finalizing' | 'completed' | 'failed';
-  processed: number;
-  total: number;
-  batchSize: number;
-  options: {
-    preserveMatrixTransactions: boolean;
-    activateLegacyInactiveUsers: boolean;
-  } | null;
-  report: MatrixLogicRebuildReport | null;
-  error: string | null;
-  startedAt: string | null;
-  finishedAt: string | null;
-  updatedAt: string | null;
 }
 
 export interface LockedIncomeBreakdownItem {
@@ -316,8 +281,6 @@ export interface SensitiveActionSyncGate {
 
 // Generic DB Operations
 class Database {
-  private static readonly MATRIX_REBUILD_LOCK_KEY = '__refernex_matrix_rebuild_lock__';
-  private static readonly MATRIX_REBUILD_LOCK_TTL_MS = 15 * 60 * 1000;
   private static readonly REMOTE_SYNC_BASE_URL = (
     (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || 'http://localhost:4000'
   ).replace(/\/+$/, '');
@@ -327,7 +290,8 @@ class Database {
   private static readonly STARTUP_REMOTE_SYNC_BATCHES = [
     [DB_KEYS.USERS],
     [DB_KEYS.WALLETS],
-    [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL]
+    [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL],
+    [DB_KEYS.TRANSACTIONS]
   ] as const;
   private static readonly ADMIN_REMOTE_SYNC_BATCHES = [
     [DB_KEYS.USERS],
@@ -384,36 +348,6 @@ class Database {
   // ===== In-memory parsed-object cache =====
   // Eliminates redundant JSON.parse() on hot-path reads.
   private static _cache = new Map<string, unknown>();
-
-  private static acquireMatrixRebuildLock(): boolean {
-    if (typeof window === 'undefined' || !window.localStorage) {
-      return true;
-    }
-
-    const now = Date.now();
-    try {
-      const raw = window.localStorage.getItem(this.MATRIX_REBUILD_LOCK_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { startedAt?: number };
-        const startedAt = Number(parsed?.startedAt || 0);
-        if (startedAt > 0 && now - startedAt < this.MATRIX_REBUILD_LOCK_TTL_MS) {
-          return false;
-        }
-      }
-    } catch {
-      // Ignore malformed lock state and overwrite it below.
-    }
-
-    window.localStorage.setItem(this.MATRIX_REBUILD_LOCK_KEY, JSON.stringify({ startedAt: now }));
-    return true;
-  }
-
-  private static releaseMatrixRebuildLock(): void {
-    if (typeof window === 'undefined' || !window.localStorage) {
-      return;
-    }
-    window.localStorage.removeItem(this.MATRIX_REBUILD_LOCK_KEY);
-  }
 
   private static emitRemoteSyncStatus(): void {
     const snapshot: RemoteSyncStatus = {
@@ -1218,8 +1152,34 @@ class Database {
       blockedUntil: u.blockedUntil ?? null,
       blockedReason: u.blockedReason ?? null
     }));
-    this._cache.set(CACHE_KEY_USERS_NORMALIZED, normalized);
-    return normalized;
+
+    // Deduplicate by userId – keep the record with the best resolution score
+    const seenUserIds = new Map<string, number>();
+    const duplicateIndices = new Set<number>();
+    for (let i = 0; i < normalized.length; i++) {
+      const uid = (normalized[i].userId || '').trim();
+      if (!uid) continue;
+      if (seenUserIds.has(uid)) {
+        const prevIdx = seenUserIds.get(uid)!;
+        const prevScore = this.getDuplicateResolutionScore(normalized[prevIdx]);
+        const currScore = this.getDuplicateResolutionScore(normalized[i]);
+        if (currScore > prevScore) {
+          duplicateIndices.add(prevIdx);
+          seenUserIds.set(uid, i);
+        } else {
+          duplicateIndices.add(i);
+        }
+      } else {
+        seenUserIds.set(uid, i);
+      }
+    }
+
+    const deduplicated = duplicateIndices.size > 0
+      ? normalized.filter((_, i) => !duplicateIndices.has(i))
+      : normalized;
+
+    this._cache.set(CACHE_KEY_USERS_NORMALIZED, deduplicated);
+    return deduplicated;
   }
 
   static saveUsers(users: User[]): void {
@@ -1434,6 +1394,8 @@ class Database {
       const giveHelpLockedValue = Number(rest.giveHelpLocked);
       const totalReceivedValue = Number(rest.totalReceived);
       const totalGivenValue = Number(rest.totalGiven);
+      const pendingSystemFeeValue = Number(rest.pendingSystemFee);
+      const lastSystemFeeDateValue = rest.lastSystemFeeDate;
       return {
         userId,
         depositWallet: Number.isFinite(depositWalletValue) ? depositWalletValue : 0,
@@ -1443,7 +1405,9 @@ class Database {
         lockedIncomeWallet: Number.isFinite(lockedIncomeWalletValue) ? lockedIncomeWalletValue : 0,
         giveHelpLocked: Number.isFinite(giveHelpLockedValue) ? giveHelpLockedValue : 0,
         totalReceived: Number.isFinite(totalReceivedValue) ? totalReceivedValue : 0,
-        totalGiven: Number.isFinite(totalGivenValue) ? totalGivenValue : 0
+        totalGiven: Number.isFinite(totalGivenValue) ? totalGivenValue : 0,
+        pendingSystemFee: Number.isFinite(pendingSystemFeeValue) ? pendingSystemFeeValue : 0,
+        lastSystemFeeDate: typeof lastSystemFeeDateValue === 'string' ? lastSystemFeeDateValue : null
       };
     });
     if (hasLegacyFields) {
@@ -1627,6 +1591,13 @@ class Database {
             relevantCount += 1;
           }
           break;
+        case 'system_fee':
+          if (txDesc.includes('income wallet')) {
+            const feeOutflow = Math.min(Math.abs(tx.amount), Math.max(0, incomeWallet));
+            incomeWallet -= feeOutflow;
+          }
+          relevantCount += 1;
+          break;
         default:
           break;
       }
@@ -1793,12 +1764,24 @@ class Database {
       .map(({ item }) => item.id);
     if (pendingIds.length === 0) return;
 
+    const fromUser = this.getUserById(fromUserId);
+    const fromLabel = fromUser ? `${(fromUser as any).userId || fromUserId}` : fromUserId;
+    console.warn(`[PENDING-PROC] Processing ${pendingIds.length} pending items for ${fromLabel}`);
+
     for (const itemId of pendingIds) {
       // Re-read from storage EVERY iteration to get fresh state
       // (nested calls during registerMatrixContribution may have modified storage).
       const freshItems = this.getPendingMatrixContributions();
       const freshItem = freshItems.find(i => i.id === itemId);
       if (!freshItem || freshItem.status !== 'pending') continue; // Already handled by nested call
+
+      const toUser = this.getUserById(freshItem.toUserId);
+      const toLabel = toUser ? `${(toUser as any).userId || freshItem.toUserId}` : freshItem.toUserId;
+      const senderTracker = this.getUserHelpTracker(freshItem.fromUserId);
+      const debitLevel = Math.max(1, freshItem.level - 1);
+      const debitState = senderTracker.levels[String(debitLevel)];
+      const senderWallet = this.getWallet(freshItem.fromUserId);
+      console.warn(`[PENDING-ITEM] Level ${freshItem.level} → ${toLabel}: debitLevel=${debitLevel}, lockedAmount=$${debitState?.lockedAmount || 0}, lockedReceiveAmount=$${debitState?.lockedReceiveAmount || 0}, walletLocked=$${senderWallet?.lockedIncomeWallet || 0}`);
 
       // Pre-mark as completed and save BEFORE processing
       freshItem.status = 'completed';
@@ -1813,6 +1796,7 @@ class Database {
         { skipFromWalletDebit: false }
       );
       if (!ok) {
+        console.warn(`[PENDING-ITEM] Level ${freshItem.level} → ${toLabel}: FAILED, rolling back`);
         // Rollback — re-read fresh state again to avoid overwriting nested changes
         const rollbackItems = this.getPendingMatrixContributions();
         const rollbackItem = rollbackItems.find(i => i.id === itemId);
@@ -1821,8 +1805,12 @@ class Database {
           rollbackItem.completedAt = undefined;
           this.savePendingMatrixContributions(rollbackItems);
         }
-        break;
+        // Continue to try higher-level items instead of breaking — different levels
+        // draw from different level-specific locked-income pools, so a failure at
+        // level N does not necessarily prevent level N+1 from succeeding.
+        continue;
       }
+      console.warn(`[PENDING-ITEM] Level ${freshItem.level} → ${toLabel}: SUCCESS`);
 
       // If a limit is set, count successful items and stop when reached.
       if (limit !== undefined) {
@@ -1830,6 +1818,124 @@ class Database {
         if (limit <= 0) break;
       }
     }
+  }
+
+  /**
+   * Sweep ALL users that have pending matrix contributions and attempt to
+   * process them.  This catches cascading help chains where an ancestor
+   * received locked income from a descendant's activation and can now fund
+   * their own higher-level contributions.
+   *
+   * To avoid infinite loops, the sweep runs at most `maxPasses` rounds.
+   * Each round iterates over every distinct sender that still has pending
+   * items.  If no progress is made in a round (zero items flipped from
+   * pending to completed), the sweep stops early.
+   */
+  static sweepPendingContributions(maxPasses = 12): void {
+    for (let pass = 0; pass < maxPasses; pass++) {
+      const items = this.getPendingMatrixContributions();
+      const pendingSenders = new Set<string>();
+      for (const item of items) {
+        if (item.status === 'pending') {
+          pendingSenders.add(item.fromUserId);
+        }
+      }
+      if (pendingSenders.size === 0) return;
+
+      const beforeCount = items.filter(i => i.status === 'pending').length;
+
+      for (const senderId of pendingSenders) {
+        this.processPendingMatrixContributionsForUser(senderId);
+      }
+
+      const afterItems = this.getPendingMatrixContributions();
+      const afterCount = afterItems.filter(i => i.status === 'pending').length;
+      // No progress — stop sweeping.
+      if (afterCount >= beforeCount) return;
+    }
+  }
+
+  /**
+   * Repair orphaned pending contributions whose locked income was consumed by
+   * the old executeGiveHelp fallback.  For each user with pending items, check
+   * whether their first-two at the required debit level completed; if so,
+   * re-inject the expected locked income into their wallet / tracker so the
+   * sweep can process them.
+   */
+  static repairAndSweepPendingContributions(): { repairedUsers: number; processedItems: number; stillPending: number } {
+    const allPending = this.getPendingMatrixContributions().filter(i => i.status === 'pending');
+    if (allPending.length === 0) return { repairedUsers: 0, processedItems: 0, stillPending: 0 };
+
+    // Group pending items by sender
+    const bySender = new Map<string, typeof allPending>();
+    for (const item of allPending) {
+      const list = bySender.get(item.fromUserId) || [];
+      list.push(item);
+      bySender.set(item.fromUserId, list);
+    }
+
+    let repairedUsers = 0;
+
+    for (const [senderId, items] of bySender) {
+      const sender = this.getUserById(senderId);
+      if (!sender || !sender.isActive || sender.accountStatus !== 'active') continue;
+
+      const tracker = this.getUserHelpTracker(senderId);
+      const wallet = this.getWallet(senderId);
+      if (!wallet) continue;
+
+      let walletInjection = 0;
+
+      for (const item of items) {
+        // The pending at level L debits locked income from level L-1.
+        const debitLevel = Math.max(1, item.level - 1);
+        const debitKey = String(debitLevel);
+        const debitState = tracker.levels[debitKey];
+        if (!debitState) continue;
+
+        // Only repair if first-two at the debit level completed (receiveEvents >= 2)
+        if ((debitState.receiveEvents || 0) < 2) continue;
+
+        const levelData = helpDistributionTable[item.level - 1];
+        if (!levelData) continue;
+        const neededAmount = levelData.perUserHelp;
+
+        // Check if locked income at the debit level was consumed by executeGiveHelp fallback.
+        // If lockedAmount is 0 but first-two completed, the income was consumed by the fallback.
+        const currentLocked = debitState.lockedAmount || 0;
+        const currentLockedReceive = debitState.lockedReceiveAmount || 0;
+        const availableAtLevel = currentLocked + currentLockedReceive;
+
+        if (availableAtLevel >= neededAmount) continue; // Already has enough — no repair needed
+
+        // Re-inject the missing locked income at the debit level.
+        const deficit = neededAmount - availableAtLevel;
+        debitState.lockedAmount = (debitState.lockedAmount || 0) + deficit;
+        tracker.levels[debitKey] = debitState;
+        walletInjection += deficit;
+      }
+
+      if (walletInjection > 0) {
+        this.saveUserHelpTracker(tracker);
+        this.updateWallet(senderId, {
+          lockedIncomeWallet: (wallet.lockedIncomeWallet || 0) + walletInjection,
+          giveHelpLocked: (wallet.giveHelpLocked || 0) + walletInjection
+        });
+        repairedUsers++;
+      }
+    }
+
+    // Now sweep to process the repaired items
+    const beforeCount = this.getPendingMatrixContributions().filter(i => i.status === 'pending').length;
+    this.sweepPendingContributions(5);
+    const afterItems = this.getPendingMatrixContributions();
+    const afterCount = afterItems.filter(i => i.status === 'pending').length;
+
+    return {
+      repairedUsers,
+      processedItems: beforeCount - afterCount,
+      stillPending: afterCount
+    };
   }
 
   private static getPendingMatrixContributionBlockReason(item: PendingMatrixContribution): string | null {
@@ -2110,6 +2216,28 @@ class Database {
     return Math.max(trackerLevel, cappedMatrixLevel);
   }
 
+  /**
+   * Highest level where the user has received ALL help AND met the
+   * cumulative direct-referral requirement for that level.
+   */
+  static getQualifiedLevel(userRef: string): number {
+    const user = this.resolveUserByRef(userRef);
+    if (!user) return 0;
+    const tracker = this.getUserHelpTracker(user.id);
+    const directCount = this.getEffectiveDirectCount(user);
+    let level = 0;
+    for (const ld of helpDistributionTable) {
+      const trackerReceive = tracker.levels[String(ld.level)]?.receiveEvents || 0;
+      const observedReceive = this.getObservedReceiveEventCount(user.id, ld.level);
+      const effectiveReceive = Math.max(trackerReceive, observedReceive);
+      if (effectiveReceive < ld.users) break;
+      const requiredDirect = this.getCumulativeDirectRequired(ld.level);
+      if (directCount < requiredDirect) break;
+      level = ld.level;
+    }
+    return level;
+  }
+
   static getMatrixNodesCountAtLevel(userId: string, targetDepth: number): number {
     if (targetDepth < 1 || targetDepth > helpDistributionTable.length) return 0;
 
@@ -2144,28 +2272,6 @@ class Database {
     return countAtDepth;
   }
 
-  static getQualifiedLevel(userRef: string): number {
-    const user = this.resolveUserByRef(userRef);
-    if (!user) return 0;
-
-    const tracker = this.getUserHelpTracker(user.id);
-    let qualifiedLevel = 0;
-
-    if (tracker && tracker.levels) {
-      for (let i = 0; i < helpDistributionTable.length; i++) {
-        const lvl = i + 1;
-        const requiredUsers = helpDistributionTable[i].users;
-        const fill = tracker.levels[String(lvl)]?.receiveEvents || 0;
-        if (fill >= requiredUsers) {
-          qualifiedLevel = lvl;
-        } else {
-          break;
-        }
-      }
-    }
-
-    return qualifiedLevel;
-  }
 
   static getLevelFillProgress(userRef: string): { level: number; filled: number; required: number } {
     const user = this.resolveUserByRef(userRef);
@@ -2329,21 +2435,21 @@ class Database {
     const now = new Date().toISOString();
     let changed = false;
 
-    const nationalTourQualified = this.isTourQualifiedForLevel(user, tracker, 3);
+    const nationalTourQualified = this.isTourQualifiedForLevel(user, tracker, 4);
     if ((!!next.nationalTour) !== nationalTourQualified) {
       next.nationalTour = nationalTourQualified;
       next.nationalTourDate = nationalTourQualified ? (next.nationalTourDate || now) : undefined;
       changed = true;
     }
 
-    const internationalTourQualified = this.isTourQualifiedForLevel(user, tracker, 4);
+    const internationalTourQualified = this.isTourQualifiedForLevel(user, tracker, 5);
     if ((!!next.internationalTour) !== internationalTourQualified) {
       next.internationalTour = internationalTourQualified;
       next.internationalTourDate = internationalTourQualified ? (next.internationalTourDate || now) : undefined;
       changed = true;
     }
 
-    const familyTourQualified = this.isTourQualifiedForLevel(user, tracker, 5);
+    const familyTourQualified = this.isTourQualifiedForLevel(user, tracker, 6);
     if ((!!next.familyTour) !== familyTourQualified) {
       next.familyTour = familyTourQualified;
       next.familyTourDate = familyTourQualified ? (next.familyTourDate || now) : undefined;
@@ -2599,54 +2705,68 @@ class Database {
           // the help goes to the correct queued upline before fallback routing.
           recipientTracker.levels[String(recipientLevel)] = recipientState;
           this.saveUserHelpTracker(recipientTracker);
-          this.processPendingMatrixContributionsForUser(recipient.id, 1);
+          this.processPendingMatrixContributionsForUser(recipient.id);
+
+          // Reload tracker from storage after nested processing to avoid stale overwrite
+          const freshRecTracker = this.getUserHelpTracker(recipient.id);
+          const freshRecState = this.ensureLevelTrackerState(freshRecTracker, recipientLevel);
 
           const walletAfterPending = this.getWallet(recipient.id);
           const consumedByPending =
             (recipientWallet.lockedIncomeWallet || 0) + transferAmount - (walletAfterPending?.lockedIncomeWallet || 0);
 
           if (consumedByPending > 0) {
-            recipientState.givenAmount += consumedByPending;
+            freshRecState.givenAmount += consumedByPending;
             const levelPerUserHelp = helpDistributionTable[recipientLevel - 1]?.perUserHelp || 0;
             if (levelPerUserHelp > 0) {
-              recipientState.giveEvents = Math.min(
+              freshRecState.giveEvents = Math.min(
                 2,
-                recipientState.giveEvents + Math.floor(consumedByPending / levelPerUserHelp)
+                freshRecState.giveEvents + Math.floor(consumedByPending / levelPerUserHelp)
               );
             }
-            recipientState.lockedAmount = Math.max(0, recipientState.lockedAmount - consumedByPending);
+            freshRecState.lockedAmount = Math.max(0, freshRecState.lockedAmount - consumedByPending);
             if (walletAfterPending) {
               this.updateWallet(recipient.id, {
                 giveHelpLocked: Math.max(0, (walletAfterPending.giveHelpLocked || 0) - consumedByPending)
               });
             }
           } else {
-            const lockedToTransfer = recipientState.lockedAmount;
-            const transferred = this.executeGiveHelp(
-              recipient.id,
-              lockedToTransfer,
-              recipientLevel,
-              `Auto give help at level ${recipientLevel} from locked income`,
-              { useLockedIncome: true }
+            const hasPending = this.getPendingMatrixContributions().some(
+              (i) => i.fromUserId === recipient.id && i.status === 'pending'
             );
-            if (transferred > 0) {
-              recipientState.givenAmount += transferred;
-              const levelPerUserHelp = helpDistributionTable[recipientLevel - 1]?.perUserHelp || 0;
-              if (levelPerUserHelp > 0) {
-                recipientState.giveEvents = Math.min(
-                  2,
-                  recipientState.giveEvents + Math.floor(transferred / levelPerUserHelp)
-                );
-              }
-              recipientState.lockedAmount = Math.max(0, recipientState.lockedAmount - transferred);
-              const latestRecipientWallet = this.getWallet(recipient.id);
-              if (latestRecipientWallet) {
-                this.updateWallet(recipient.id, {
-                  giveHelpLocked: Math.max(0, (latestRecipientWallet.giveHelpLocked || 0) - transferred)
-                });
+            if (!hasPending) {
+              const lockedToTransfer = freshRecState.lockedAmount;
+              const transferred = this.executeGiveHelp(
+                recipient.id,
+                lockedToTransfer,
+                recipientLevel,
+                `Auto give help at level ${recipientLevel} from locked income`,
+                { useLockedIncome: true }
+              );
+              if (transferred > 0) {
+                freshRecState.givenAmount += transferred;
+                const levelPerUserHelp2 = helpDistributionTable[recipientLevel - 1]?.perUserHelp || 0;
+                if (levelPerUserHelp2 > 0) {
+                  freshRecState.giveEvents = Math.min(
+                    2,
+                    freshRecState.giveEvents + Math.floor(transferred / levelPerUserHelp2)
+                  );
+                }
+                freshRecState.lockedAmount = Math.max(0, freshRecState.lockedAmount - transferred);
+                const latestRecipientWallet = this.getWallet(recipient.id);
+                if (latestRecipientWallet) {
+                  this.updateWallet(recipient.id, {
+                    giveHelpLocked: Math.max(0, (latestRecipientWallet.giveHelpLocked || 0) - transferred)
+                  });
+                }
               }
             }
           }
+
+          // Merge fresh state back to avoid stale overwrite
+          Object.assign(recipientTracker, freshRecTracker);
+          Object.assign(recipientState, freshRecState);
+          recipientTracker.levels[String(recipientLevel)] = recipientState;
         }
       } else if (receiveIndex % 5 === 0) {
         this.addToSafetyPool(transferAmount, recipient.id, `Every 5th help deduction at level ${recipientLevel}`);
@@ -2682,6 +2802,8 @@ class Database {
           createdAt: new Date().toISOString(),
           completedAt: new Date().toISOString()
         });
+        // Auto-deduct pending system fee now that income arrived
+        this.deductPendingSystemFee(recipient.id);
       } else {
         this.updateWallet(recipient.id, {
           lockedIncomeWallet: (recipientWallet.lockedIncomeWallet || 0) + transferAmount
@@ -2804,24 +2926,29 @@ class Database {
       };
     }
 
+    // Calculate consumption before mutating — only apply if we can consume the full amount
     const takeLockedReceive = Math.min(state.lockedReceiveAmount || 0, remaining);
-    if (takeLockedReceive > 0) {
-      state.lockedReceiveAmount = Math.max(0, (state.lockedReceiveAmount || 0) - takeLockedReceive);
-      consumedFromLockedReceiveAmount += takeLockedReceive;
-      remaining -= takeLockedReceive;
-    }
+    consumedFromLockedReceiveAmount += takeLockedReceive;
+    remaining -= takeLockedReceive;
 
     const takeLockedFirstTwo = Math.min(state.lockedAmount || 0, remaining);
-    if (takeLockedFirstTwo > 0) {
-      state.lockedAmount = Math.max(0, (state.lockedAmount || 0) - takeLockedFirstTwo);
-      consumedFromLockedAmount += takeLockedFirstTwo;
-      remaining -= takeLockedFirstTwo;
+    consumedFromLockedAmount += takeLockedFirstTwo;
+    remaining -= takeLockedFirstTwo;
+
+    const success = remaining <= 0.0001;
+    if (success) {
+      // Only mutate state on success to prevent partial consumption corruption
+      if (takeLockedReceive > 0) {
+        state.lockedReceiveAmount = Math.max(0, (state.lockedReceiveAmount || 0) - takeLockedReceive);
+      }
+      if (takeLockedFirstTwo > 0) {
+        state.lockedAmount = Math.max(0, (state.lockedAmount || 0) - takeLockedFirstTwo);
+      }
+      tracker.levels[key] = state;
     }
 
-    tracker.levels[key] = state;
-
     return {
-      success: remaining <= 0.0001,
+      success,
       consumedFromLockedAmount,
       consumedFromLockedReceiveAmount
     };
@@ -2875,6 +3002,7 @@ class Database {
       const fromState = this.ensureLevelTrackerState(fromTracker, level);
       const walletLockedAvailable = fromWallet.lockedIncomeWallet || 0;
       if (walletLockedAvailable < amount) {
+        console.warn(`[HELP-DEBUG] Level ${level}: sender ${fromUser.userId} wallet locked $${walletLockedAvailable} < needed $${amount}. BLOCKED.`);
         return false;
       }
 
@@ -2883,6 +3011,8 @@ class Database {
       const debitLockedLevel = Math.max(1, level - 1);
       const consumed = this.consumeLockedIncomeAtLevel(fromTracker, debitLockedLevel, amount);
       if (!consumed.success) {
+        const debitState = fromTracker.levels[String(debitLockedLevel)];
+        console.warn(`[HELP-DEBUG] Level ${level}: sender ${fromUser.userId} consumeLockedIncomeAtLevel(${debitLockedLevel}, $${amount}) FAILED. lockedAmount=${debitState?.lockedAmount || 0}, lockedReceiveAmount=${debitState?.lockedReceiveAmount || 0}`);
         return false;
       }
 
@@ -2941,48 +3071,74 @@ class Database {
       });
 
       if (lockedFirstTwoCount + 1 === 2 && levelState.lockedAmount > 0) {
-        // Process pending matrix contributions FIRST so locked income flows
-        // up to the correct higher-level recipient before executeGiveHelp consumes it.
+        // Process pending matrix contributions so locked income flows
+        // up to higher-level recipients.  No limit — allow the full cascade.
         tracker.levels[key] = levelState;
         this.saveUserHelpTracker(tracker);
-        this.processPendingMatrixContributionsForUser(user.id, 1);
+
+        console.warn(`[HELP-CASCADE] ${user.userId} first-two complete at level ${level}, lockedAmount=$${levelState.lockedAmount}. Processing pending contributions...`);
+        this.processPendingMatrixContributionsForUser(user.id);
+
+        // CRITICAL: Reload tracker from storage after nested processing.
+        // The nested processPendingMatrixContributionsForUser -> registerMatrixContribution
+        // -> processMatchedHelpEvent chain may have modified this user's tracker
+        // (e.g. updating giveEvents at higher levels).  Using the stale 'tracker'
+        // object would overwrite those changes when we save at the end.
+        const freshTracker = this.getUserHelpTracker(user.id);
+        const freshLevelState = this.ensureLevelTrackerState(freshTracker, level);
 
         // Pending contributions handle all upward help flow.
         // Remaining locked income stays until more pending contributions can process.
         const walletAfterPending = this.getWallet(user.id);
         const consumedByPending = (wallet.lockedIncomeWallet || 0) + amount - (walletAfterPending?.lockedIncomeWallet || 0);
+        console.warn(`[HELP-CASCADE] ${user.userId} level ${level} post-pending: consumedByPending=$${consumedByPending}, walletLocked before=$${(wallet.lockedIncomeWallet || 0) + amount}, after=$${walletAfterPending?.lockedIncomeWallet || 0}`);
         if (consumedByPending > 0) {
-          levelState.givenAmount += consumedByPending;
-          levelState.giveEvents = Math.min(2, levelState.giveEvents + 1);
-          levelState.lockedAmount = Math.max(0, levelState.lockedAmount - consumedByPending);
+          freshLevelState.givenAmount += consumedByPending;
+          freshLevelState.giveEvents = Math.min(2, freshLevelState.giveEvents + 1);
+          freshLevelState.lockedAmount = Math.max(0, freshLevelState.lockedAmount - consumedByPending);
           if (walletAfterPending) {
             this.updateWallet(user.id, {
               giveHelpLocked: Math.max(0, (walletAfterPending.giveHelpLocked || 0) - consumedByPending)
             });
           }
         } else {
-          // Fallback for users with no pending contributions (e.g., root user):
-          // release locked income via executeGiveHelp (routes to safety pool if no upline).
-          const lockedToTransfer = levelState.lockedAmount;
-          const transferred = this.executeGiveHelp(
-            user.id,
-            lockedToTransfer,
-            level,
-            `Auto give help at level ${level} from locked income`,
-            { useLockedIncome: true }
+          // Only use the executeGiveHelp fallback for users with ZERO pending
+          // contributions (e.g., the root/admin user who has no upline pending).
+          // For normal users the locked income must stay locked so it can fund
+          // their higher-level pending contributions when those become processable.
+          const hasPending = this.getPendingMatrixContributions().some(
+            (i) => i.fromUserId === user.id && i.status === 'pending'
           );
-          if (transferred > 0) {
-            levelState.givenAmount += transferred;
-            levelState.giveEvents = Math.min(2, levelState.giveEvents + Math.floor(transferred / amount));
-            levelState.lockedAmount = Math.max(0, levelState.lockedAmount - transferred);
-            const latestWallet = this.getWallet(user.id);
-            if (latestWallet) {
-              this.updateWallet(user.id, {
-                giveHelpLocked: Math.max(0, (latestWallet.giveHelpLocked || 0) - transferred)
-              });
+          if (!hasPending) {
+            const lockedToTransfer = freshLevelState.lockedAmount;
+            const transferred = this.executeGiveHelp(
+              user.id,
+              lockedToTransfer,
+              level,
+              `Auto give help at level ${level} from locked income`,
+              { useLockedIncome: true }
+            );
+            if (transferred > 0) {
+              freshLevelState.givenAmount += transferred;
+              freshLevelState.giveEvents = Math.min(2, freshLevelState.giveEvents + Math.floor(transferred / amount));
+              freshLevelState.lockedAmount = Math.max(0, freshLevelState.lockedAmount - transferred);
+              const latestWallet = this.getWallet(user.id);
+              if (latestWallet) {
+                this.updateWallet(user.id, {
+                  giveHelpLocked: Math.max(0, (latestWallet.giveHelpLocked || 0) - transferred)
+                });
+              }
             }
           }
         }
+
+        // Use fresh tracker/levelState for the final save to avoid overwriting
+        // changes made by nested processing at other levels.
+        // Replace stale references so the final save at the end of the method
+        // writes the fresh data.
+        Object.assign(tracker, freshTracker);
+        Object.assign(levelState, freshLevelState);
+        tracker.levels[key] = levelState;
       }
     } else if (receiveIndex % 5 === 0) {
       // Every 5th receive-help event per level is diverted to safety pool.
@@ -3033,6 +3189,8 @@ class Database {
         createdAt: new Date().toISOString(),
         completedAt: new Date().toISOString()
       });
+      // Auto-deduct pending system fee now that income arrived
+      this.deductPendingSystemFee(user.id);
     } else {
       // Post first-two receive-help stays blocked until qualification is completed.
       const requiredDirect = this.getCumulativeDirectRequired(level);
@@ -3115,7 +3273,7 @@ class Database {
       const pendingAmount = item.amount;
       const walletBefore = this.getWallet(user.id);
       const lockedBefore = walletBefore?.lockedIncomeWallet || 0;
-      this.processPendingMatrixContributionsForUser(userId, 1);
+      this.processPendingMatrixContributionsForUser(userId);
       const walletAfter = this.getWallet(user.id);
       const lockedAfter = walletAfter?.lockedIncomeWallet || 0;
       let transferred = Math.max(0, lockedBefore - lockedAfter);
@@ -3166,7 +3324,7 @@ class Database {
         // Try pending contributions first (correct upward routing)
         const walletBefore = this.getWallet(user.id);
         const lockedBefore = walletBefore?.lockedIncomeWallet || 0;
-        this.processPendingMatrixContributionsForUser(userId, 1);
+        this.processPendingMatrixContributionsForUser(userId);
         const walletAfter = this.getWallet(user.id);
         const lockedAfter = walletAfter?.lockedIncomeWallet || 0;
         const consumedByPending = lockedBefore - lockedAfter;
@@ -3181,7 +3339,11 @@ class Database {
           break; // One level per call
         }
 
-        // Fallback: executeGiveHelp if no pending contributions available
+        // Fallback: executeGiveHelp only if no pending contributions for this user
+        const hasPending = this.getPendingMatrixContributions().some(
+          (i) => i.fromUserId === userId && i.status === 'pending'
+        );
+        if (hasPending) continue;
         const transferred = this.executeGiveHelp(
           user.id,
           pendingFirstTwoLocked,
@@ -3214,7 +3376,15 @@ class Database {
     }
 
     if (changed) {
-      this.saveUserHelpTracker(tracker);
+      // Reload tracker from storage to avoid overwriting changes made by
+      // nested processPendingMatrixContributionsForUser calls.
+      const freshTracker = this.getUserHelpTracker(userId);
+      // Merge our local level state changes into the fresh tracker
+      for (const [k, s] of Object.entries(tracker.levels)) {
+        if (s) freshTracker.levels[k] = s;
+      }
+      freshTracker.lockedQueue = tracker.lockedQueue;
+      this.saveUserHelpTracker(freshTracker);
       this.processPendingMatrixContributionsForUser(userId);
     }
   }
@@ -3254,6 +3424,9 @@ class Database {
         createdAt: new Date().toISOString(),
         completedAt: new Date().toISOString()
       });
+
+      // Auto-deduct pending system fee now that locked income was released
+      this.deductPendingSystemFee(userId);
 
       state.receivedAmount += releaseAmount;
       state.lockedReceiveAmount = 0;
@@ -3312,968 +3485,18 @@ class Database {
     }
 
     this.processPendingMatrixContributionsForUser(fromUserId);
-  }
 
-  private static isMatrixTransactionForRebuild(tx: Transaction): boolean {
-    if (tx.type === 'receive_help' || tx.type === 'give_help') {
-      return true;
-    }
-    if (tx.type === 'level_income' && (tx.description || '').startsWith('Helping amount from ')) {
-      return true;
-    }
-    if (
-      tx.type === 'safety_pool'
-      && (
-        tx.description?.startsWith('Every 5th help deduction at level')
-        || tx.description?.includes('to safety pool')
-        || tx.description?.startsWith('No qualified upline for level')
-      )
-    ) {
-      return true;
-    }
-    return false;
-  }
-
-  private static isMatrixSafetyPoolReasonForRebuild(reason: string): boolean {
-    if (!reason) return false;
-    return reason.startsWith('Every 5th help deduction at level')
-      || reason.startsWith('No qualified upline for level')
-      || reason.startsWith('No active immediate upline for activation help')
-      || reason === 'No qualified upline';
-  }
-
-  private static hasActivationTransaction(userId: string): boolean {
-    return this.getTransactions().some((tx) =>
-      tx.userId === userId
-      && tx.status === 'completed'
-      && (tx.type === 'pin_used' || tx.type === 'activation')
-    );
-  }
-
-  private static hasDirectIncomeFromDownline(sponsorUserId: string, fromUserId: string): boolean {
-    return this.getTransactions().some((tx) =>
-      tx.userId === sponsorUserId
-      && tx.fromUserId === fromUserId
-      && tx.type === 'direct_income'
-      && tx.status === 'completed'
-    );
-  }
-
-  private static hasAdminFeeSafetyEntry(fromUserId: string): boolean {
-    const pool = this.getSafetyPool();
-    return pool.transactions.some((tx) => tx.fromUserId === fromUserId && tx.reason === 'Admin fee');
-  }
-
-  private static backfillMissingActivationEffects(users: User[]): {
-    users: number;
-    sponsorCredits: number;
-    adminFees: number;
-  } {
-    let usersBackfilled = 0;
-    let sponsorCredits = 0;
-    let adminFees = 0;
-
-    for (const member of users) {
-      if (member.isAdmin) continue;
-      if (this.hasActivationTransaction(member.id)) continue;
-
-      this.createTransaction({
-        id: generateEventId('tx', `backfill_activation_${member.userId}`),
-        userId: member.id,
-        type: 'activation',
-        amount: 11,
-        status: 'completed',
-        description: 'Backfilled activation for legacy account',
-        createdAt: member.activatedAt || member.createdAt || new Date().toISOString(),
-        completedAt: new Date().toISOString()
-      });
-      usersBackfilled += 1;
-
-      const sponsor = member.sponsorId ? this.getUserByUserId(member.sponsorId) : undefined;
-      if (sponsor && !this.hasDirectIncomeFromDownline(sponsor.id, member.id)) {
-        const sponsorWallet = this.getWallet(sponsor.id);
-        if (sponsorWallet) {
-          this.updateWallet(sponsor.id, {
-            incomeWallet: sponsorWallet.incomeWallet + 5,
-            totalReceived: sponsorWallet.totalReceived + 5
-          });
-          this.createTransaction({
-            id: generateEventId('tx', `backfill_direct_${member.userId}`),
-            userId: sponsor.id,
-            type: 'direct_income',
-            amount: 5,
-            fromUserId: member.id,
-            status: 'completed',
-            description: `Direct sponsor income from ${member.fullName} (${member.userId})`,
-            createdAt: new Date().toISOString(),
-            completedAt: new Date().toISOString()
-          });
-          sponsorCredits += 1;
-        }
-      } else if (!sponsor) {
-        this.addToSafetyPool(5, member.id, 'No sponsor - direct income');
-      }
-
-      if (!this.hasAdminFeeSafetyEntry(member.id)) {
-        this.addToSafetyPool(1, member.id, 'Admin fee');
-        adminFees += 1;
-      }
-    }
-
-    return {
-      users: usersBackfilled,
-      sponsorCredits,
-      adminFees
-    };
-  }
-
-  private static compareUsersByJoinOrder(a: User, b: User): number {
-    const aTimeRaw = new Date(a.createdAt).getTime();
-    const bTimeRaw = new Date(b.createdAt).getTime();
-    const aTime = Number.isFinite(aTimeRaw) ? aTimeRaw : 0;
-    const bTime = Number.isFinite(bTimeRaw) ? bTimeRaw : 0;
-    if (aTime !== bTime) return aTime - bTime;
-    return a.userId.localeCompare(b.userId);
-  }
-
-  private static findNextPositionInMap(
-    nodeMap: Map<string, MatrixNode>,
-    sponsorUserId: string
-  ): { parentId: string; position: 'left' | 'right' } | null {
-    const queue: string[] = [sponsorUserId];
-    while (queue.length > 0) {
-      const currentId = queue.shift()!;
-      const currentNode = nodeMap.get(currentId);
-      if (!currentNode) continue;
-
-      const hasLeft = !!(currentNode.leftChild && nodeMap.has(currentNode.leftChild));
-      const hasRight = !!(currentNode.rightChild && nodeMap.has(currentNode.rightChild));
-
-      if (!hasLeft) {
-        currentNode.leftChild = undefined;
-        return { parentId: currentId, position: 'left' };
-      }
-
-      if (!hasRight) {
-        currentNode.rightChild = undefined;
-        return { parentId: currentId, position: 'right' };
-      }
-
-      queue.push(currentNode.leftChild!, currentNode.rightChild!);
-    }
-
-    return null;
-  }
-
-  private static rebuildMatrixTopology(users: User[]): {
-    matrix: MatrixNode[];
-    users: User[];
-    repositionedMatrixNodes: number;
-  } {
-    const rootUser = users.find((u) => u.userId === '1000001') || users.find((u) => u.isAdmin) || null;
-    const rootUserId = rootUser?.userId || '1000001';
-    const rootUserName = rootUser?.fullName || 'System Admin';
-
-    const nodeMap = new Map<string, MatrixNode>();
-    nodeMap.set(rootUserId, {
-      userId: rootUserId,
-      username: rootUserName,
-      level: 0,
-      position: 0,
-      isActive: true
-    });
-
-    const placementByUserId = new Map<string, { parentId: string | null; position: 'left' | 'right' | null }>();
-    placementByUserId.set(rootUserId, { parentId: null, position: null });
-
-    const placeMember = (member: User, preferredSponsorId?: string | null): boolean => {
-      const sponsorRoot = preferredSponsorId && nodeMap.has(preferredSponsorId) ? preferredSponsorId : rootUserId;
-      const placement =
-        this.findNextPositionInMap(nodeMap, sponsorRoot)
-        || this.findNextPositionInMap(nodeMap, rootUserId);
-      if (!placement) return false;
-
-      const parentNode = nodeMap.get(placement.parentId);
-      if (!parentNode) return false;
-
-      const matrixNode: MatrixNode = {
-        userId: member.userId,
-        username: member.fullName || member.userId,
-        level: (parentNode.level || 0) + 1,
-        position: placement.position === 'left' ? 0 : 1,
-        parentId: placement.parentId,
-        isActive: member.isActive && member.accountStatus === 'active'
-      };
-
-      nodeMap.set(member.userId, matrixNode);
-      if (placement.position === 'left') {
-        parentNode.leftChild = member.userId;
-      } else {
-        parentNode.rightChild = member.userId;
-      }
-
-      placementByUserId.set(member.userId, {
-        parentId: placement.parentId,
-        position: placement.position
-      });
-      return true;
-    };
-
-    const orderedMembers = [...users]
-      .filter((u) => u.userId !== rootUserId && !u.isAdmin)
-      .sort((a, b) => this.compareUsersByJoinOrder(a, b));
-
-    let pending = orderedMembers;
-    let guard = 0;
-    while (pending.length > 0 && guard < orderedMembers.length + 5) {
-      const nextPending: User[] = [];
-      let placedInPass = 0;
-
-      for (const member of pending) {
-        if (member.sponsorId && !nodeMap.has(member.sponsorId)) {
-          nextPending.push(member);
-          continue;
-        }
-
-        if (placeMember(member, member.sponsorId)) {
-          placedInPass += 1;
-        } else {
-          nextPending.push(member);
-        }
-      }
-
-      if (nextPending.length === 0) break;
-
-      if (placedInPass === 0) {
-        for (const member of nextPending) {
-          placeMember(member, rootUserId);
-        }
-        pending = [];
-        break;
-      }
-
-      pending = nextPending;
-      guard += 1;
-    }
-
-    let repositionedMatrixNodes = 0;
-    const rebuiltUsers = users.map((member) => {
-      if (member.userId === rootUserId) {
-        if (member.parentId !== null || member.position !== null) {
-          repositionedMatrixNodes += 1;
-        }
-        return { ...member, parentId: null, position: null };
-      }
-
-      const placement = placementByUserId.get(member.userId);
-      if (!placement) return member;
-
-      if ((member.parentId || null) !== (placement.parentId || null) || (member.position || null) !== placement.position) {
-        repositionedMatrixNodes += 1;
-      }
-
-      return {
-        ...member,
-        parentId: placement.parentId,
-        position: placement.position
-      };
-    });
-
-    const rebuiltMatrix = Array.from(nodeMap.values()).sort((a, b) =>
-      (a.level - b.level) || a.userId.localeCompare(b.userId)
-    );
-
-    return {
-      matrix: rebuiltMatrix,
-      users: rebuiltUsers,
-      repositionedMatrixNodes
-    };
-  }
-
-  private static createEmptyHelpTrackerReconciliationReport(): HelpTrackerReconciliationReport {
-    return {
-      scannedTrackers: 0,
-      createdTrackers: 0,
-      removedTrackers: 0,
-      repairedLevels: 0,
-      repairedQueueItems: 0,
-      walletSyncs: 0,
-      issues: []
-    };
-  }
-
-  private static createEmptyMatrixRebuildReport(): MatrixLogicRebuildReport {
-    return {
-      activatedUsers: 0,
-      activatedMatrixNodes: 0,
-      repositionedMatrixNodes: 0,
-      directCountsUpdated: 0,
-      removedMatrixTransactions: 0,
-      removedMatrixSafetyPoolEntries: 0,
-      trackersReset: 0,
-      replayedMembers: 0,
-      backfilledActivationUsers: 0,
-      backfilledDirectIncomeEntries: 0,
-      backfilledAdminFeeEntries: 0,
-      reconciliation: this.createEmptyHelpTrackerReconciliationReport()
-    };
-  }
-
-  private static normalizeMatrixRebuildReport(value?: Partial<MatrixLogicRebuildReport> | null): MatrixLogicRebuildReport {
-    const empty = this.createEmptyMatrixRebuildReport();
-    if (!value || typeof value !== 'object') {
-      return empty;
-    }
-
-    return {
-      ...empty,
-      ...value,
-      reconciliation: {
-        ...empty.reconciliation,
-        ...(value.reconciliation || {})
-      }
-    };
-  }
-
-  private static createDefaultRemoteMatrixRebuildJob(): RemoteMatrixRebuildJob {
-    return {
-      status: 'idle',
-      phase: 'idle',
-      processed: 0,
-      total: 0,
-      batchSize: 0,
-      options: null,
-      report: null,
-      error: null,
-      startedAt: null,
-      finishedAt: null,
-      updatedAt: null
-    };
-  }
-
-  private static getReplayUsersForMatrixRebuild(): User[] {
-    const nodeMap = new Map(this.getMatrix().map((node) => [node.userId, node]));
-    return [...this.getUsers()]
-      .filter((user) => !user.isAdmin && !!nodeMap.get(user.userId)?.parentId)
-      .sort((a, b) => this.compareUsersByJoinOrder(a, b));
-  }
-
-  private static getRemoteMatrixRebuildJobEndpoint(): string {
-    return `${this.REMOTE_SYNC_BASE_URL}/api/rebuild-matrix-job`;
-  }
-
-  private static async readRemoteMatrixRebuildJob(timeoutMs: number = 15000): Promise<RemoteMatrixRebuildJob> {
-    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
-      return this.createDefaultRemoteMatrixRebuildJob();
-    }
-
-    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeout = setTimeout(() => controller?.abort(), timeoutMs);
-    try {
-      const response = await fetch(this.getRemoteMatrixRebuildJobEndpoint(), {
-        method: 'GET',
-        signal: controller?.signal
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to load rebuild job state (HTTP ${response.status})`);
-      }
-      const payload = await response.json() as { job?: Partial<RemoteMatrixRebuildJob> };
-      const empty = this.createDefaultRemoteMatrixRebuildJob();
-      const job = payload?.job && typeof payload.job === 'object' ? payload.job : {};
-      return {
-        ...empty,
-        ...job,
-        report: this.normalizeMatrixRebuildReport(job.report)
-      };
-    } finally {
-      clearTimeout(timeout);
+    // After this activation, ancestors may now have enough locked income
+    // (from the help events just registered) to process THEIR OWN pending
+    // contributions at higher levels.  Sweep the full ancestor chain.
+    // Skip during bulk operations (remoteSyncSuspendDepth > 0) to avoid O(N²)
+    // freeze — the caller should invoke sweepPendingContributions() once after
+    // the entire batch completes.
+    if (this.remoteSyncSuspendDepth === 0) {
+      this.sweepPendingContributions();
     }
   }
 
-  private static async writeRemoteMatrixRebuildJob(
-    job: Partial<RemoteMatrixRebuildJob>,
-    options?: { reset?: boolean; timeoutMs?: number }
-  ): Promise<RemoteMatrixRebuildJob> {
-    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
-      return {
-        ...this.createDefaultRemoteMatrixRebuildJob(),
-        ...job,
-        report: this.normalizeMatrixRebuildReport(job.report)
-      };
-    }
-
-    const timeoutMs = Math.max(1500, Number(options?.timeoutMs ?? 15000));
-    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeout = setTimeout(() => controller?.abort(), timeoutMs);
-    try {
-      const response = await fetch(this.getRemoteMatrixRebuildJobEndpoint(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job, reset: options?.reset === true }),
-        signal: controller?.signal
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to persist rebuild job state (HTTP ${response.status})`);
-      }
-      const payload = await response.json() as { job?: Partial<RemoteMatrixRebuildJob> };
-      const empty = this.createDefaultRemoteMatrixRebuildJob();
-      const nextJob = payload?.job && typeof payload.job === 'object' ? payload.job : {};
-      return {
-        ...empty,
-        ...nextJob,
-        report: this.normalizeMatrixRebuildReport(nextJob.report)
-      };
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  private static async prepareMatrixRebuildState(options?: {
-    preserveMatrixTransactions?: boolean;
-    activateLegacyInactiveUsers?: boolean;
-  }): Promise<MatrixLogicRebuildReport> {
-    return await this.runWithRemoteSyncPaused(async () => {
-      return this.runWithLocalStateTransaction(async () => {
-        const activateLegacyInactiveUsers = options?.activateLegacyInactiveUsers !== false;
-        const users = this.getUsers();
-        const matrix = this.getMatrix();
-
-        if (users.length === 0) {
-          throw new Error('Matrix rebuild aborted: no users were loaded from the backend. Refresh admin data and retry.');
-        }
-
-        const report = this.createEmptyMatrixRebuildReport();
-        const directCountsBySponsor = new Map<string, number>();
-        for (const member of users) {
-          if (!member.sponsorId) continue;
-          directCountsBySponsor.set(member.sponsorId, (directCountsBySponsor.get(member.sponsorId) || 0) + 1);
-        }
-
-        const normalizedUsers = users.map((user) => {
-          const next: User = { ...user };
-          const computedDirect = directCountsBySponsor.get(user.userId) || 0;
-          if ((next.directCount || 0) !== computedDirect) {
-            next.directCount = computedDirect;
-            report.directCountsUpdated += 1;
-          }
-
-          const shouldAutoActivate = activateLegacyInactiveUsers
-            && !next.isAdmin
-            && next.accountStatus !== 'temp_blocked'
-            && next.accountStatus !== 'permanent_blocked';
-          if (shouldAutoActivate) {
-            const wasInactive = !next.isActive || next.accountStatus !== 'active';
-            if (wasInactive) {
-              report.activatedUsers += 1;
-            }
-            next.isActive = true;
-            next.accountStatus = 'active';
-            if (!next.activatedAt) {
-              next.activatedAt = new Date().toISOString();
-            }
-          }
-
-          return next;
-        });
-
-        const rebuiltTopology = this.rebuildMatrixTopology(normalizedUsers);
-        report.repositionedMatrixNodes = rebuiltTopology.repositionedMatrixNodes;
-        const normalizedUsersWithTopology = rebuiltTopology.users;
-        this.saveUsers(normalizedUsersWithTopology);
-
-        const backfill = this.backfillMissingActivationEffects(normalizedUsersWithTopology);
-        report.backfilledActivationUsers = backfill.users;
-        report.backfilledDirectIncomeEntries = backfill.sponsorCredits;
-        report.backfilledAdminFeeEntries = backfill.adminFees;
-
-        const userByUserId = new Map(normalizedUsersWithTopology.map((u) => [u.userId, u]));
-        const previousNodeByUserId = new Map(matrix.map((node) => [node.userId, node]));
-        const normalizedMatrix = rebuiltTopology.matrix.map((node) => {
-          const owner = userByUserId.get(node.userId);
-          if (!owner) return node;
-          const shouldNodeBeActive = owner.isActive && owner.accountStatus === 'active';
-          if (node.isActive !== shouldNodeBeActive) {
-            return { ...node, isActive: shouldNodeBeActive };
-          }
-          return node;
-        });
-        for (const node of normalizedMatrix) {
-          const previous = previousNodeByUserId.get(node.userId);
-          if (previous && previous.isActive !== node.isActive) {
-            report.activatedMatrixNodes += 1;
-          }
-        }
-        this.saveMatrix(normalizedMatrix);
-
-        const transactions = this.getTransactions();
-        const keptTransactions: Transaction[] = [];
-        for (const tx of transactions) {
-          if (!this.isMatrixTransactionForRebuild(tx)) {
-            keptTransactions.push(tx);
-            continue;
-          }
-          report.removedMatrixTransactions += 1;
-        }
-        this.saveTransactions(keptTransactions);
-
-        const wallets = this.getWallets();
-        for (const wallet of wallets) {
-          const computed = this.computeIncomeLedgerFromTransactions(wallet.userId);
-          wallet.incomeWallet = computed.incomeWallet;
-          wallet.matrixWallet = computed.matrixWallet;
-          wallet.totalReceived = computed.totalReceived;
-          wallet.totalGiven = computed.totalGiven;
-          wallet.giveHelpLocked = 0;
-          wallet.lockedIncomeWallet = 0;
-        }
-        this.saveWallets(wallets);
-
-        const pool = this.getSafetyPool();
-        const keptPoolTx = pool.transactions.filter((tx) => !this.isMatrixSafetyPoolReasonForRebuild(tx.reason));
-        report.removedMatrixSafetyPoolEntries = pool.transactions.length - keptPoolTx.length;
-        const rebuiltPoolTotal = keptPoolTx.reduce((sum, tx) => sum + tx.amount, 0);
-        this.saveSafetyPool({
-          totalAmount: rebuiltPoolTotal,
-          transactions: keptPoolTx
-        });
-
-        const resetTrackers: UserHelpTracker[] = normalizedUsersWithTopology.map((u) => ({
-          userId: u.id,
-          levels: {},
-          lockedQueue: []
-        }));
-        this.saveHelpTrackers(resetTrackers);
-        this.savePendingMatrixContributions([]);
-        report.trackersReset = resetTrackers.length;
-
-        return report;
-      }, {
-        syncOnCommit: true,
-        syncOptions: {
-          full: true,
-          force: true,
-          timeoutMs: 300000,
-          maxAttempts: 2,
-          retryDelayMs: 5000
-        }
-      });
-    });
-  }
-
-  private static async replayMatrixRebuildBatch(
-    replayUserIds: string[],
-    report: MatrixLogicRebuildReport,
-    options?: { preserveMatrixTransactions?: boolean }
-  ): Promise<MatrixLogicRebuildReport> {
-    const preserveMatrixTransactions = !!options?.preserveMatrixTransactions;
-    const nextReport = this.normalizeMatrixRebuildReport(report);
-
-    return await this.runWithRemoteSyncPaused(async () => {
-      return this.runWithLocalStateTransaction(async () => {
-        const useBulkRebuildMode = !preserveMatrixTransactions;
-        if (useBulkRebuildMode) {
-          this._bulkRebuildMode = true;
-        }
-        this._bulkSafetyPoolTotal = 0;
-
-        try {
-          const userByUserId = new Map(this.getUsers().map((user) => [user.userId, user]));
-          const nodeMap = new Map(this.getMatrix().map((node) => [node.userId, node]));
-
-          for (const replayUserId of replayUserIds) {
-            const replayUser = userByUserId.get(replayUserId);
-            const replayNode = nodeMap.get(replayUserId);
-            if (!replayUser || !replayNode?.parentId) continue;
-            this.processMatrixHelpForNewMember(replayUser.userId, replayUser.id);
-            nextReport.replayedMembers += 1;
-          }
-
-          if (useBulkRebuildMode && this._bulkSafetyPoolTotal > 0) {
-            const currentPool = this.getSafetyPool();
-            currentPool.totalAmount += this._bulkSafetyPoolTotal;
-            this.saveSafetyPool(currentPool);
-          }
-
-          return nextReport;
-        } finally {
-          this._bulkSafetyPoolTotal = 0;
-          this._bulkRebuildMode = false;
-        }
-      }, {
-        syncOnCommit: true,
-        syncOptions: {
-          full: false,
-          force: true,
-          timeoutMs: 300000,
-          maxAttempts: 2,
-          retryDelayMs: 5000
-        }
-      });
-    });
-  }
-
-  private static async finalizeMatrixRebuildState(
-    report: MatrixLogicRebuildReport,
-    options?: { preserveMatrixTransactions?: boolean }
-  ): Promise<MatrixLogicRebuildReport> {
-    const preserveMatrixTransactions = !!options?.preserveMatrixTransactions;
-    const nextReport = this.normalizeMatrixRebuildReport(report);
-
-    return await this.runWithRemoteSyncPaused(async () => {
-      return this.runWithLocalStateTransaction(async () => {
-        nextReport.reconciliation = this.reconcileHelpTrackers();
-        if (preserveMatrixTransactions) {
-          const finalPool = this.getSafetyPool();
-          const finalPoolTotal = finalPool.transactions.reduce((sum, tx) => sum + tx.amount, 0);
-          this.saveSafetyPool({
-            totalAmount: finalPoolTotal,
-            transactions: finalPool.transactions
-          });
-        }
-        return nextReport;
-      }, {
-        syncOnCommit: true,
-        syncOptions: {
-          full: false,
-          force: true,
-          timeoutMs: 300000,
-          maxAttempts: 2,
-          retryDelayMs: 5000
-        }
-      });
-    });
-  }
-
-  static async activateUsersAndRebuildMatrixLogic(
-    onProgress?: (done: number, total: number) => void,
-    options?: {
-      preserveMatrixTransactions?: boolean;
-      activateLegacyInactiveUsers?: boolean;
-    }
-  ): Promise<MatrixLogicRebuildReport> {
-    if (!this.acquireMatrixRebuildLock()) {
-      throw new Error('A matrix rebuild is already running. Wait for it to finish, then refresh once before trying again.');
-    }
-
-    const preserveMatrixTransactions = !!options?.preserveMatrixTransactions;
-    const activateLegacyInactiveUsers = options?.activateLegacyInactiveUsers !== false;
-    const jobOptions = { preserveMatrixTransactions, activateLegacyInactiveUsers };
-    const batchSize = 25;
-    let report = this.createEmptyMatrixRebuildReport();
-    let processed = 0;
-    let total = 0;
-
-    try {
-      await this.ensureAdminStateHydratedForRebuild();
-      const existingJob = await this.readRemoteMatrixRebuildJob();
-      const canResume = existingJob.status === 'running'
-        && existingJob.phase === 'replaying'
-        && existingJob.options?.preserveMatrixTransactions === preserveMatrixTransactions
-        && existingJob.options?.activateLegacyInactiveUsers === activateLegacyInactiveUsers;
-
-      if (canResume) {
-        report = this.normalizeMatrixRebuildReport(existingJob.report);
-      } else {
-        report = await this.prepareMatrixRebuildState({ preserveMatrixTransactions, activateLegacyInactiveUsers });
-        const initialReplayUsers = this.getReplayUsersForMatrixRebuild();
-        total = initialReplayUsers.length;
-        processed = 0;
-        await this.writeRemoteMatrixRebuildJob({
-          status: 'running',
-          phase: 'replaying',
-          processed,
-          total,
-          batchSize,
-          options: jobOptions,
-          report,
-          error: null,
-          finishedAt: null
-        }, { reset: true });
-      }
-
-      const replayUsers = this.getReplayUsersForMatrixRebuild();
-      total = replayUsers.length;
-      processed = canResume ? Math.min(Math.max(0, existingJob.processed || 0), total) : 0;
-      if (onProgress) onProgress(processed, total);
-
-      if (canResume) {
-        await this.writeRemoteMatrixRebuildJob({
-          status: 'running',
-          phase: 'replaying',
-          processed,
-          total,
-          batchSize,
-          options: jobOptions,
-          report,
-          error: null
-        });
-      }
-
-      for (let start = processed; start < total; start += batchSize) {
-        const end = Math.min(start + batchSize, total);
-        const replayBatch = replayUsers.slice(start, end).map((user) => user.userId);
-        report = await this.replayMatrixRebuildBatch(replayBatch, report, { preserveMatrixTransactions });
-        processed = end;
-        await this.writeRemoteMatrixRebuildJob({
-          status: 'running',
-          phase: 'replaying',
-          processed,
-          total,
-          batchSize,
-          options: jobOptions,
-          report,
-          error: null
-        });
-        if (onProgress) onProgress(processed, total);
-      }
-
-      report = await this.finalizeMatrixRebuildState(report, { preserveMatrixTransactions });
-      await this.writeRemoteMatrixRebuildJob({
-        status: 'completed',
-        phase: 'completed',
-        processed: total,
-        total,
-        batchSize,
-        options: jobOptions,
-        report,
-        error: null
-      });
-      return report;
-    } catch (error) {
-      await this.writeRemoteMatrixRebuildJob({
-        status: 'failed',
-        phase: 'failed',
-        processed,
-        total,
-        batchSize,
-        options: jobOptions,
-        report,
-        error: error instanceof Error ? error.message : 'Matrix rebuild failed'
-      }).catch(() => {
-        // Best-effort checkpoint update only.
-      });
-      throw error;
-    } finally {
-      this.releaseMatrixRebuildLock();
-    }
-  }
-
-  static reconcileHelpTrackers(): HelpTrackerReconciliationReport {
-    const report: HelpTrackerReconciliationReport = {
-      scannedTrackers: 0,
-      createdTrackers: 0,
-      removedTrackers: 0,
-      repairedLevels: 0,
-      repairedQueueItems: 0,
-      walletSyncs: 0,
-      issues: []
-    };
-
-    const users = this.getUsers();
-    const userIdSet = new Set(users.map(u => u.id));
-    const rawTrackers = this.getHelpTrackers();
-    report.scannedTrackers = rawTrackers.length;
-
-    const now = new Date().toISOString();
-    const cleanedTrackers: UserHelpTracker[] = [];
-    const isValidDate = (v?: string) => !!v && !Number.isNaN(new Date(v).getTime());
-    const toSafeNumber = (v: unknown) => {
-      const num = Number(v);
-      return Number.isFinite(num) ? num : 0;
-    };
-
-    for (const tracker of rawTrackers) {
-      if (!userIdSet.has(tracker.userId)) {
-        report.removedTrackers += 1;
-        report.issues.push(`Removed tracker for missing userId: ${tracker.userId}`);
-        continue;
-      }
-
-      const normalizedLevels: Record<string, LevelHelpTrackerState> = {};
-      const rawLevels = tracker.levels || {};
-      for (const [key, state] of Object.entries(rawLevels)) {
-        const level = Number(key);
-        if (!Number.isInteger(level) || level < 1 || level > helpDistributionTable.length) {
-          report.repairedLevels += 1;
-          report.issues.push(`Dropped invalid level "${key}" for userId: ${tracker.userId}`);
-          continue;
-        }
-
-        const table = helpDistributionTable[level - 1];
-        const leftEvents = Math.max(0, Math.floor(toSafeNumber(state.leftEvents)));
-        const rightEvents = Math.max(0, Math.floor(toSafeNumber(state.rightEvents)));
-        const maxEvents = Math.min(leftEvents + rightEvents, table.users);
-        let matchedEvents = Math.max(0, Math.floor(toSafeNumber(state.matchedEvents)));
-        if (matchedEvents > maxEvents) {
-          matchedEvents = maxEvents;
-          report.repairedLevels += 1;
-        }
-
-        let receiveEvents = Math.max(0, Math.floor(toSafeNumber(state.receiveEvents)));
-        if (receiveEvents < matchedEvents) {
-          receiveEvents = matchedEvents;
-          report.repairedLevels += 1;
-        }
-        if (receiveEvents > maxEvents) {
-          receiveEvents = maxEvents;
-          report.repairedLevels += 1;
-        }
-
-        let giveEvents = Math.max(0, Math.floor(toSafeNumber(state.giveEvents)));
-        if (giveEvents > 2) {
-          giveEvents = 2;
-          report.repairedLevels += 1;
-        }
-        if (giveEvents > receiveEvents) {
-          giveEvents = receiveEvents;
-          report.repairedLevels += 1;
-        }
-
-        normalizedLevels[String(level)] = {
-          level,
-          perUserHelp: table.perUserHelp,
-          directRequired: this.getCumulativeDirectRequired(level),
-          leftEvents,
-          rightEvents,
-          matchedEvents,
-          receiveEvents,
-          receivedAmount: Math.max(0, toSafeNumber(state.receivedAmount)),
-          giveEvents,
-          givenAmount: Math.max(0, toSafeNumber(state.givenAmount)),
-          lockedAmount: Math.max(0, toSafeNumber(state.lockedAmount)),
-          lockedReceiveAmount: Math.max(0, toSafeNumber((state as any).lockedReceiveAmount)),
-          safetyDeducted: Math.max(0, toSafeNumber(state.safetyDeducted))
-        };
-      }
-
-      const rawQueue = Array.isArray(tracker.lockedQueue) ? tracker.lockedQueue : [];
-      const normalizedQueue: LockedGiveHelpItem[] = [];
-      for (const item of rawQueue) {
-        const level = Number(item.level);
-        const amount = toSafeNumber(item.amount);
-        if (!Number.isInteger(level) || level < 1 || level > helpDistributionTable.length || amount <= 0) {
-          report.repairedQueueItems += 1;
-          continue;
-        }
-
-        const status: LockedGiveHelpItem['status'] = item.status === 'released' ? 'released' : 'locked';
-        const normalizedItem: LockedGiveHelpItem = {
-          id: item.id || `lgh_repair_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          level,
-          amount,
-          fromUserId: item.fromUserId,
-          createdAt: isValidDate(item.createdAt) ? item.createdAt : now,
-          status
-        };
-
-        if (status === 'released') {
-          normalizedItem.releasedAt = isValidDate(item.releasedAt) ? item.releasedAt : now;
-        }
-
-        normalizedQueue.push(normalizedItem);
-      }
-
-      const queueLockedByLevel = new Map<number, number>();
-      for (const item of normalizedQueue) {
-        if (item.status !== 'locked') continue;
-        queueLockedByLevel.set(item.level, (queueLockedByLevel.get(item.level) || 0) + item.amount);
-      }
-
-      for (const [level, lockedAmount] of queueLockedByLevel.entries()) {
-        const key = String(level);
-        if (!normalizedLevels[key]) {
-          const table = helpDistributionTable[level - 1];
-          normalizedLevels[key] = {
-            level,
-            perUserHelp: table.perUserHelp,
-            directRequired: this.getCumulativeDirectRequired(level),
-            leftEvents: 0,
-            rightEvents: 0,
-            matchedEvents: 0,
-            receiveEvents: 0,
-            receivedAmount: 0,
-            giveEvents: 0,
-            givenAmount: 0,
-            lockedAmount,
-            lockedReceiveAmount: 0,
-            safetyDeducted: 0
-          };
-          report.repairedLevels += 1;
-        }
-      }
-
-      for (const [key, state] of Object.entries(normalizedLevels)) {
-        const level = Number(key);
-        const queueLockedAmount = queueLockedByLevel.get(level) || 0;
-        const mergedLockedAmount = Math.max(state.lockedAmount || 0, queueLockedAmount);
-        if (Math.abs(state.lockedAmount - mergedLockedAmount) > 0.0001) {
-          state.lockedAmount = mergedLockedAmount;
-          normalizedLevels[key] = state;
-          report.repairedLevels += 1;
-        }
-      }
-
-      cleanedTrackers.push({
-        userId: tracker.userId,
-        levels: normalizedLevels,
-        lockedQueue: normalizedQueue
-      });
-    }
-
-    const trackerUserSet = new Set(cleanedTrackers.map(t => t.userId));
-    for (const user of users) {
-      if (!trackerUserSet.has(user.id)) {
-        cleanedTrackers.push({
-          userId: user.id,
-          levels: {},
-          lockedQueue: []
-        });
-        trackerUserSet.add(user.id);
-        report.createdTrackers += 1;
-      }
-    }
-
-    this.saveHelpTrackers(cleanedTrackers);
-
-    const trackerMap = new Map(cleanedTrackers.map(t => [t.userId, t]));
-    const wallets = this.getWallets();
-    let walletChanged = false;
-    for (const wallet of wallets) {
-      const tracker = trackerMap.get(wallet.userId);
-      if (!tracker) continue;
-      const queueLockedGiveTotal = tracker.lockedQueue
-        .filter(i => i.status === 'locked')
-        .reduce((sum, i) => sum + i.amount, 0);
-      const levelLockedGiveTotal = Object.values(tracker.levels)
-        .reduce((sum, state) => sum + (state.lockedAmount || 0), 0);
-      const lockedGiveTotal = Math.max(queueLockedGiveTotal, levelLockedGiveTotal);
-      const lockedIncomeTotal = Object.values(tracker.levels)
-        .reduce((sum, state) => sum + (state.lockedReceiveAmount || 0) + (state.lockedAmount || 0), 0);
-
-      if (Math.abs((wallet.giveHelpLocked || 0) - lockedGiveTotal) > 0.0001) {
-        wallet.giveHelpLocked = lockedGiveTotal;
-        walletChanged = true;
-        report.walletSyncs += 1;
-      }
-      if (Math.abs((wallet.lockedIncomeWallet || 0) - lockedIncomeTotal) > 0.0001) {
-        wallet.lockedIncomeWallet = lockedIncomeTotal;
-        walletChanged = true;
-        report.walletSyncs += 1;
-      }
-    }
-
-    if (walletChanged) {
-      this.saveWallets(wallets);
-    }
-
-    for (const user of users) {
-      this.releaseLockedGiveHelp(user.id);
-      this.releaseLockedReceiveHelp(user.id);
-      this.syncUserAchievements(user.id);
-    }
-
-    return report;
-  }
 
   static createWallet(userId: string): Wallet {
     const wallet: Wallet = {
@@ -4285,7 +3508,9 @@ class Database {
       lockedIncomeWallet: 0,
       giveHelpLocked: 0,
       totalReceived: 0,
-      totalGiven: 0
+      totalGiven: 0,
+      pendingSystemFee: 0,
+      lastSystemFeeDate: null
     };
     const wallets = this.getWallets();
     wallets.push(wallet);
@@ -4301,6 +3526,178 @@ class Database {
     wallets[index] = { ...wallets[index], ...updates };
     this.saveWallets(wallets);
     return wallets[index];
+  }
+
+  // ==================== MONTHLY SYSTEM FEE ====================
+
+  private static _createSystemFeeTransaction(
+    userId: string, amount: number, sourceWallet: string
+  ): void {
+    this.createTransaction({
+      id: generateEventId('tx', 'system_fee'),
+      userId,
+      type: 'system_fee' as any,
+      amount: -amount,
+      status: 'completed',
+      description: `Monthly system fee ($${amount}) deducted from ${sourceWallet}`,
+      createdAt: new Date().toISOString(),
+      completedAt: new Date().toISOString()
+    });
+  }
+
+  static processMonthlySystemFee(userId: string): { deducted: boolean; pending: boolean; alreadyCurrent: boolean } {
+    if (this._bulkRebuildMode) return { deducted: false, pending: false, alreadyCurrent: true };
+
+    const user = this.getUserById(userId);
+    if (!user || !user.isActive || !user.activatedAt) {
+      return { deducted: false, pending: false, alreadyCurrent: true };
+    }
+
+    const wallet = this.getWallet(userId);
+    if (!wallet) return { deducted: false, pending: false, alreadyCurrent: true };
+
+    const activatedAt = new Date(user.activatedAt);
+    const now = new Date();
+
+    // Use transaction history as source of truth for last fee date
+    const allTx = this.getUserTransactions(userId);
+    const feeTxs = allTx.filter(t => (t.type as string) === 'system_fee' && t.status === 'completed');
+    const lastFeeTx = feeTxs.length > 0 ? feeTxs[0] : null; // sorted by createdAt desc
+    const lastFeeDate = lastFeeTx ? new Date(lastFeeTx.createdAt) : null;
+
+    // Count how many monthly fees are owed
+    // Starting from activatedAt + 1 month, each month a $1 fee is due
+    const feeStartDate = new Date(activatedAt);
+    feeStartDate.setMonth(feeStartDate.getMonth() + 1);
+
+    if (now < feeStartDate) {
+      // Not even 1 month since activation
+      return { deducted: false, pending: false, alreadyCurrent: true };
+    }
+
+    // Count total months owed since activation
+    let totalMonthsOwed = 0;
+    const cursor = new Date(feeStartDate);
+    while (cursor <= now) {
+      totalMonthsOwed++;
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+
+    // Count how many already paid (from transaction history)
+    const totalPaid = feeTxs.length;
+
+    // Remaining unpaid months
+    const unpaidMonths = Math.max(0, totalMonthsOwed - totalPaid);
+
+    if (unpaidMonths <= 0) {
+      // All caught up
+      if ((wallet.pendingSystemFee || 0) > 0) {
+        this.updateWallet(userId, { pendingSystemFee: 0 });
+      }
+      return { deducted: false, pending: false, alreadyCurrent: true };
+    }
+
+    const totalOwed = unpaidMonths; // $1 per month
+    let totalDeducted = 0;
+
+    // Re-read wallet for freshest balances
+    let freshWallet = this.getWallet(userId);
+    if (!freshWallet) return { deducted: false, pending: false, alreadyCurrent: true };
+
+    // Deduct as many months as possible, $1 at a time
+    for (let i = 0; i < unpaidMonths; i++) {
+      // Re-read wallet each iteration since balance changes
+      freshWallet = this.getWallet(userId)!;
+      if (!freshWallet) break;
+
+      // Priority 1: depositWallet
+      if (freshWallet.depositWallet >= 1) {
+        this.updateWallet(userId, {
+          depositWallet: freshWallet.depositWallet - 1,
+          lastSystemFeeDate: now.toISOString(),
+        });
+        this._createSystemFeeTransaction(userId, 1, 'deposit wallet');
+        this.addToSafetyPool(1, userId, 'Monthly system fee');
+        totalDeducted++;
+        continue;
+      }
+
+      // Priority 2: incomeWallet
+      if (freshWallet.incomeWallet >= 1) {
+        this.updateWallet(userId, {
+          incomeWallet: freshWallet.incomeWallet - 1,
+          lastSystemFeeDate: now.toISOString(),
+        });
+        this._createSystemFeeTransaction(userId, 1, 'income wallet');
+        this.addToSafetyPool(1, userId, 'Monthly system fee');
+        totalDeducted++;
+        continue;
+      }
+
+      // No more funds — remaining months stay pending
+      break;
+    }
+
+    const remainingUnpaid = unpaidMonths - totalDeducted;
+    this.updateWallet(userId, {
+      pendingSystemFee: remainingUnpaid,
+      ...(totalDeducted > 0 ? { lastSystemFeeDate: now.toISOString() } : {})
+    });
+
+    return {
+      deducted: totalDeducted > 0,
+      pending: remainingUnpaid > 0,
+      alreadyCurrent: false
+    };
+  }
+
+  static deductPendingSystemFee(userId: string): boolean {
+    if (this._bulkRebuildMode) return false;
+
+    let wallet = this.getWallet(userId);
+    if (!wallet || (wallet.pendingSystemFee || 0) <= 0) return false;
+
+    let remaining = wallet.pendingSystemFee;
+    let deductedAny = false;
+
+    // Deduct $1 at a time until pending is cleared or wallets are empty
+    while (remaining > 0) {
+      wallet = this.getWallet(userId)!;
+      if (!wallet) break;
+
+      // Priority 1: depositWallet
+      if (wallet.depositWallet >= 1) {
+        this.updateWallet(userId, {
+          depositWallet: wallet.depositWallet - 1,
+          lastSystemFeeDate: new Date().toISOString(),
+          pendingSystemFee: remaining - 1
+        });
+        this._createSystemFeeTransaction(userId, 1, 'deposit wallet');
+        this.addToSafetyPool(1, userId, 'Monthly system fee (deferred)');
+        remaining--;
+        deductedAny = true;
+        continue;
+      }
+
+      // Priority 2: incomeWallet
+      if (wallet.incomeWallet >= 1) {
+        this.updateWallet(userId, {
+          incomeWallet: wallet.incomeWallet - 1,
+          lastSystemFeeDate: new Date().toISOString(),
+          pendingSystemFee: remaining - 1
+        });
+        this._createSystemFeeTransaction(userId, 1, 'income wallet');
+        this.addToSafetyPool(1, userId, 'Monthly system fee (deferred)');
+        remaining--;
+        deductedAny = true;
+        continue;
+      }
+
+      // No more funds available
+      break;
+    }
+
+    return deductedAny;
   }
 
   // ==================== PINS ====================
@@ -4660,7 +4057,7 @@ class Database {
 
   private static normalizeSupportCategory(value: unknown): SupportTicketCategory {
     const candidate = String(value || '').trim().toLowerCase() as SupportTicketCategory;
-    return SUPPORT_TICKET_CATEGORIES.includes(candidate) ? candidate : 'technical_issues';
+    return SUPPORT_TICKET_CATEGORIES.includes(candidate) ? candidate : 'other';
   }
 
   private static normalizeSupportStatus(value: unknown): SupportTicketStatus {
@@ -4880,6 +4277,23 @@ class Database {
 
     tickets[index] = updatedTicket;
     this.saveSupportTickets(tickets);
+
+    // Notify the ticket owner when admin replies
+    if (params.sender_type === 'admin') {
+      const ticketOwner = this.getUserByUserId(updatedTicket.user_id);
+      if (ticketOwner) {
+        this.createNotification({
+          id: generateEventId('notif', 'support_reply'),
+          userId: ticketOwner.id,
+          title: 'Support Team Replied',
+          message: `Admin replied to your ticket ${updatedTicket.ticket_id}: "${updatedTicket.subject}"`,
+          type: 'info',
+          isRead: false,
+          createdAt: now
+        });
+      }
+    }
+
     return updatedTicket;
   }
 
@@ -4893,13 +4307,37 @@ class Database {
     if (index === -1) return null;
 
     const now = new Date().toISOString();
+    const prevStatus = tickets[index].status;
+    const newStatus = this.normalizeSupportStatus(status);
     tickets[index] = {
       ...tickets[index],
-      status: this.normalizeSupportStatus(status),
+      status: newStatus,
       updated_at: now,
       admin_reply: options?.adminReply ? String(options.adminReply).trim() : tickets[index].admin_reply
     };
     this.saveSupportTickets(tickets);
+
+    // Notify the ticket owner when status changes
+    if (prevStatus !== newStatus) {
+      const ticketOwner = this.getUserByUserId(tickets[index].user_id);
+      if (ticketOwner) {
+        const statusLabels: Record<string, string> = {
+          open: 'Open', in_progress: 'In Progress',
+          awaiting_user_response: 'Awaiting Your Response',
+          resolved: 'Resolved', closed: 'Closed'
+        };
+        this.createNotification({
+          id: generateEventId('notif', 'support_status'),
+          userId: ticketOwner.id,
+          title: 'Ticket Status Updated',
+          message: `Your ticket ${tickets[index].ticket_id} status changed to "${statusLabels[newStatus] || newStatus}"`,
+          type: newStatus === 'resolved' ? 'success' : 'info',
+          isRead: false,
+          createdAt: now
+        });
+      }
+    }
+
     return tickets[index];
   }
 
@@ -5110,20 +4548,6 @@ class Database {
     if (options?.requireAnySuccess && successCount === 0) {
       throw lastError instanceof Error ? lastError : new Error('Backend hydration failed for all requested batches');
     }
-  }
-
-  private static async ensureAdminStateHydratedForRebuild(): Promise<void> {
-    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
-      return;
-    }
-
-    await this.hydrateFromServerBatches(this.getAdminRemoteSyncBatches(), {
-      strict: true,
-      maxAttempts: 2,
-      timeoutMs: 120000,
-      retryDelayMs: 2000,
-      requireAnySuccess: true
-    });
   }
 
   static async forceRemoteSyncNowWithOptions(options?: {
@@ -6546,6 +5970,11 @@ class Database {
 }
 
 export default Database;
+
+// DEV ONLY: expose Database on window for console testing
+if (typeof window !== 'undefined') {
+  (window as any).Database = Database;
+}
 export { DB_KEYS, generateSevenDigitId, generatePinCode };
 
 // Level-wise Report interface (local)

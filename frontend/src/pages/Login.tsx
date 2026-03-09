@@ -11,7 +11,6 @@ import {
   Eye, EyeOff, Loader2, Lock, ArrowRight, 
   Shield, Users, TrendingUp, Wallet, IdCard
 } from 'lucide-react';
-import Database from '@/db';
 import BrandLogo from '@/components/BrandLogo';
 import PublicFooter from '@/components/PublicFooter';
 
@@ -28,11 +27,7 @@ export default function Login() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Initialize demo data only in local/dev. Never seed production browser state.
   useEffect(() => {
-    if (!import.meta.env.PROD) {
-      Database.initializeDemoData();
-    }
     setMounted(true);
   }, []);
 

@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { useAuthStore, useWalletStore } from '@/store';
+import { useAuthStore, useWalletStore, useSyncRefreshKey } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -23,7 +23,8 @@ export default function Deposit() {
   const navigate = useNavigate();
   const { user, isAuthenticated, logout } = useAuthStore();
   const { wallet, loadWallet } = useWalletStore();
-  
+  const syncKey = useSyncRefreshKey();
+
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [selectedMethod, setSelectedMethod] = useState<PaymentMethod | null>(null);
   const [amount, setAmount] = useState('');
@@ -51,7 +52,7 @@ export default function Deposit() {
       const payments = Database.getUserPayments(user.id);
       setUserPayments(payments);
     }
-  }, [isAuthenticated, user, navigate, loadWallet]);
+  }, [isAuthenticated, user, navigate, loadWallet, syncKey]);
 
   const handleCopy = async (text: string, field: string) => {
     const success = await copyToClipboard(text);

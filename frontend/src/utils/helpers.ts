@@ -300,7 +300,8 @@ export function getTransactionTypeLabel(type: string): string {
     reentry: 'Reentry',
     safety_pool: 'Safety Pool',
     admin_credit: 'Admin Credit',
-    admin_debit: 'Admin Debit'
+    admin_debit: 'Admin Debit',
+    system_fee: 'System Fee'
   };
 
   if (labels[type]) return labels[type];

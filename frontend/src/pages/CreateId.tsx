@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuthStore, useOtpStore, usePinStore } from '@/store';
+import { useAuthStore, useOtpStore, usePinStore, useSyncRefreshKey } from '@/store';
 import Database from '@/db';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -17,6 +17,7 @@ export default function CreateId() {
   const { sendOtp, verifyOtp } = useOtpStore();
   const { unusedPins, loadPins } = usePinStore();
   const displayUser = impersonatedUser || user;
+  const syncKey = useSyncRefreshKey();
 
   const [formData, setFormData] = useState({
     fullName: '',
@@ -50,7 +51,7 @@ export default function CreateId() {
     loadPins(displayUser.id);
     setFormData(prev => ({ ...prev, sponsorId: displayUser.userId }));
     setSponsorName(displayUser.fullName);
-  }, [displayUser, isAuthenticated, loadPins, navigate]);
+  }, [displayUser, isAuthenticated, loadPins, navigate, syncKey]);
 
   const handleSponsorIdChange = (value: string) => {
     const cleanValue = value.replace(/\D/g, '').slice(0, 7);

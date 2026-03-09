@@ -8,7 +8,6 @@ import { createHash } from 'node:crypto';
 import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
 import nodemailer from 'nodemailer';
-import { runMatrixRebuildJob } from './matrixRebuildEngine.js';
 
 const gzipAsync = promisify(zlibGzip);
 
@@ -115,12 +114,9 @@ const DB_KEYS = Object.keys(STATE_COLLECTIONS);
 const SAFETY_POOL_STATE_KEY = 'mlm_safety_pool';
 const SAFETY_POOL_TRANSACTIONS_COLLECTION = 'safety_pool_transactions';
 const STATE_META_COLLECTION = 'state_meta';
-const MATRIX_REBUILD_JOB_COLLECTION = 'matrix_rebuild_jobs';
-const MATRIX_REBUILD_JOB_ID = 'singleton';
 const STATE_BACKUP_JOB_COLLECTION = 'state_backup_jobs';
 const STATE_BACKUP_JOB_ID = 'singleton';
 let stateSnapshotCache = null;
-let activeMatrixRebuildPromise = null;
 let activeStateBackupPromise = null;
 
 const mongoClient = new MongoClient(MONGODB_URI, {
@@ -724,66 +720,6 @@ async function writeStateMetaUpdatedAt(now) {
   );
 }
 
-function createDefaultMatrixRebuildJob() {
-  return {
-    status: 'idle',
-    phase: 'idle',
-    processed: 0,
-    total: 0,
-    batchSize: 0,
-    options: null,
-    report: null,
-    error: null,
-    startedAt: null,
-    finishedAt: null,
-    updatedAt: null
-  };
-}
-
-async function readMatrixRebuildJob() {
-  const doc = await mongoDb.collection(MATRIX_REBUILD_JOB_COLLECTION).findOne({ _id: MATRIX_REBUILD_JOB_ID });
-  if (!doc) {
-    return createDefaultMatrixRebuildJob();
-  }
-
-  const out = { ...doc };
-  delete out._id;
-  delete out.createdAt;
-  return {
-    ...createDefaultMatrixRebuildJob(),
-    ...out
-  };
-}
-
-async function writeMatrixRebuildJob(patch, options = {}) {
-  const now = new Date().toISOString();
-  const base = options.reset ? createDefaultMatrixRebuildJob() : await readMatrixRebuildJob();
-  const next = {
-    ...base,
-    ...(patch && typeof patch === 'object' ? patch : {})
-  };
-
-  next.updatedAt = now;
-  if (next.status === 'running') {
-    next.startedAt = next.startedAt || now;
-    next.finishedAt = null;
-    next.error = null;
-  } else if (next.status === 'completed' || next.status === 'failed' || next.status === 'idle') {
-    next.finishedAt = next.finishedAt || now;
-  }
-
-  await mongoDb.collection(MATRIX_REBUILD_JOB_COLLECTION).updateOne(
-    { _id: MATRIX_REBUILD_JOB_ID },
-    {
-      $set: next,
-      $setOnInsert: { createdAt: now }
-    },
-    { upsert: true }
-  );
-
-  return next;
-}
-
 async function ensureStateBackupDir() {
   await fs.mkdir(STATE_BACKUP_DIR, { recursive: true });
 }
@@ -1169,46 +1105,6 @@ async function triggerStateBackupJob(options = {}) {
   })();
 
   return activeStateBackupPromise;
-}
-
-function isMatrixRebuildRunning(job) {
-  return !!job && job.status === 'running' && job.phase !== 'completed' && job.phase !== 'failed';
-}
-
-async function triggerMatrixRebuildJob(options = {}) {
-  if (activeMatrixRebuildPromise) {
-    return activeMatrixRebuildPromise;
-  }
-
-  const rebuildStateKeys = [
-    'mlm_users',
-    'mlm_wallets',
-    'mlm_transactions',
-    'mlm_matrix',
-    'mlm_safety_pool',
-    'mlm_help_trackers',
-    'mlm_matrix_pending_contributions'
-  ];
-
-  activeMatrixRebuildPromise = (async () => {
-    try {
-      return await runMatrixRebuildJob({
-        options,
-        batchSize: 25,
-        readSnapshot: async () => readStateFromCollections(rebuildStateKeys),
-        persistState: async (runtime, keys) => {
-          const serialized = runtime.serialize(keys);
-          await writeStateToCollections(serialized, true, false);
-        },
-        readJob: async () => readMatrixRebuildJob(),
-        writeJob: async (patch, writeOptions) => writeMatrixRebuildJob(patch, writeOptions)
-      });
-    } finally {
-      activeMatrixRebuildPromise = null;
-    }
-  })();
-
-  return activeMatrixRebuildPromise;
 }
 
 function hasFullStateSnapshot(state) {
@@ -1691,105 +1587,6 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && url.pathname === '/api/rebuild-matrix-job') {
-    try {
-      const job = await readMatrixRebuildJob();
-      sendJson(res, 200, { ok: true, job });
-    } catch (error) {
-      sendJson(res, 500, { ok: false, error: getErrorMessage(error, 'Failed to read rebuild job state') });
-    }
-    return;
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/rebuild-matrix-job') {
-    try {
-      const body = await getRequestBody(req);
-      const parsed = body ? JSON.parse(body) : {};
-      const jobPatch =
-        parsed?.job && typeof parsed.job === 'object' && !Array.isArray(parsed.job)
-          ? parsed.job
-          : {};
-      const reset = parsed?.reset === true;
-      const job = await writeMatrixRebuildJob(jobPatch, { reset });
-      sendJson(res, 200, { ok: true, job });
-    } catch (error) {
-      const status = error instanceof SyntaxError ? 400 : 500;
-      sendJson(res, status, { ok: false, error: getErrorMessage(error, 'Failed to write rebuild job state') });
-    }
-    return;
-  }
-
-  if (req.method === 'GET' && url.pathname === '/api/rebuild-matrix/status') {
-    try {
-      const job = await readMatrixRebuildJob();
-      sendJson(res, 200, { ok: true, job, running: !!activeMatrixRebuildPromise || isMatrixRebuildRunning(job) });
-    } catch (error) {
-      sendJson(res, 500, { ok: false, error: getErrorMessage(error, 'Failed to read matrix rebuild status') });
-    }
-    return;
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/rebuild-matrix/start') {
-    try {
-      const body = await getRequestBody(req);
-      const parsed = body ? JSON.parse(body) : {};
-      const options =
-        parsed?.options && typeof parsed.options === 'object' && !Array.isArray(parsed.options)
-          ? parsed.options
-          : {};
-      const skipBackup = parsed?.skipBackup === true;
-
-      if (activeMatrixRebuildPromise) {
-        const job = await readMatrixRebuildJob();
-        sendJson(res, 202, { ok: true, started: false, running: true, job });
-        return;
-      }
-
-      const existingJob = await readMatrixRebuildJob();
-      if (existingJob.status === 'running' && existingJob.phase === 'replaying') {
-        void triggerMatrixRebuildJob(existingJob.options || options).catch((error) => {
-          console.error(`[matrix-rebuild] ${getErrorMessage(error, 'Matrix rebuild failed')}`);
-        });
-        sendJson(res, 202, { ok: true, started: true, resumed: true, running: true, job: existingJob });
-        return;
-      }
-
-      let backup = null;
-      if (!skipBackup) {
-        backup = await createStateBackup({
-          prefix: 'pre-rebuild-backup',
-          source: 'automatic',
-          reason: 'pre_rebuild_matrix'
-        });
-      }
-
-      const job = await writeMatrixRebuildJob({
-        status: 'running',
-        phase: 'preparing',
-        processed: 0,
-        total: 0,
-        batchSize: 25,
-        options: {
-          preserveMatrixTransactions: options?.preserveMatrixTransactions === true,
-          activateLegacyInactiveUsers: options?.activateLegacyInactiveUsers !== false
-        },
-        report: null,
-        error: null,
-        finishedAt: null
-      }, { reset: true });
-
-      void triggerMatrixRebuildJob(job.options).catch((error) => {
-        console.error(`[matrix-rebuild] ${getErrorMessage(error, 'Matrix rebuild failed')}`);
-      });
-
-      sendJson(res, 202, { ok: true, started: true, running: true, job, backup });
-    } catch (error) {
-      const status = error instanceof SyntaxError ? 400 : 500;
-      sendJson(res, status, { ok: false, error: getErrorMessage(error, 'Failed to start matrix rebuild') });
-    }
-    return;
-  }
-
   if (req.method === 'POST' && url.pathname === '/api/send-mail') {
     try {
       const body = await getRequestBody(req);
@@ -1908,7 +1705,7 @@ const server = createServer(async (req, res) => {
 
       sendJson(res, 200, {
         ok: true,
-        message: `Cleanup complete. Kept: ${keptUsers} users, ${keptMatrix} matrix nodes, ${keptPins} pins. Cleared: transactions, help trackers, safety pool. Wallet balances reset to $0. Now do Activate + Rebuild Matrix.`,
+        message: `Cleanup complete. Kept: ${keptUsers} users, ${keptMatrix} matrix nodes, ${keptPins} pins. Cleared: transactions, help trackers, safety pool. Wallet balances reset to $0.`,
         kept: { users: keptUsers, matrix: keptMatrix, pins: keptPins },
         cleared: ['transactions', 'help_trackers', 'safety_pool', 'safety_pool_transactions', 'matrix_pending_contributions'],
         walletsReset: wallets.length
@@ -1922,11 +1719,104 @@ const server = createServer(async (req, res) => {
   sendJson(res, 404, { ok: false, error: 'Not found' });
 });
 
+async function deduplicateUsersByUserId() {
+  const collection = mongoDb.collection('users');
+  const docs = await collection.find({ _id: { $ne: STATE_DOC_ID } }).toArray();
+
+  // Dedup users by userId if more than one doc exists
+  if (docs.length > 1) {
+    const grouped = new Map();
+    for (const doc of docs) {
+      const userId = (doc.userId || '').trim();
+      if (!userId) continue;
+      if (!grouped.has(userId)) grouped.set(userId, []);
+      grouped.get(userId).push(doc);
+    }
+
+    const idsToDelete = [];
+    for (const [userId, group] of grouped) {
+      if (group.length <= 1) continue;
+      group.sort((a, b) => {
+        if (a.isAdmin && !b.isAdmin) return -1;
+        if (!a.isAdmin && b.isAdmin) return 1;
+        const aTime = new Date(a.createdAt || 0).getTime();
+        const bTime = new Date(b.createdAt || 0).getTime();
+        return bTime - aTime;
+      });
+      for (let i = 1; i < group.length; i++) {
+        idsToDelete.push(group[i]._id);
+      }
+      console.log(`[dedup] userId=${userId}: keeping _id=${group[0]._id}, removing ${group.length - 1} duplicate(s)`);
+    }
+
+    if (idsToDelete.length > 0) {
+      await collection.deleteMany({ _id: { $in: idsToDelete } });
+      console.log(`[dedup] Removed ${idsToDelete.length} duplicate user doc(s)`);
+      stateSnapshotCache = null;
+    }
+  }
+
+  // Always clean orphaned PINs/wallets even if no user duplicates were found
+  // (handles leftover orphans from previous dedup runs that didn't clean PINs)
+  const allUsers = await collection.find({ _id: { $ne: STATE_DOC_ID } }).toArray();
+  const validIds = new Set();
+  for (const doc of allUsers) {
+    if (doc.id) validIds.add(String(doc.id));
+    validIds.add(String(doc._id));
+  }
+
+  const pinsCol = mongoDb.collection('pins');
+  const pinDocs = await pinsCol.find({ _id: { $ne: STATE_DOC_ID } }).toArray();
+  const orphanPins = pinDocs.filter((p) => p.ownerId && !validIds.has(String(p.ownerId))).map((p) => p._id);
+  if (orphanPins.length > 0) {
+    await pinsCol.deleteMany({ _id: { $in: orphanPins } });
+    console.log(`[startup] Removed ${orphanPins.length} orphaned pin(s)`);
+    stateSnapshotCache = null;
+  }
+
+  // Deduplicate PINs per owner — keep only the 10 oldest unused PINs per user,
+  // remove extras created by repeated initializeDemoData runs.
+  const remainingPins = await pinsCol.find({ _id: { $ne: STATE_DOC_ID } }).toArray();
+  const pinsByOwner = new Map();
+  for (const pin of remainingPins) {
+    const owner = String(pin.ownerId || '');
+    if (!owner) continue;
+    if (!pinsByOwner.has(owner)) pinsByOwner.set(owner, []);
+    pinsByOwner.get(owner).push(pin);
+  }
+  const excessPinIds = [];
+  for (const [owner, pins] of pinsByOwner) {
+    // Only dedup auto-generated unused pins (status 'unused') for admin-like owners
+    const unused = pins.filter((p) => p.status === 'unused');
+    if (unused.length <= 10) continue;
+    // Sort by createdAt ascending — keep the 10 oldest
+    unused.sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+    for (let i = 10; i < unused.length; i++) {
+      excessPinIds.push(unused[i]._id);
+    }
+  }
+  if (excessPinIds.length > 0) {
+    await pinsCol.deleteMany({ _id: { $in: excessPinIds } });
+    console.log(`[startup] Removed ${excessPinIds.length} excess duplicate pin(s)`);
+    stateSnapshotCache = null;
+  }
+
+  const walletsCol = mongoDb.collection('wallets');
+  const walletDocs = await walletsCol.find({ _id: { $ne: STATE_DOC_ID } }).toArray();
+  const orphanWallets = walletDocs.filter((w) => w.userId && !validIds.has(String(w.userId))).map((w) => w._id);
+  if (orphanWallets.length > 0) {
+    await walletsCol.deleteMany({ _id: { $in: orphanWallets } });
+    console.log(`[startup] Removed ${orphanWallets.length} orphaned wallet(s)`);
+    stateSnapshotCache = null;
+  }
+}
+
 async function start() {
   await connectMongo();
   await migrateLegacyStateIfNeeded();
   await migrateExistingSingletonArrayCollections();
   await backfillSafetyPoolTransactionsMirror();
+  await deduplicateUsersByUserId();
 
   server.listen(PORT, HOST, () => {
     console.log(`Backend listening on http://${HOST}:${PORT}`);

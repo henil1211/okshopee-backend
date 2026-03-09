@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Eye, LogOut, Paperclip, RefreshCw, Send } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { useAuthStore } from '@/store';
+import { useAuthStore, useSyncRefreshKey } from '@/store';
 import Database from '@/db';
 import type {
   SupportTicket,
@@ -21,12 +21,27 @@ import { Textarea } from '@/components/ui/textarea';
 import MobileBottomNav from '@/components/MobileBottomNav';
 
 const CATEGORY_OPTIONS: Array<{ value: SupportTicketCategory; label: string }> = [
-  { value: 'account_issues', label: 'Account Issues' },
-  { value: 'deposit_payment_issues', label: 'Deposit / Payment Issues' },
-  { value: 'withdrawal_issues', label: 'Withdrawal Issues' },
-  { value: 'referral_matrix_issues', label: 'Referral / Matrix Issues' },
-  { value: 'technical_issues', label: 'Technical Issues' }
+  { value: 'profile_update', label: 'Profile Update' },
+  { value: 'deposit_withdrawal', label: 'Deposit / Withdrawal' },
+  { value: 'network_matrix', label: 'My Network / Matrix' },
+  { value: 'activation_pin', label: 'Activation PIN' },
+  { value: 'affiliate_shopping', label: 'Affiliate Shopping' },
+  { value: 'other', label: 'Other' }
 ];
+
+const CATEGORY_LABEL_MAP: Record<string, string> = {
+  profile_update: 'Profile Update',
+  deposit_withdrawal: 'Deposit / Withdrawal',
+  network_matrix: 'My Network / Matrix',
+  activation_pin: 'Activation PIN',
+  affiliate_shopping: 'Affiliate Shopping',
+  other: 'Other',
+  account_issues: 'Account Issues',
+  deposit_payment_issues: 'Deposit / Payment Issues',
+  withdrawal_issues: 'Withdrawal Issues',
+  referral_matrix_issues: 'Referral / Matrix Issues',
+  technical_issues: 'Technical Issues'
+};
 
 const PRIORITY_OPTIONS: Array<{ value: SupportTicketPriority; label: string }> = [
   { value: 'low', label: 'Low' },
@@ -74,8 +89,10 @@ async function toAttachment(file: File, uploadedBy: string): Promise<SupportTick
 
 export default function Support() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
   const displayUser = impersonatedUser || user;
+  const syncKey = useSyncRefreshKey();
 
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [selectedTicketId, setSelectedTicketId] = useState('');
@@ -84,12 +101,10 @@ export default function Support() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isReplying, setIsReplying] = useState(false);
   const [formData, setFormData] = useState({
-    category: 'technical_issues' as SupportTicketCategory,
+    category: 'other' as SupportTicketCategory,
     priority: 'medium' as SupportTicketPriority,
     subject: '',
-    description: '',
-    name: '',
-    email: ''
+    description: ''
   });
   const [replyMessage, setReplyMessage] = useState('');
 
@@ -102,7 +117,13 @@ export default function Support() {
     if (!displayUser) return;
     const rows = Database.getUserSupportTickets(displayUser.userId);
     setTickets(rows);
-    if (!selectedTicketId && rows.length > 0) {
+    // Auto-select ticket from query param or first ticket
+    const ticketParam = searchParams.get('ticket');
+    if (ticketParam && rows.some((r) => r.ticket_id === ticketParam)) {
+      setSelectedTicketId(ticketParam);
+      searchParams.delete('ticket');
+      setSearchParams(searchParams, { replace: true });
+    } else if (!selectedTicketId && rows.length > 0) {
       setSelectedTicketId(rows[0].ticket_id);
     }
   };
@@ -113,13 +134,8 @@ export default function Support() {
       return;
     }
     if (!displayUser) return;
-    setFormData((prev) => ({
-      ...prev,
-      name: prev.name || displayUser.fullName || '',
-      email: prev.email || displayUser.email || ''
-    }));
     loadTickets();
-  }, [isAuthenticated, displayUser, navigate]);
+  }, [isAuthenticated, displayUser, navigate, syncKey]);
 
   const handleLogout = () => {
     logout();
@@ -168,8 +184,8 @@ export default function Support() {
     try {
       const created = Database.createSupportTicket({
         user_id: displayUser.userId,
-        name: formData.name.trim() || displayUser.fullName,
-        email: formData.email.trim() || displayUser.email,
+        name: displayUser.fullName,
+        email: displayUser.email,
         category: formData.category,
         subject: formData.subject.trim(),
         message: formData.description.trim(),
@@ -266,13 +282,43 @@ export default function Support() {
               <CardTitle className="text-white">Submit Support Ticket</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label className="text-white/80">User ID</Label>
+                <Input value={displayUser.userId} readOnly className="bg-[#1f2937] border-white/10 text-white" />
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="space-y-2">
-                  <Label className="text-white/80">User ID</Label>
-                  <Input value={displayUser.userId} readOnly className="bg-[#1f2937] border-white/10 text-white" />
+                  <Label className="text-white/80">Name</Label>
+                  <Input
+                    value={displayUser.fullName}
+                    readOnly
+                    className="bg-[#1f2937] border-white/10 text-white"
+                  />
                 </div>
                 <div className="space-y-2">
-                  <Label className="text-white/80">Issue Category</Label>
+                  <Label className="text-white/80">Email</Label>
+                  <Input
+                    value={displayUser.email}
+                    readOnly
+                    className="bg-[#1f2937] border-white/10 text-white"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-white/80">Subject</Label>
+                <Input
+                  value={formData.subject}
+                  onChange={(e) => setFormData((prev) => ({ ...prev, subject: e.target.value }))}
+                  placeholder="Short title for your query"
+                  className="bg-[#1f2937] border-white/10 text-white"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label className="text-white/80">Category</Label>
                   <select
                     value={formData.category}
                     onChange={(e) => setFormData((prev) => ({ ...prev, category: e.target.value as SupportTicketCategory }))}
@@ -284,37 +330,6 @@ export default function Support() {
                       </option>
                     ))}
                   </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label className="text-white/80">Name</Label>
-                  <Input
-                    value={formData.name}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, name: e.target.value }))}
-                    className="bg-[#1f2937] border-white/10 text-white"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-white/80">Email</Label>
-                  <Input
-                    value={formData.email}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, email: e.target.value }))}
-                    className="bg-[#1f2937] border-white/10 text-white"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label className="text-white/80">Subject</Label>
-                  <Input
-                    value={formData.subject}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, subject: e.target.value }))}
-                    placeholder="Short title for your issue"
-                    className="bg-[#1f2937] border-white/10 text-white"
-                  />
                 </div>
                 <div className="space-y-2">
                   <Label className="text-white/80">Priority</Label>
@@ -374,15 +389,15 @@ export default function Support() {
 
           <Card className="glass border-white/10">
             <CardHeader>
-              <CardTitle className="text-white">Issue Guides & Notice</CardTitle>
+              <CardTitle className="text-white">Guides & Notice</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 text-sm">
               <div className="rounded-lg border border-white/10 bg-[#111827]/50 p-3">
-                <p className="text-white font-medium mb-2">Payment Issue Guide</p>
+                <p className="text-white font-medium mb-2">Payment Guide</p>
                 <p className="text-white/70">Include Transaction ID, amount, payment method, and screenshot/payment proof.</p>
               </div>
               <div className="rounded-lg border border-white/10 bg-[#111827]/50 p-3">
-                <p className="text-white font-medium mb-2">Withdrawal Issue Guide</p>
+                <p className="text-white font-medium mb-2">Withdrawal Guide</p>
                 <p className="text-white/70">Include withdrawal request ID, amount, wallet address, date/time, and proof if available.</p>
               </div>
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
@@ -390,7 +405,7 @@ export default function Support() {
                 <ul className="list-disc pl-5 space-y-1 text-amber-100/90">
                   <li>All support requests must be submitted through this ticket system only.</li>
                   <li>Do not create multiple tickets for the same issue.</li>
-                  <li>Support response time may take up to 24 hours.</li>
+                  <li>Support response time may take up to 72 hours.</li>
                 </ul>
               </div>
             </CardContent>
@@ -420,7 +435,7 @@ export default function Support() {
                     <tr key={ticket.ticket_id} className="border-b border-white/5 hover:bg-white/5">
                       <td className="py-2 px-3 text-white font-mono text-xs">{ticket.ticket_id}</td>
                       <td className="py-2 px-3 text-white/90">{ticket.subject || '-'}</td>
-                      <td className="py-2 px-3 text-white/70">{CATEGORY_OPTIONS.find((x) => x.value === ticket.category)?.label || ticket.category}</td>
+                      <td className="py-2 px-3 text-white/70">{CATEGORY_LABEL_MAP[ticket.category] || ticket.category}</td>
                       <td className="py-2 px-3">
                         <Badge className={statusClassMap[ticket.status]}>{statusLabelMap[ticket.status]}</Badge>
                       </td>
@@ -478,52 +493,84 @@ export default function Support() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
-                <p className="text-white/70"><span className="text-white">Category:</span> {CATEGORY_OPTIONS.find((x) => x.value === selectedTicket.category)?.label || selectedTicket.category}</p>
+                <p className="text-white/70"><span className="text-white">Category:</span> {CATEGORY_LABEL_MAP[selectedTicket.category] || selectedTicket.category}</p>
                 <p className="text-white/70"><span className="text-white">Priority:</span> {selectedTicket.priority}</p>
                 <p className="text-white/70"><span className="text-white">Status:</span> {statusLabelMap[selectedTicket.status]}</p>
               </div>
 
-              <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1">
-                {selectedTicket.messages.map((msg) => (
-                  <div key={msg.id} className="rounded-lg border border-white/10 bg-[#111827]/60 p-3">
-                    <div className="flex items-center justify-between gap-3 mb-2">
-                      <p className="text-sm text-white">
-                        {msg.sender_type === 'admin' ? 'Admin' : 'You'} - {msg.sender_name}
-                      </p>
-                      <p className="text-xs text-white/50">{new Date(msg.created_at).toLocaleString()}</p>
-                    </div>
-                    <p className="text-white/80 text-sm whitespace-pre-wrap">{msg.message || '-'}</p>
-                    {msg.attachments.length > 0 && (
-                      <div className="mt-2 space-y-2">
-                        {msg.attachments.map((att) => (
-                          <div key={att.id}>
-                            {(att.file_type?.startsWith('image/') || att.data_url?.startsWith('data:image/')) ? (
-                              <a href={att.data_url} target="_blank" rel="noreferrer" className="block">
-                                <img
-                                  src={att.data_url}
-                                  alt={att.file_name}
-                                  className="max-w-[280px] max-h-[200px] rounded-lg border border-white/10 object-contain cursor-pointer hover:opacity-80 transition-opacity"
-                                />
-                                <p className="text-xs text-[#7cc9ff] mt-1">{att.file_name}</p>
-                              </a>
-                            ) : (
-                              <a href={att.data_url} target="_blank" rel="noreferrer" className="block text-xs text-[#7cc9ff] hover:underline">
-                                📎 {att.file_name}
-                              </a>
-                            )}
-                          </div>
-                        ))}
+              <div className="space-y-4 max-h-[420px] overflow-y-auto pr-1 py-2">
+                {selectedTicket.messages.map((msg) => {
+                  const isAdmin = msg.sender_type === 'admin';
+                  return (
+                    <div key={msg.id} className={`flex ${isAdmin ? 'justify-start' : 'justify-end'}`}>
+                      <div className={`max-w-[85%] sm:max-w-[75%] ${isAdmin ? 'order-1' : 'order-1'}`}>
+                        {/* Sender label */}
+                        <div className={`flex items-center gap-2 mb-1 ${isAdmin ? '' : 'justify-end'}`}>
+                          {isAdmin && (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400 bg-emerald-500/15 border border-emerald-500/25 rounded-full px-2 py-0.5">
+                              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
+                              Admin
+                            </span>
+                          )}
+                          <span className={`text-[11px] ${isAdmin ? 'text-white/50' : 'text-white/50'}`}>
+                            {isAdmin ? msg.sender_name : 'You'}
+                          </span>
+                          <span className="text-[10px] text-white/30">
+                            {new Date(msg.created_at).toLocaleString()}
+                          </span>
+                        </div>
+
+                        {/* Message bubble */}
+                        <div className={`rounded-2xl px-4 py-2.5 ${
+                          isAdmin
+                            ? 'bg-gradient-to-br from-emerald-500/15 to-emerald-600/10 border border-emerald-500/20 rounded-tl-sm'
+                            : 'bg-[#118bdd]/15 border border-[#118bdd]/20 rounded-tr-sm'
+                        }`}>
+                          <p className="text-[13px] text-white/85 whitespace-pre-wrap leading-relaxed">{msg.message || '-'}</p>
+                          {msg.attachments.length > 0 && (
+                            <div className="mt-2 space-y-2 pt-2 border-t border-white/10">
+                              {msg.attachments.map((att) => (
+                                <div key={att.id}>
+                                  {(att.file_type?.startsWith('image/') || att.data_url?.startsWith('data:image/')) ? (
+                                    <a href={att.data_url} target="_blank" rel="noreferrer" className="block">
+                                      <img
+                                        src={att.data_url}
+                                        alt={att.file_name}
+                                        className="max-w-[260px] max-h-[180px] rounded-lg border border-white/10 object-contain cursor-pointer hover:opacity-80 transition-opacity"
+                                      />
+                                      <p className="text-xs text-[#7cc9ff] mt-1">{att.file_name}</p>
+                                    </a>
+                                  ) : (
+                                    <a href={att.data_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs text-[#7cc9ff] hover:underline bg-white/5 rounded-lg px-3 py-1.5">
+                                      <Paperclip className="w-3 h-3" /> {att.file_name}
+                                    </a>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    )}
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               </div>
 
               {selectedTicket.status === 'closed' ? (
                 <div className="rounded-lg border border-white/10 bg-[#1f2937] p-4">
                   <p className="text-white/50 text-sm text-center">This ticket is closed. Please open a new ticket if you need further assistance.</p>
                 </div>
-              ) : (
+              ) : (() => {
+                const lastMsg = selectedTicket.messages[selectedTicket.messages.length - 1];
+                const userCanReply = lastMsg?.sender_type === 'admin';
+                if (!userCanReply) {
+                  return (
+                    <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
+                      <p className="text-amber-300/80 text-sm text-center">Waiting for admin response. You can reply once the support team responds to your ticket.</p>
+                    </div>
+                  );
+                }
+                return (
                 <div className="space-y-2">
                   <Label className="text-white/80">Reply</Label>
                   <Textarea
@@ -558,7 +605,8 @@ export default function Support() {
                     </p>
                   )}
                 </div>
-              )}
+                );
+              })()}
             </CardContent>
           </Card>
         )}

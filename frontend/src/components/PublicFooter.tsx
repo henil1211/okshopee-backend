@@ -54,7 +54,7 @@ export default function PublicFooter() {
 
           <div>
             <p className="text-sm font-semibold uppercase tracking-wide text-white/70">Highlights</p>
-            <div className="mt-3 space-y-2 text-sm text-white/60">
+            <div className="mt-3 flex flex-col gap-3 text-sm text-white/60">
               <span className="inline-flex items-center gap-1.5">
                 <ShieldCheck className="h-4 w-4 text-[#7cc9ff]" />
                 Transparent Platform

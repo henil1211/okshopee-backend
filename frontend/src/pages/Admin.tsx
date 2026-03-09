@@ -140,6 +140,13 @@ const SUPPORT_STATUS_OPTIONS: Array<{ value: SupportTicketStatus; label: string 
 ];
 
 const SUPPORT_CATEGORY_LABELS: Record<string, string> = {
+  profile_update: 'Profile Update',
+  deposit_withdrawal: 'Deposit / Withdrawal',
+  network_matrix: 'My Network / Matrix',
+  activation_pin: 'Activation PIN',
+  affiliate_shopping: 'Affiliate Shopping',
+  other: 'Other',
+  // Legacy
   account_issues: 'Account Issues',
   deposit_payment_issues: 'Deposit / Payment Issues',
   withdrawal_issues: 'Withdrawal Issues',
@@ -154,8 +161,8 @@ export default function Admin() {
     stats, settings, allUsers, allTransactions, safetyPoolAmount, allPins, allPinRequests, pendingPinRequests,
     loadStats, loadSettings, loadAllUsers, loadAllTransactions, loadAllPins, loadAllPinRequests, loadPendingPinRequests,
     updateSettings, addFundsToUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
-    suspendPin, unsuspendPin, blockUser, unblockUser, bulkCreateUsersWithoutPin, createServerBackup, reconcileHelpTrackers, activateUsersAndRebuildMatrix,
-    repairMisroutedSafetyPool, deleteAllIdsFromSystem, getLevelWiseReport
+    suspendPin, unsuspendPin, blockUser, unblockUser, bulkCreateUsersWithoutPin, createServerBackup,
+    deleteAllIdsFromSystem, getLevelWiseReport
   } = useAdminStore();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -206,6 +213,8 @@ export default function Admin() {
   const [activeMainTab, setActiveMainTab] = useState('users');
   const [reportsDataLoaded, setReportsDataLoaded] = useState(false);
   const [supportDataLoaded, setSupportDataLoaded] = useState(false);
+  const [sweepRunning, setSweepRunning] = useState(false);
+  const [sweepResult, setSweepResult] = useState<string | null>(null);
 
   const [memberFilters, setMemberFilters] = useState({
     dateFrom: '',
@@ -292,11 +301,7 @@ export default function Admin() {
   const [supportStatusDraft, setSupportStatusDraft] = useState<SupportTicketStatus>('open');
   const [supportReplyMessage, setSupportReplyMessage] = useState('');
   const [supportReplyAttachment, setSupportReplyAttachment] = useState<SupportTicketAttachment | null>(null);
-  const [isReconciling, setIsReconciling] = useState(false);
-  const [lastReconcileReport, setLastReconcileReport] = useState<any | null>(null);
-  const [isRebuildingMatrix, setIsRebuildingMatrix] = useState(false);
   const [isCreatingBackup, setIsCreatingBackup] = useState(false);
-  const [lastRebuildReport, setLastRebuildReport] = useState<any | null>(null);
   const [showDeleteAllIdsDialog, setShowDeleteAllIdsDialog] = useState(false);
   const [deleteAllIdsPhrase, setDeleteAllIdsPhrase] = useState('');
   const [deleteAllIdsAdminId, setDeleteAllIdsAdminId] = useState('');
@@ -663,18 +668,6 @@ export default function Admin() {
     toast.success('Settings updated');
   };
 
-  const handleReconcileTrackers = async () => {
-    setIsReconciling(true);
-    const result = await reconcileHelpTrackers();
-    setIsReconciling(false);
-    if (result.success) {
-      setLastReconcileReport(result.report || null);
-      toast.success(result.message);
-    } else {
-      toast.error(result.message);
-    }
-  };
-
   const handleCreateServerBackup = async () => {
     setIsCreatingBackup(true);
     const result = await createServerBackup();
@@ -683,42 +676,6 @@ export default function Admin() {
     if (result.success) {
       const path = typeof result.backup?.filePath === 'string' ? result.backup.filePath : '';
       toast.success(path ? `${result.message} at ${path}` : result.message);
-    } else {
-      toast.error(result.message);
-    }
-  };
-
-  const handleActivateAndRebuildMatrix = async () => {
-    const confirmed = window.confirm(
-      'This will activate legacy inactive IDs (except blocked IDs) and rebuild matrix give-help/receive-help from current logic. Continue?'
-    );
-    if (!confirmed) return;
-
-    setIsRebuildingMatrix(true);
-    const result = await activateUsersAndRebuildMatrix();
-    setIsRebuildingMatrix(false);
-
-    if (result.success) {
-      setLastRebuildReport(result.report || null);
-      toast.success(result.message);
-    } else {
-      toast.error(result.message);
-    }
-  };
-
-  const handleRepairMisroutedSafetyPool = async () => {
-    const confirmed = window.confirm(
-      'This will re-run matrix logic to repair old locked give-help entries that were routed to safety pool instead of valid upline. This rebuild rewrites matrix transactions/safety entries. Continue?'
-    );
-    if (!confirmed) return;
-
-    setIsRebuildingMatrix(true);
-    const result = await repairMisroutedSafetyPool();
-    setIsRebuildingMatrix(false);
-
-    if (result.success) {
-      setLastRebuildReport(result.report || null);
-      toast.success(`Repair complete. ${result.message}`);
     } else {
       toast.error(result.message);
     }
@@ -747,8 +704,6 @@ export default function Admin() {
 
     if (result.success) {
       toast.success(result.message);
-      setLastReconcileReport(null);
-      setLastRebuildReport(null);
       setShowDeleteAllIdsDialog(false);
       resetDeleteAllIdsConfirmation();
     } else {
@@ -786,6 +741,25 @@ export default function Admin() {
     } else {
       toast.error(result.message);
     }
+  };
+
+  const handleSweepPending = async () => {
+    setSweepRunning(true);
+    setSweepResult(null);
+    try {
+      const result = Database.repairAndSweepPendingContributions();
+      setSweepResult(
+        `Repaired ${result.repairedUsers} user(s), processed ${result.processedItems} contribution(s). ${result.stillPending} still pending.`
+      );
+      if (result.processedItems > 0 || result.repairedUsers > 0) {
+        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 120_000, maxAttempts: 3, retryDelayMs: 2000 });
+        loadStats();
+        loadAllTransactions();
+      }
+    } catch (err) {
+      setSweepResult(`Error: ${err instanceof Error ? err.message : 'unknown'}`);
+    }
+    setSweepRunning(false);
   };
 
   const handleBulkCreateNoPin = async () => {
@@ -1783,6 +1757,29 @@ export default function Admin() {
                     <p className="text-red-400 text-sm">
                       Failed {bulkNoPinFailed.length}: {bulkNoPinFailed.join(' | ')}
                     </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="glass border-white/10 mb-6">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center gap-2">
+                  <RefreshCw className="w-5 h-5 text-amber-400" />
+                  Reprocess Pending Help
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p className="text-white/60 text-sm">
+                  Sweep all stuck pending matrix contributions and process any that are now eligible (users with locked income ready to fund higher-level help).
+                </p>
+                <Button onClick={handleSweepPending} disabled={sweepRunning} className="w-full btn-primary">
+                  {sweepRunning ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+                  {sweepRunning ? 'Processing...' : 'Reprocess Pending Help'}
+                </Button>
+                {sweepResult && (
+                  <div className="p-3 rounded-lg bg-sky-500/10 border border-sky-500/30">
+                    <p className="text-sky-300 text-sm">{sweepResult}</p>
                   </div>
                 )}
               </CardContent>
@@ -3045,67 +3042,16 @@ export default function Admin() {
           {/* Reports Tab */}
           <TabsContent value="reports">
             <Card className="glass border-white/10">
-              <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <CardHeader>
                 <CardTitle className="text-white flex items-center gap-2">
                   <BarChart3 className="w-5 h-5 text-[#118bdd]" />
                   Advanced Reports & Filters
                 </CardTitle>
-                <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
-                  <Button
-                    variant="outline"
-                    onClick={handleRepairMisroutedSafetyPool}
-                    disabled={isRebuildingMatrix}
-                    className="w-full sm:w-auto border-orange-500/30 text-orange-300 hover:bg-orange-500/10"
-                  >
-                    {isRebuildingMatrix ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
-                    Repair Misrouted Safety Pool
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={handleActivateAndRebuildMatrix}
-                    disabled={isRebuildingMatrix}
-                    className="w-full sm:w-auto border-rose-500/30 text-rose-300 hover:bg-rose-500/10"
-                  >
-                    {isRebuildingMatrix ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
-                    Activate + Rebuild Matrix
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={handleReconcileTrackers}
-                    disabled={isReconciling}
-                    className="w-full sm:w-auto border-amber-500/30 text-amber-300 hover:bg-amber-500/10"
-                  >
-                    {isReconciling ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
-                    Reconcile Matrix
-                  </Button>
-                </div>
               </CardHeader>
               <CardContent>
                 {!reportsDataLoaded && (
                   <div className="mb-4 rounded-lg border border-[#118bdd]/30 bg-[#118bdd]/10 px-3 py-2 text-sm text-[#a7dcff]">
                     Loading transaction data for reports...
-                  </div>
-                )}
-                {lastRebuildReport && (
-                  <div className="mb-4 p-3 rounded-lg bg-[#1f2937] border border-rose-400/20 text-sm text-white/70">
-                    <span className="mr-4">Activated IDs: {lastRebuildReport.activatedUsers}</span>
-                    <span className="mr-4">Node Sync: {lastRebuildReport.activatedMatrixNodes}</span>
-                    <span className="mr-4">Direct Count Fixes: {lastRebuildReport.directCountsUpdated}</span>
-                    <span className="mr-4">Removed Matrix TX: {lastRebuildReport.removedMatrixTransactions}</span>
-                    <span className="mr-4">Removed Safety Entries: {lastRebuildReport.removedMatrixSafetyPoolEntries}</span>
-                    <span className="mr-4">Trackers Reset: {lastRebuildReport.trackersReset}</span>
-                    <span className="mr-4">Replayed Members: {lastRebuildReport.replayedMembers}</span>
-                    <span>Post-Reconcile Wallet Syncs: {lastRebuildReport.reconciliation?.walletSyncs || 0}</span>
-                  </div>
-                )}
-                {lastReconcileReport && (
-                  <div className="mb-4 p-3 rounded-lg bg-[#1f2937] border border-white/10 text-sm text-white/70">
-                    <span className="mr-4">Scanned: {lastReconcileReport.scannedTrackers}</span>
-                    <span className="mr-4">Created: {lastReconcileReport.createdTrackers}</span>
-                    <span className="mr-4">Removed: {lastReconcileReport.removedTrackers}</span>
-                    <span className="mr-4">Level Repairs: {lastReconcileReport.repairedLevels}</span>
-                    <span className="mr-4">Queue Repairs: {lastReconcileReport.repairedQueueItems}</span>
-                    <span>Wallet Syncs: {lastReconcileReport.walletSyncs}</span>
                   </div>
                 )}
                 <Tabs value={reportTab} onValueChange={setReportTab} className="space-y-4">

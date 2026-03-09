@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useAuthStore } from '@/store';
+import { useAuthStore, useSyncRefreshKey } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -16,6 +16,7 @@ import { toast } from 'sonner';
 export default function Transactions() {
   const navigate = useNavigate();
   const { user, isAuthenticated, logout } = useAuthStore();
+  const syncKey = useSyncRefreshKey();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [filterType, setFilterType] = useState<'all' | 'help' | 'direct_income' | 'others'>('all');
   const [levelFilter, setLevelFilter] = useState<'all' | number>('all');
@@ -29,7 +30,7 @@ export default function Transactions() {
     if (user) {
       loadTransactions();
     }
-  }, [isAuthenticated, user, navigate]);
+  }, [isAuthenticated, user, navigate, syncKey]);
 
   const loadTransactions = () => {
     if (!user) return;
@@ -151,6 +152,7 @@ export default function Transactions() {
     return tx.type === 'withdrawal'
       || tx.type === 'give_help'
       || tx.type === 'safety_pool'
+      || tx.type === 'system_fee'
       || tx.type === 'activation'
       || tx.type === 'pin_used'
       || tx.type === 'admin_debit';

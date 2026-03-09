@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { useEffect, useRef, useState } from 'react';
 import type {
   User, Wallet, Transaction, MatrixNode, Notification,
   AdminSettings, DashboardStats, Pin, PinTransfer, PinPurchaseRequest, RegisterData, PaymentMethodType
@@ -26,59 +27,6 @@ function normalizeRemoteRebuildError(payload: Record<string, unknown>, fallback:
     : typeof payload?.message === 'string'
       ? payload.message
       : fallback;
-}
-
-async function runBackendMatrixRebuild(options?: {
-  preserveMatrixTransactions?: boolean;
-  activateLegacyInactiveUsers?: boolean;
-}): Promise<any> {
-  const apiBase = getBackendApiBase();
-  const startResponse = await fetch(`${apiBase}/api/rebuild-matrix/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ options: options || {} })
-  });
-  const startPayload = await startResponse.json().catch(() => ({} as Record<string, unknown>));
-  if (!startResponse.ok || startPayload?.ok === false) {
-    throw new Error(normalizeRemoteRebuildError(startPayload, `Failed to start matrix rebuild (HTTP ${startResponse.status})`));
-  }
-
-  const deadline = Date.now() + (60 * 60 * 1000);
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    const statusResponse = await fetch(`${apiBase}/api/rebuild-matrix/status?t=${Date.now()}`, {
-      method: 'GET'
-    });
-    const statusPayload = await statusResponse.json().catch(() => ({} as Record<string, unknown>));
-    if (!statusResponse.ok || statusPayload?.ok === false) {
-      throw new Error(normalizeRemoteRebuildError(statusPayload, `Failed to read matrix rebuild status (HTTP ${statusResponse.status})`));
-    }
-
-    const job = statusPayload?.job as Record<string, any> | undefined;
-    if (!job || typeof job !== 'object') continue;
-    if (job.status === 'completed') {
-      return job.report || null;
-    }
-    if (job.status === 'failed') {
-      throw new Error(typeof job.error === 'string' && job.error ? job.error : 'Matrix rebuild failed');
-    }
-  }
-
-  throw new Error('Matrix rebuild is still running after 60 minutes. Check backend status and retry.');
-}
-
-async function hydrateAdminStateFromBackend(): Promise<void> {
-  await Database.hydrateFromServerBatches(Database.getAdminRemoteSyncBatches(), {
-    strict: true,
-    maxAttempts: 2,
-    timeoutMs: 120000,
-    retryDelayMs: 2000,
-    continueOnError: true,
-    requireAnySuccess: true,
-    onBatchError: (keys, error) => {
-      console.warn('Admin hydrate batch failed for keys:', keys, error);
-    }
-  });
 }
 
 async function createServerStateBackup(params?: {
@@ -549,6 +497,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           createdAt: new Date().toISOString(),
           completedAt: new Date().toISOString()
         });
+        // Try to collect any pending system fee from sponsor now that income arrived
+        Database.deductPendingSystemFee(sponsor.id);
       }
     } else {
       Database.addToSafetyPool(directIncome, newUser.id, 'No sponsor - direct income');
@@ -686,6 +636,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     Database.repairIncomeWalletConsistency(userId);
     // Keep locked income wallet aligned with tracker-level locks.
     Database.syncLockedIncomeWallet(userId);
+    // Process monthly system fee if due
+    Database.processMonthlySystemFee(userId);
     const wallet = Database.getWallet(userId);
     const transactions = Database.getUserTransactions(userId);
     set({ wallet, transactions });
@@ -1200,9 +1152,6 @@ interface AdminState {
   }) => Promise<{ success: boolean; message: string; createdUserIds?: string[]; failed?: string[] }>;
   getLevelWiseReport: (level?: number, startDate?: string, endDate?: string) => any[];
   createServerBackup: () => Promise<{ success: boolean; message: string; backup?: any }>;
-  reconcileHelpTrackers: () => Promise<{ success: boolean; message: string; report?: any }>;
-  activateUsersAndRebuildMatrix: () => Promise<{ success: boolean; message: string; report?: any }>;
-  repairMisroutedSafetyPool: () => Promise<{ success: boolean; message: string; report?: any }>;
   deleteAllIdsFromSystem: () => Promise<{ success: boolean; message: string; report?: any }>;
 }
 
@@ -1479,6 +1428,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       completedAt: new Date().toISOString()
     });
 
+    // Try to collect any pending system fee after admin credit
+    Database.deductPendingSystemFee(user.id);
+
     return { success: true, message: `Added $${amount} to user's ${walletType} wallet` };
   },
 
@@ -1716,6 +1668,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         Database.releaseLockedReceiveHelp(latestSponsor.id);
       }
 
+      // Run the pending-contributions sweep ONCE after the entire batch,
+      // instead of per-user (which was skipped during bulk via remoteSyncSuspendDepth).
+      if (createdUserIds.length > 0) {
+        Database.sweepPendingContributions();
+      }
+
       if (createdUserIds.length === 0) {
         get().loadAllUsers();
         if (get().allTransactions.length > 0) {
@@ -1854,76 +1812,6 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return {
         success: false,
         message: error instanceof Error ? error.message : 'Backup creation failed'
-      };
-    }
-  },
-
-  reconcileHelpTrackers: async () => {
-    const adminUser = Database.getCurrentUser();
-    if (!adminUser?.isAdmin) {
-      return { success: false, message: 'Only admin can run reconciliation' };
-    }
-
-    const report = Database.reconcileHelpTrackers();
-    get().loadAllUsers();
-    if (get().allTransactions.length > 0) {
-      get().loadAllTransactions();
-    }
-    get().loadStats();
-
-    const message = `Reconciliation complete: scanned ${report.scannedTrackers}, repaired levels ${report.repairedLevels}, repaired queue items ${report.repairedQueueItems}, wallet syncs ${report.walletSyncs}`;
-    return { success: true, message, report };
-  },
-
-  activateUsersAndRebuildMatrix: async () => {
-    const adminUser = Database.getCurrentUser();
-    if (!adminUser?.isAdmin) {
-      return { success: false, message: 'Only admin can run matrix rebuild' };
-    }
-
-    try {
-      const report = await runBackendMatrixRebuild();
-      await hydrateAdminStateFromBackend();
-      get().loadAllUsers();
-      if (get().allTransactions.length > 0) {
-        get().loadAllTransactions();
-      }
-      get().loadStats();
-
-      const message = `Rebuild complete: activated users ${report.activatedUsers}, matrix nodes synced ${report.activatedMatrixNodes}, matrix tx rebuilt ${report.removedMatrixTransactions}, replayed members ${report.replayedMembers}, legacy activation backfilled ${report.backfilledActivationUsers}`;
-      return { success: true, message, report };
-    } catch (error) {
-      return {
-        success: false,
-        message: error instanceof Error ? error.message : 'Matrix rebuild failed'
-      };
-    }
-  },
-
-  repairMisroutedSafetyPool: async () => {
-    const adminUser = Database.getCurrentUser();
-    if (!adminUser?.isAdmin) {
-      return { success: false, message: 'Only admin can run safety-pool repair' };
-    }
-
-    try {
-      const report = await runBackendMatrixRebuild({
-        preserveMatrixTransactions: true,
-        activateLegacyInactiveUsers: false
-      });
-      await hydrateAdminStateFromBackend();
-      get().loadAllUsers();
-      if (get().allTransactions.length > 0) {
-        get().loadAllTransactions();
-      }
-      get().loadStats();
-
-      const message = `Repair complete: matrix tx rebuilt ${report.removedMatrixTransactions}, safety entries cleaned ${report.removedMatrixSafetyPoolEntries}, replayed members ${report.replayedMembers}`;
-      return { success: true, message, report };
-    } catch (error) {
-      return {
-        success: false,
-        message: error instanceof Error ? error.message : 'Safety-pool repair failed'
       };
     }
   },
@@ -2085,3 +1973,23 @@ export const useOtpStore = create<OtpState>((set) => ({
     return isValid;
   }
 }));
+
+/**
+ * Hook that returns a counter that increments every time backend sync completes.
+ * Use as a useEffect dependency to re-load data after hydration finishes.
+ */
+export function useSyncRefreshKey(): number {
+  const [key, setKey] = useState(0);
+  const prevState = useRef(Database.getRemoteSyncStatus().state);
+
+  useEffect(() => {
+    return Database.subscribeRemoteSyncStatus((status) => {
+      if (status.state === 'synced' && prevState.current !== 'synced') {
+        setKey((k) => k + 1);
+      }
+      prevState.current = status.state;
+    });
+  }, []);
+
+  return key;
+}

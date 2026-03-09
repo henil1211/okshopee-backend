@@ -24,6 +24,7 @@ import Support from '@/pages/Support';
 import PrivacyPolicy from '@/pages/PrivacyPolicy';
 import TermsAndConditions from '@/pages/TermsAndConditions';
 import Disclaimer from '@/pages/Disclaimer';
+import Referrals from '@/pages/Referrals';
 import RefundPolicy from '@/pages/RefundPolicy';
 import DummyMail from '@/pages/DummyMail';
 
@@ -44,6 +45,7 @@ function App() {
         <Route path="/transactions" element={<Transactions />} />
         <Route path="/pin-wallet" element={<PinWallet />} />
         <Route path="/profile" element={<Profile />} />
+        <Route path="/referrals" element={<Referrals />} />
         <Route path="/create-id" element={<CreateId />} />
         <Route path="/e-commerce" element={<Ecommerce />} />
         <Route path="/admin" element={<Admin />} />

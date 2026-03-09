@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuthStore, useOtpStore } from '@/store';
+import { useAuthStore, useOtpStore, useSyncRefreshKey } from '@/store';
 import Database from '@/db';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -17,6 +17,7 @@ export default function Profile() {
   const { sendOtp, verifyOtp } = useOtpStore();
 
   const displayUser = impersonatedUser || user;
+  const syncKey = useSyncRefreshKey();
 
   const [contactData, setContactData] = useState({
     email: '',
@@ -74,7 +75,7 @@ export default function Profile() {
       transactionPassword: '',
       otp: ''
     });
-  }, [displayUser, isAuthenticated, navigate]);
+  }, [displayUser, isAuthenticated, navigate, syncKey]);
 
   const isContactChanging = showChangeEmail ||
     showChangePhone ||

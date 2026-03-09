@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type ChangeEvent } from 'react';
-import { useAuthStore, usePinStore, useOtpStore } from '@/store';
+import { useAuthStore, usePinStore, useOtpStore, useSyncRefreshKey } from '@/store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -31,7 +31,8 @@ export default function PinWallet() {
     copyPinToClipboard 
   } = usePinStore();
   const { sendOtp, verifyOtp } = useOtpStore();
-  
+  const syncKey = useSyncRefreshKey();
+
   const [activeTab, setActiveTab] = useState<'unused' | 'used' | 'received' | 'transfer' | 'request'>('unused');
   const [transferUserId, setTransferUserId] = useState('');
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
@@ -61,7 +62,7 @@ export default function PinWallet() {
       loadPins(user.id);
       loadPurchaseRequests(user.id);
     }
-  }, [isAuthenticated, user, loadPins, loadPurchaseRequests, navigate]);
+  }, [isAuthenticated, user, loadPins, loadPurchaseRequests, navigate, syncKey]);
 
   const handleCopyPin = async (pinCode: string) => {
     const success = await copyPinToClipboard(pinCode);

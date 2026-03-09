@@ -306,8 +306,7 @@ export default function Landing() {
           <div className={`${containerClass} grid gap-8 lg:grid-cols-2`}>
             <Card className="glass border-white/10">
               <CardContent className="p-7">
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#7cc9ff]">Success Story</p>
-                <h2 className="mt-3 font-heading text-3xl font-bold text-white">From Three People to a Growing Network</h2>
+                <h2 className="font-heading text-3xl font-bold text-white sm:text-4xl">Success Story</h2>
                 <p className="mt-4 text-sm leading-relaxed text-white/70">Every great journey begins with a small step.</p>
 
                 <div className="mt-7 space-y-5">

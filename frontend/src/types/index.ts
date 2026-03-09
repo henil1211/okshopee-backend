@@ -117,6 +117,9 @@ export interface Wallet {
   giveHelpLocked: number;
   totalReceived: number;
   totalGiven: number;
+  // System fee tracking
+  pendingSystemFee: number;         // Outstanding unpaid system fee (0 or 1)
+  lastSystemFeeDate: string | null; // ISO date of last successfully collected fee
 }
 
 // Transaction Types - Updated
@@ -136,7 +139,8 @@ export type TransactionType =
   | 'pin_transfer'
   | 'pin_used'
   | 'admin_credit'
-  | 'admin_debit';
+  | 'admin_debit'
+  | 'system_fee';
 
 export type TransactionStatus = 'pending' | 'completed' | 'failed' | 'cancelled';
 
@@ -483,6 +487,13 @@ export type SupportTicketStatus =
 export type SupportTicketPriority = 'low' | 'medium' | 'high';
 
 export type SupportTicketCategory =
+  | 'profile_update'
+  | 'deposit_withdrawal'
+  | 'network_matrix'
+  | 'activation_pin'
+  | 'affiliate_shopping'
+  | 'other'
+  // Legacy categories (for existing tickets)
   | 'account_issues'
   | 'deposit_payment_issues'
   | 'withdrawal_issues'

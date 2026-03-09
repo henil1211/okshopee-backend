@@ -1,5 +1,5 @@
-﻿import { useEffect, useState } from 'react';
-import { useAuthStore, useWalletStore, useMatrixStore, useOtpStore } from '@/store';
+﻿import { useEffect, useState, useMemo, useRef } from 'react';
+import { useAuthStore, useWalletStore, useMatrixStore, useOtpStore, useSyncRefreshKey, useNotificationStore } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -7,9 +7,9 @@ import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import {
   TrendingUp, Users, ArrowUpRight, ArrowDownLeft,
-  Copy, CheckCircle, RefreshCw,
+  Copy, CheckCircle, RefreshCw, Bell, AlertCircle,
   DollarSign, UserPlus, BarChart3, PlusCircle, LogOut, Shield,
-  Ticket, Plane, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Train
+  Ticket, Plane, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Train, CarFront
 } from 'lucide-react';
 import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel } from '@/utils/helpers';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
@@ -26,8 +26,12 @@ export default function Dashboard() {
   const { wallet, transactions, loadWallet, transferFunds, withdraw } = useWalletStore();
   const { loadUserDownline, getDownlineStats } = useMatrixStore();
   const { sendOtp, verifyOtp } = useOtpStore();
+  const { notifications, unreadCount, loadNotifications, markAsRead } = useNotificationStore();
+  const syncKey = useSyncRefreshKey();
 
   const [isLoading, setIsLoading] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const notifRef = useRef<HTMLDivElement>(null);
   const [showTransferDialog, setShowTransferDialog] = useState(false);
   const [showWithdrawDialog, setShowWithdrawDialog] = useState(false);
   const [showDirectReferralsDialog, setShowDirectReferralsDialog] = useState(false);
@@ -66,8 +70,20 @@ export default function Dashboard() {
       Database.syncUserAchievements(displayUser.id);
       loadWallet(displayUser.id);
       loadUserDownline(displayUser.userId);
+      loadNotifications(displayUser.id);
     }
-  }, [isAuthenticated, displayUser, navigate, loadWallet, loadUserDownline]);
+  }, [isAuthenticated, displayUser, navigate, loadWallet, loadUserDownline, loadNotifications, syncKey]);
+
+  // Close notification dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
+        setShowNotifications(false);
+      }
+    };
+    if (showNotifications) document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showNotifications]);
 
   const resetTransferSecurity = () => {
     setTransferTransactionPassword('');
@@ -289,16 +305,16 @@ export default function Dashboard() {
 
   if (!displayUser) return null;
 
-  const nationalTourQualified = Database.isTourQualified(displayUser.id, 3);
-  const internationalTourQualified = Database.isTourQualified(displayUser.id, 4);
-  const familyTourQualified = Database.isTourQualified(displayUser.id, 5);
+  const nationalTourQualified = Database.isTourQualified(displayUser.id, 4);
+  const internationalTourQualified = Database.isTourQualified(displayUser.id, 5);
+  const familyTourQualified = Database.isTourQualified(displayUser.id, 6);
 
   // Check achievements
   const achievements = [
     {
       key: 'nationalTour',
       label: 'National Tour',
-      level: 3,
+      level: 4,
       icon: Train,
       achieved: nationalTourQualified,
       color: 'text-blue-400',
@@ -307,7 +323,7 @@ export default function Dashboard() {
     {
       key: 'internationalTour',
       label: 'International Tour',
-      level: 4,
+      level: 5,
       icon: Plane,
       achieved: internationalTourQualified,
       color: 'text-purple-400',
@@ -315,9 +331,9 @@ export default function Dashboard() {
     },
     {
       key: 'familyTour',
-      label: 'Family International Tour',
-      level: 5,
-      icon: Users,
+      label: 'Luxurious Dream Car',
+      level: 6,
+      icon: CarFront,
       achieved: familyTourQualified,
       color: 'text-pink-400',
       bgColor: 'bg-pink-500/20'
@@ -357,6 +373,73 @@ export default function Dashboard() {
                   Admin Panel
                 </Button>
               )}
+
+              {/* Notification Bell */}
+              <div className="relative" ref={notifRef}>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setShowNotifications(!showNotifications)}
+                  className="relative text-slate-500 dark:text-white/60 hover:text-slate-700 dark:hover:text-white"
+                >
+                  <Bell className="w-5 h-5" />
+                  {unreadCount > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center px-1">
+                      {unreadCount > 99 ? '99+' : unreadCount}
+                    </span>
+                  )}
+                </Button>
+
+                {showNotifications && (
+                  <div className="absolute right-0 top-full mt-2 w-80 sm:w-96 max-h-[400px] rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#111827] shadow-2xl z-[100] overflow-hidden">
+                    <div className="px-4 py-3 border-b border-slate-200 dark:border-white/10 flex items-center justify-between">
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white">Notifications</p>
+                      {unreadCount > 0 && (
+                        <span className="text-xs text-white bg-red-500 rounded-full px-2 py-0.5">{unreadCount} new</span>
+                      )}
+                    </div>
+                    <div className="overflow-y-auto max-h-[340px]">
+                      {notifications.length === 0 ? (
+                        <div className="text-center py-10">
+                          <Bell className="w-8 h-8 text-slate-300 dark:text-white/15 mx-auto mb-2" />
+                          <p className="text-sm text-slate-400 dark:text-white/40">No notifications yet</p>
+                        </div>
+                      ) : (
+                        notifications.map((notif) => (
+                          <div
+                            key={notif.id}
+                            onClick={() => {
+                              if (!notif.isRead) markAsRead(notif.id);
+                              // Navigate to support page for support ticket notifications
+                              const ticketMatch = notif.message.match(/TKT-\d{8}-\w+/);
+                              if (ticketMatch && (notif.id.includes('support_reply') || notif.id.includes('support_status'))) {
+                                setShowNotifications(false);
+                                navigate(`/support?ticket=${ticketMatch[0]}`);
+                              }
+                            }}
+                            className={`px-4 py-3 border-b border-slate-100 dark:border-white/5 cursor-pointer transition-colors ${
+                              notif.isRead
+                                ? 'bg-transparent hover:bg-slate-50 dark:hover:bg-white/5'
+                                : 'bg-blue-50/50 dark:bg-[#118bdd]/10 hover:bg-blue-50 dark:hover:bg-[#118bdd]/15'
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <div className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${notif.isRead ? 'bg-transparent' : 'bg-[#118bdd]'}`} />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-slate-900 dark:text-white">{notif.title}</p>
+                                <p className="text-xs text-slate-500 dark:text-white/50 mt-0.5 line-clamp-2">{notif.message}</p>
+                                <p className="text-[10px] text-slate-400 dark:text-white/30 mt-1">
+                                  {new Date(notif.createdAt).toLocaleString()}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
 
               <div
                 className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity"
@@ -516,6 +599,15 @@ export default function Dashboard() {
           </Card>
         </div>
 
+        {(wallet?.pendingSystemFee || 0) > 0 && (
+          <div className="mb-6 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+            <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
+            <p className="text-sm text-amber-300">
+              Pending system fee: <span className="font-semibold">${wallet?.pendingSystemFee}</span> — will be deducted automatically from your next income.
+            </p>
+          </div>
+        )}
+
         {/* Achievements Section */}
         <div className="mb-8">
           <h2 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
@@ -609,7 +701,7 @@ export default function Dashboard() {
           <Button
             variant="outline"
             className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
-            onClick={copyReferralLink}
+            onClick={() => navigate('/referrals')}
           >
             <UserPlus className="w-5 h-5 text-pink-500" />
             <span className="text-sm">Referral</span>

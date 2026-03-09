@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { useAuthStore, useMatrixStore } from '@/store';
+import { useAuthStore, useMatrixStore, useSyncRefreshKey } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import {
-  Users, ArrowLeft, ZoomIn, ZoomOut, Maximize2, Minimize2,
-  Circle, LogOut
+  Users, ArrowLeft, ZoomIn, ZoomOut, Maximize2, Minimize2, RotateCcw,
+  Circle, LogOut, Search, Filter, ChevronUp, ChevronDown, X
 } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue
+} from '@/components/ui/select';
 import { formatCurrency, getInitials, generateAvatarColor } from '@/utils/helpers';
 import Database from '@/db';
 import type { MatrixNode } from '@/types';
@@ -59,6 +63,7 @@ export default function Matrix() {
   const navigate = useNavigate();
   const { user, isAuthenticated, logout } = useAuthStore();
   const { matrix, loadMatrix } = useMatrixStore();
+  const syncKey = useSyncRefreshKey();
   const [selectedNode, setSelectedNode] = useState<MatrixNode | null>(null);
   const [zoom, setZoom] = useState(1);
   const [downlineVisibleCount, setDownlineVisibleCount] = useState(DOWNLINE_CHUNK_SIZE);
@@ -66,6 +71,18 @@ export default function Matrix() {
   const treeContainerRef = useRef<HTMLDivElement>(null);
   const matrixCardRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [treeWrapHeight, setTreeWrapHeight] = useState<number | undefined>(undefined);
+
+  // Search & filter state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterLevel, setFilterLevel] = useState('all');
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [filterPosition, setFilterPosition] = useState('all');
+  const [filterDateJoined, setFilterDateJoined] = useState('all');
+  const [customDateFrom, setCustomDateFrom] = useState('');
+  const [customDateTo, setCustomDateTo] = useState('');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [showFilters, setShowFilters] = useState(false);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -73,7 +90,7 @@ export default function Matrix() {
       return;
     }
     loadMatrix();
-  }, [isAuthenticated, navigate, loadMatrix]);
+  }, [isAuthenticated, navigate, loadMatrix, syncKey]);
 
   const handleZoomIn = () => {
     setZoom(prev => Math.min(prev + 0.2, 2));
@@ -82,6 +99,20 @@ export default function Matrix() {
   const handleZoomOut = () => {
     setZoom(prev => Math.max(prev - 0.2, 0.5));
   };
+
+  // Adjust wrapper height to match visually scaled tree content
+  useEffect(() => {
+    const el = treeContainerRef.current;
+    if (!el) return;
+    const updateHeight = () => {
+      const natural = el.scrollHeight;
+      setTreeWrapHeight(natural * zoom);
+    };
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [zoom]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -205,10 +236,110 @@ export default function Matrix() {
 
     return groups;
   }, [userNode, matrix, matrixViewMaxLevels]);
+  // Compute distinct relative levels for the filter dropdown
+  const availableLevels = useMemo(() => {
+    if (!userNode) return [] as number[];
+    const levels = new Set<number>();
+    for (const m of downline) {
+      levels.add(Math.max(1, m.level - (userNode.level || 0)));
+    }
+    return Array.from(levels).sort((a, b) => a - b);
+  }, [downline, userNode]);
+
+  // Apply search, filters, and sort
+  const filteredDownline = useMemo(() => {
+    let result = downline;
+    const baseLevel = userNode?.level || 0;
+
+    // Search
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      result = result.filter((m) => {
+        const memberUser = usersByUserId.get(m.userId);
+        const name = (memberUser?.fullName || m.username || '').toLowerCase();
+        const id = m.userId.toLowerCase();
+        const relLevel = String(Math.max(1, m.level - baseLevel));
+        return id.includes(q) || name.includes(q) || relLevel === q;
+      });
+    }
+
+    // Filter by level
+    if (filterLevel !== 'all') {
+      const lvl = Number(filterLevel);
+      result = result.filter((m) => Math.max(1, m.level - baseLevel) === lvl);
+    }
+
+    // Filter by status
+    if (filterStatus !== 'all') {
+      const active = filterStatus === 'active';
+      result = result.filter((m) => m.isActive === active);
+    }
+
+    // Filter by position
+    if (filterPosition !== 'all') {
+      const pos = filterPosition === 'left' ? 0 : 1;
+      result = result.filter((m) => m.position === pos);
+    }
+
+    // Filter by date joined
+    if (filterDateJoined !== 'all') {
+      const now = new Date();
+      result = result.filter((m) => {
+        const memberUser = usersByUserId.get(m.userId);
+        if (!memberUser?.createdAt) return false;
+        const joined = new Date(memberUser.createdAt);
+        const diffDays = (now.getTime() - joined.getTime()) / (1000 * 60 * 60 * 24);
+        switch (filterDateJoined) {
+          case 'today': return diffDays < 1;
+          case '7days': return diffDays <= 7;
+          case '30days': return diffDays <= 30;
+          case '90days': return diffDays <= 90;
+          case 'custom': {
+            if (customDateFrom) {
+              const from = new Date(customDateFrom);
+              from.setHours(0, 0, 0, 0);
+              if (joined < from) return false;
+            }
+            if (customDateTo) {
+              const to = new Date(customDateTo);
+              to.setHours(23, 59, 59, 999);
+              if (joined > to) return false;
+            }
+            return true;
+          }
+          default: return true;
+        }
+      });
+    }
+
+    // Sort
+    result = [...result].sort((a, b) => {
+      const relA = Math.max(1, a.level - baseLevel);
+      const relB = Math.max(1, b.level - baseLevel);
+      return sortOrder === 'asc' ? relA - relB : relB - relA;
+    });
+
+    return result;
+  }, [downline, userNode, usersByUserId, searchQuery, filterLevel, filterStatus, filterPosition, filterDateJoined, customDateFrom, customDateTo, sortOrder]);
+
   const visibleDownline = useMemo(
-    () => downline.slice(0, downlineVisibleCount),
-    [downline, downlineVisibleCount]
+    () => filteredDownline.slice(0, downlineVisibleCount),
+    [filteredDownline, downlineVisibleCount]
   );
+
+  const hasActiveFilters = filterLevel !== 'all' || filterStatus !== 'all' || filterPosition !== 'all' || filterDateJoined !== 'all';
+
+  const clearAllFilters = () => {
+    setSearchQuery('');
+    setFilterLevel('all');
+    setFilterStatus('all');
+    setFilterPosition('all');
+    setFilterDateJoined('all');
+    setCustomDateFrom('');
+    setCustomDateTo('');
+    setSortOrder('asc');
+    setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE);
+  };
   const handleLoadMoreLevelNodes = (level: number) => {
     setLevelVisibleCounts((prev) => ({
       ...prev,
@@ -251,6 +382,15 @@ export default function Matrix() {
                 <ZoomOut className="w-4 h-4" />
               </Button>
               <span className="hidden sm:block text-white/60 text-sm min-w-[44px] text-center">{Math.round(zoom * 100)}%</span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setZoom(1)}
+                className="border-white/20 text-white hover:bg-white/10"
+                title="Reset zoom"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -312,7 +452,7 @@ export default function Matrix() {
         </div>
 
         {/* Tree Visualization */}
-        <Card ref={matrixCardRef} className="glass border-white/10 min-h-[480px] sm:min-h-[600px]">
+        <Card ref={matrixCardRef} className="glass border-white/10">
           <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <CardTitle className="text-white">Matrix Team View (Up to {matrixViewMaxLevels} Levels)</CardTitle>
             <div className="flex items-center gap-2">
@@ -326,11 +466,17 @@ export default function Matrix() {
               </Badge>
             </div>
           </CardHeader>
-          <CardContent className="overflow-auto">
+          <CardContent className="overflow-hidden">
+            <div style={{ height: treeWrapHeight ? `${treeWrapHeight}px` : 'auto', overflow: 'hidden' }}>
             <div
               ref={treeContainerRef}
               className="flex flex-col items-center py-8 transition-transform duration-300"
-              style={{ transform: `scale(${zoom})`, transformOrigin: 'top center' }}
+              style={{
+                transform: `scale(${zoom})`,
+                transformOrigin: 'top center',
+                width: `${100 / zoom}%`,
+                marginLeft: `${-(100 / zoom - 100) / 2}%`
+              }}
             >
               {userNode ? (
                 <>
@@ -349,7 +495,8 @@ export default function Matrix() {
                           const loadCount = Math.min(TREE_CHUNK_SIZE, remaining);
                           return (
                             <>
-                        <div className="flex items-center justify-between border-b border-white/10 pb-2">
+                        <div className="border-b border-white/10 mb-2" />
+                        <div className="flex items-center justify-between pb-2">
                           <p className="text-white/70 font-medium">Level {group.level}</p>
                           <Badge variant="outline" className="border-[#118bdd] text-[#118bdd]">
                             {group.filled}/{group.capacity} filled
@@ -402,13 +549,176 @@ export default function Matrix() {
                 </div>
               )}
             </div>
+            </div>
           </CardContent>
         </Card>
 
         {/* Downline List */}
         <Card className="glass border-white/10 mt-8">
           <CardHeader>
-            <CardTitle className="text-white">Downline Members (Up to {matrixViewMaxLevels} Levels)</CardTitle>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <CardTitle className="text-white">
+                Downline Members
+                {(searchQuery || hasActiveFilters) && (
+                  <span className="text-sm font-normal text-white/50 ml-2">
+                    ({filteredDownline.length} of {downline.length})
+                  </span>
+                )}
+              </CardTitle>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')}
+                  className="border-white/20 text-white/70 hover:bg-white/10 gap-1"
+                >
+                  {sortOrder === 'asc' ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  {sortOrder === 'asc' ? 'Asc' : 'Desc'}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowFilters(prev => !prev)}
+                  className={`border-white/20 hover:bg-white/10 gap-1.5 ${showFilters || hasActiveFilters ? 'text-[#118bdd] border-[#118bdd]/40' : 'text-white/70'}`}
+                >
+                  <Filter className="w-3.5 h-3.5" />
+                  Filters
+                  {hasActiveFilters && (
+                    <span className="w-2 h-2 rounded-full bg-[#118bdd]" />
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            {/* Search Bar */}
+            <div className="relative mt-3">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
+              <Input
+                placeholder="Search by ID, Name, or Level..."
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE); }}
+                className="pl-10 bg-white/5 border-white/10 text-white placeholder:text-white/30 focus-visible:border-[#118bdd] focus-visible:ring-[#118bdd]/20"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => { setSearchQuery(''); setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE); }}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+
+            {/* Filter Options */}
+            {showFilters && (
+              <div className="mt-3 p-3 rounded-lg bg-white/5 border border-white/10 space-y-3">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {/* Level Filter */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-white/50 font-medium">Level</label>
+                    <Select value={filterLevel} onValueChange={(v) => { setFilterLevel(v); setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE); }}>
+                      <SelectTrigger className="w-full bg-white/5 border-white/10 text-white text-sm h-9">
+                        <SelectValue placeholder="All Levels" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#1a1f2e] border-white/10">
+                        <SelectItem value="all" className="text-white/70">All Levels</SelectItem>
+                        {availableLevels.map((lvl) => (
+                          <SelectItem key={lvl} value={String(lvl)} className="text-white/70">
+                            Level {lvl}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Status Filter */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-white/50 font-medium">Status</label>
+                    <Select value={filterStatus} onValueChange={(v) => { setFilterStatus(v); setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE); }}>
+                      <SelectTrigger className="w-full bg-white/5 border-white/10 text-white text-sm h-9">
+                        <SelectValue placeholder="All Status" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#1a1f2e] border-white/10">
+                        <SelectItem value="all" className="text-white/70">All Status</SelectItem>
+                        <SelectItem value="active" className="text-emerald-400">Active</SelectItem>
+                        <SelectItem value="inactive" className="text-amber-400">Inactive</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Position Filter */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-white/50 font-medium">Position</label>
+                    <Select value={filterPosition} onValueChange={(v) => { setFilterPosition(v); setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE); }}>
+                      <SelectTrigger className="w-full bg-white/5 border-white/10 text-white text-sm h-9">
+                        <SelectValue placeholder="All Positions" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#1a1f2e] border-white/10">
+                        <SelectItem value="all" className="text-white/70">All Positions</SelectItem>
+                        <SelectItem value="left" className="text-white/70">Left</SelectItem>
+                        <SelectItem value="right" className="text-white/70">Right</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Date Joined Filter */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-white/50 font-medium">Date Joined</label>
+                    <Select value={filterDateJoined} onValueChange={(v) => { setFilterDateJoined(v); if (v !== 'custom') { setCustomDateFrom(''); setCustomDateTo(''); } setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE); }}>
+                      <SelectTrigger className="w-full bg-white/5 border-white/10 text-white text-sm h-9">
+                        <SelectValue placeholder="All Time" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#1a1f2e] border-white/10">
+                        <SelectItem value="all" className="text-white/70">All Time</SelectItem>
+                        <SelectItem value="today" className="text-white/70">Today</SelectItem>
+                        <SelectItem value="7days" className="text-white/70">Last 7 Days</SelectItem>
+                        <SelectItem value="30days" className="text-white/70">Last 30 Days</SelectItem>
+                        <SelectItem value="90days" className="text-white/70">Last 90 Days</SelectItem>
+                        <SelectItem value="custom" className="text-white/70">Custom Date</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {/* Custom Date Range Inputs */}
+                {filterDateJoined === 'custom' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-white/50 font-medium">From</label>
+                      <Input
+                        type="date"
+                        value={customDateFrom}
+                        onChange={(e) => { setCustomDateFrom(e.target.value); setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE); }}
+                        className="bg-white/5 border-white/10 text-white text-sm h-9 [color-scheme:dark]"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-xs text-white/50 font-medium">To</label>
+                      <Input
+                        type="date"
+                        value={customDateTo}
+                        onChange={(e) => { setCustomDateTo(e.target.value); setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE); }}
+                        className="bg-white/5 border-white/10 text-white text-sm h-9 [color-scheme:dark]"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {hasActiveFilters && (
+                  <div className="flex justify-end">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={clearAllFilters}
+                      className="text-white/50 hover:text-white text-xs gap-1"
+                    >
+                      <X className="w-3 h-3" />
+                      Clear All Filters
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
           </CardHeader>
           <CardContent>
             <div className="overflow-x-auto">
@@ -467,21 +777,21 @@ export default function Matrix() {
                   })}
                 </tbody>
               </table>
-              {downline.length === 0 && (
+              {filteredDownline.length === 0 && (
                 <div className="text-center py-8 text-white/50">
-                  No downline members yet
+                  {downline.length === 0 ? 'No downline members yet' : 'No members match your search or filters'}
                 </div>
               )}
-              {downline.length > visibleDownline.length && (
+              {filteredDownline.length > visibleDownline.length && (
                 <div className="py-4 text-center">
                   {(() => {
-                    const remaining = Math.max(0, downline.length - visibleDownline.length);
+                    const remaining = Math.max(0, filteredDownline.length - visibleDownline.length);
                     const loadCount = Math.min(DOWNLINE_CHUNK_SIZE, remaining);
                     return (
                   <Button
                     variant="outline"
                     className="border-[#118bdd]/40 text-[#8fcfff] hover:bg-[#118bdd]/10"
-                    onClick={() => setDownlineVisibleCount((prev) => Math.min(prev + DOWNLINE_CHUNK_SIZE, downline.length))}
+                    onClick={() => setDownlineVisibleCount((prev) => Math.min(prev + DOWNLINE_CHUNK_SIZE, filteredDownline.length))}
                   >
                     Show more {loadCount} user{loadCount === 1 ? '' : 's'}
                   </Button>

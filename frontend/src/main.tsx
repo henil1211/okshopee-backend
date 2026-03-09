@@ -113,11 +113,6 @@ async function bootstrap() {
 
   const strictSync = import.meta.env.PROD;
 
-  // Never seed demo/admin data in production; it causes stale local snapshots and 409 conflicts.
-  if (!strictSync) {
-    Database.initializeDemoData();
-  }
-
   // Render app immediately; hydration now runs in background so login is not blocked on a full snapshot fetch.
   Database.startBackgroundSyncLoop();
 
@@ -139,8 +134,18 @@ async function bootstrap() {
     strictSync
       ? { strict: true, maxAttempts: 2, timeoutMs: 45000, retryDelayMs: 1200, continueOnError: true, requireAnySuccess: true }
       : { strict: false, continueOnError: true }
-  ).catch((e) => {
+  ).then(() => {
+    // Only seed demo admin in dev mode AND only after hydration so we don't
+    // create duplicates when a real backend already has the admin user.
+    if (!strictSync) {
+      Database.initializeDemoData();
+    }
+  }).catch((e) => {
     console.warn('Hydration failed:', e);
+    // Still seed demo data in dev even if hydration failed (offline dev).
+    if (!strictSync) {
+      Database.initializeDemoData();
+    }
   });
 }
 
