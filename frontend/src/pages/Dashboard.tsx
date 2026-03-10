@@ -25,7 +25,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const { user, isAuthenticated, logout, impersonatedUser, endImpersonation, verifyTransactionPassword } = useAuthStore();
   const { wallet, transactions, loadWallet, transferFunds, withdraw } = useWalletStore();
-  const { loadUserDownline, getDownlineStats } = useMatrixStore();
+  const { loadUserDownline, getDownlineStats, loadMatrix } = useMatrixStore();
   const { sendOtp, verifyOtp } = useOtpStore();
   const { notifications, unreadCount, loadNotifications, markAsRead } = useNotificationStore();
   const syncKey = useSyncRefreshKey();
@@ -70,10 +70,11 @@ export default function Dashboard() {
     if (displayUser) {
       Database.syncUserAchievements(displayUser.id);
       loadWallet(displayUser.id);
+      loadMatrix();
       loadUserDownline(displayUser.userId);
       loadNotifications(displayUser.id);
     }
-  }, [isAuthenticated, displayUser, navigate, loadWallet, loadUserDownline, loadNotifications, syncKey]);
+  }, [isAuthenticated, displayUser, navigate, loadWallet, loadMatrix, loadUserDownline, loadNotifications, syncKey]);
 
   // Close notification dropdown on outside click
   useEffect(() => {
