@@ -4856,6 +4856,22 @@ class Database {
       return next;
     });
 
+    // Repair pass: rebuild leftChild/rightChild from parentId + position
+    const normalizedMap = new Map(normalized.map((node) => [node.userId, node]));
+    for (const node of normalized) {
+      if (!node.parentId) continue;
+      const parent = normalizedMap.get(node.parentId);
+      if (!parent) continue;
+      if (node.position === 0 && parent.leftChild !== node.userId) {
+        parent.leftChild = node.userId;
+        changed = true;
+      }
+      if (node.position === 1 && parent.rightChild !== node.userId) {
+        parent.rightChild = node.userId;
+        changed = true;
+      }
+    }
+
     return { matrix: normalized, changed };
   }
 
