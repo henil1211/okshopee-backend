@@ -344,6 +344,8 @@ class Database {
   // When true, createTransaction/addToSafetyPool become no-ops to save memory
   static _bulkRebuildMode = false;
   private static _bulkSafetyPoolTotal = 0;
+  // Cooldown: prevents duplicate system fee processing during sync races
+  private static _systemFeeLastProcessed = new Map<string, number>();
 
   // ===== In-memory parsed-object cache =====
   // Eliminates redundant JSON.parse() on hot-path reads.
@@ -3548,6 +3550,12 @@ class Database {
   static processMonthlySystemFee(userId: string): { deducted: boolean; pending: boolean; alreadyCurrent: boolean } {
     if (this._bulkRebuildMode) return { deducted: false, pending: false, alreadyCurrent: true };
 
+    // Cooldown: only process once every 5 minutes per user to prevent sync race duplicates
+    const lastProcessed = this._systemFeeLastProcessed.get(userId) || 0;
+    if (Date.now() - lastProcessed < 5 * 60 * 1000) {
+      return { deducted: false, pending: false, alreadyCurrent: true };
+    }
+
     const user = this.getUserById(userId);
     if (!user || !user.isActive || !user.activatedAt) {
       return { deducted: false, pending: false, alreadyCurrent: true };
@@ -3592,6 +3600,7 @@ class Database {
       if ((wallet.pendingSystemFee || 0) > 0) {
         this.updateWallet(userId, { pendingSystemFee: 0 });
       }
+      this._systemFeeLastProcessed.set(userId, Date.now());
       return { deducted: false, pending: false, alreadyCurrent: true };
     }
 
@@ -3640,6 +3649,9 @@ class Database {
       pendingSystemFee: remainingUnpaid,
       ...(totalDeducted > 0 ? { lastSystemFeeDate: now.toISOString() } : {})
     });
+
+    // Mark this user as processed (cooldown)
+    this._systemFeeLastProcessed.set(userId, Date.now());
 
     return {
       deducted: totalDeducted > 0,
