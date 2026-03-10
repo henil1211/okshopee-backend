@@ -3550,11 +3550,20 @@ class Database {
   static processMonthlySystemFee(userId: string): { deducted: boolean; pending: boolean; alreadyCurrent: boolean } {
     if (this._bulkRebuildMode) return { deducted: false, pending: false, alreadyCurrent: true };
 
-    // Cooldown: only process once every 5 minutes per user to prevent sync race duplicates
-    const lastProcessed = this._systemFeeLastProcessed.get(userId) || 0;
-    if (Date.now() - lastProcessed < 5 * 60 * 1000) {
+    // Guard 1: Wait until initial backend sync is complete so transaction history is accurate
+    const syncStatus = this.getRemoteSyncStatus();
+    if (!syncStatus.lastSuccessAt) {
       return { deducted: false, pending: false, alreadyCurrent: true };
     }
+
+    // Guard 2: Cooldown persisted via sessionStorage to survive page refreshes
+    const cooldownKey = `__sysFee_${userId}`;
+    try {
+      const lastStr = sessionStorage.getItem(cooldownKey);
+      if (lastStr && Date.now() - parseInt(lastStr, 10) < 5 * 60 * 1000) {
+        return { deducted: false, pending: false, alreadyCurrent: true };
+      }
+    } catch (_e) { /* sessionStorage may be unavailable */ }
 
     const user = this.getUserById(userId);
     if (!user || !user.isActive || !user.activatedAt) {
@@ -3601,6 +3610,7 @@ class Database {
         this.updateWallet(userId, { pendingSystemFee: 0 });
       }
       this._systemFeeLastProcessed.set(userId, Date.now());
+      try { sessionStorage.setItem(cooldownKey, Date.now().toString()); } catch (_e) { /* */ }
       return { deducted: false, pending: false, alreadyCurrent: true };
     }
 
@@ -3652,6 +3662,7 @@ class Database {
 
     // Mark this user as processed (cooldown)
     this._systemFeeLastProcessed.set(userId, Date.now());
+    try { sessionStorage.setItem(cooldownKey, Date.now().toString()); } catch (_e) { /* */ }
 
     return {
       deducted: totalDeducted > 0,
