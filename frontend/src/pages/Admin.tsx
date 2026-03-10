@@ -161,7 +161,7 @@ export default function Admin() {
     stats, settings, allUsers, allTransactions, safetyPoolAmount, allPins, allPinRequests, pendingPinRequests,
     loadStats, loadSettings, loadAllUsers, loadAllTransactions, loadAllPins, loadAllPinRequests, loadPendingPinRequests,
     updateSettings, addFundsToUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
-    suspendPin, unsuspendPin, blockUser, unblockUser, bulkCreateUsersWithoutPin, createServerBackup,
+    suspendPin, unsuspendPin, blockUser, unblockUser, reactivateAutoDeactivatedUser, bulkCreateUsersWithoutPin, createServerBackup,
     deleteAllIdsFromSystem, getLevelWiseReport
   } = useAdminStore();
 
@@ -735,6 +735,16 @@ export default function Admin() {
 
   const handleUnblockUser = async (targetUserId: string) => {
     const result = await unblockUser(targetUserId);
+    if (result.success) {
+      toast.success(result.message);
+      loadStats();
+    } else {
+      toast.error(result.message);
+    }
+  };
+
+  const handleReactivateUser = async (targetUserId: string) => {
+    const result = await reactivateAutoDeactivatedUser(targetUserId);
     if (result.success) {
       toast.success(result.message);
       loadStats();
@@ -1939,7 +1949,10 @@ export default function Admin() {
                                 {u.accountStatus === 'active' && u.isActive && (
                                   <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30">Active</Badge>
                                 )}
-                                {u.accountStatus === 'active' && !u.isActive && (
+                                {u.accountStatus === 'active' && !u.isActive && u.deactivationReason === 'direct_referral_deadline' && (
+                                  <Badge className="bg-red-500/20 text-red-400 border-red-500/30">Auto-Deactivated (No Directs)</Badge>
+                                )}
+                                {u.accountStatus === 'active' && !u.isActive && u.deactivationReason !== 'direct_referral_deadline' && (
                                   <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30">Inactive</Badge>
                                 )}
                                 {(u.accountStatus === 'temp_blocked' || u.accountStatus === 'permanent_blocked') && (
@@ -2015,6 +2028,18 @@ export default function Admin() {
                                     title="Unblock user"
                                   >
                                     <UserCheck className="w-4 h-4" />
+                                  </Button>
+                                )}
+                                {u.accountStatus === 'active' && !u.isActive && u.deactivationReason === 'direct_referral_deadline' && !u.isAdmin && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => handleReactivateUser(u.userId)}
+                                    className="border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+                                    title="Reactivate user (reset direct referral deadline)"
+                                  >
+                                    <UserCheck className="w-4 h-4 mr-1" />
+                                    Reactivate
                                   </Button>
                                 )}
                               </div>

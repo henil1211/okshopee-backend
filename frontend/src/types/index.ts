@@ -13,6 +13,8 @@ export interface User {
   blockedAt?: string | null;
   blockedUntil?: string | null;
   blockedReason?: string | null;
+  deactivationReason?: 'direct_referral_deadline' | null;
+  reactivatedAt?: string | null;
   createdAt: string;
   activatedAt: string | null;
   gracePeriodEnd: string | null;

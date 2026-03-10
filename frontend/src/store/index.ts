@@ -259,7 +259,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         user = unblocked;
       }
     }
+    // Auto-deactivate if direct referral deadline passed
+    if (user.isActive && user.activatedAt && !user.isAdmin) {
+      Database.checkDirectReferralDeadline(user.id);
+      user = Database.getUserById(user.id) || user;
+    }
     if (!user.isActive) {
+      if (user.deactivationReason === 'direct_referral_deadline') {
+        return { success: false, message: 'Your ID is inactive as per direct refer terms & conditions.' };
+      }
       return { success: false, message: 'Account is inactive. Contact admin.' };
     }
     if (user.password !== password) {
@@ -396,6 +404,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       blockedAt: null,
       blockedUntil: null,
       blockedReason: null,
+      deactivationReason: null,
+      reactivatedAt: null,
       createdAt: new Date().toISOString(),
       activatedAt: new Date().toISOString(), // Activated immediately
       gracePeriodEnd: null,
@@ -638,6 +648,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     Database.syncLockedIncomeWallet(userId);
     // Process monthly system fee if due
     Database.processMonthlySystemFee(userId);
+    // Check direct referral deadline auto-deactivation
+    Database.checkDirectReferralDeadline(userId);
     const wallet = Database.getWallet(userId);
     const transactions = Database.getUserTransactions(userId);
     set({ wallet, transactions });
@@ -1133,6 +1145,7 @@ interface AdminState {
   unsuspendPin: (pinId: string) => Promise<{ success: boolean; message: string }>;
   blockUser: (targetUserId: string, type: 'temporary' | 'permanent', reason?: string, hours?: number) => Promise<{ success: boolean; message: string }>;
   unblockUser: (targetUserId: string) => Promise<{ success: boolean; message: string }>;
+  reactivateAutoDeactivatedUser: (targetUserId: string) => Promise<{ success: boolean; message: string }>;
   addFundsToUser: (userId: string, amount: number, walletType: 'deposit' | 'income') => Promise<{ success: boolean; message: string }>;
   bulkCreateUsersWithoutPin: (params: {
     sponsorUserId: string;
@@ -1394,6 +1407,30 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     get().loadAllUsers();
     return { success: true, message: 'User unblocked successfully' };
+  },
+
+  reactivateAutoDeactivatedUser: async (targetUserId: string) => {
+    const adminUser = Database.getCurrentUser();
+    if (!adminUser?.isAdmin) {
+      return { success: false, message: 'Only admin can reactivate users' };
+    }
+
+    const targetUser = Database.getUserByUserId(targetUserId);
+    if (!targetUser) {
+      return { success: false, message: 'User not found' };
+    }
+
+    if (targetUser.deactivationReason !== 'direct_referral_deadline') {
+      return { success: false, message: 'User was not auto-deactivated for direct referral deadline' };
+    }
+
+    const result = Database.reactivateUser(targetUser.id);
+    if (!result) {
+      return { success: false, message: 'Failed to reactivate user' };
+    }
+
+    get().loadAllUsers();
+    return { success: true, message: `User ${targetUserId} reactivated. 30-day deadline restarted.` };
   },
 
   addFundsToUser: async (userId: string, amount: number, walletType: 'deposit' | 'income' = 'deposit') => {

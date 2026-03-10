@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef } from 'react';
+﻿import { useEffect, useState, useRef, useMemo } from 'react';
 import { useAuthStore, useWalletStore, useMatrixStore, useOtpStore, useSyncRefreshKey, useNotificationStore } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -11,7 +11,8 @@ import {
   DollarSign, UserPlus, BarChart3, PlusCircle, LogOut, Shield,
   Ticket, Plane, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Train, CarFront
 } from 'lucide-react';
-import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel } from '@/utils/helpers';
+import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel, calculateTimeRemainingWithDays, formatCountdownWithDays } from '@/utils/helpers';
+import { helpDistributionTable } from '@/db';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -292,6 +293,50 @@ export default function Dashboard() {
   const currentLevelDisplay = displayUser ? Database.getCurrentMatrixLevel(displayUser.id) : 0;
   const lockedIncomeBreakdown = displayUser ? Database.getLockedIncomeBreakdown(displayUser.id) : [];
   const effectiveDirectCount = displayUser ? Database.getEffectiveDirectCount(displayUser) : 0;
+
+  // Direct referral deadline countdown logic
+  const REQUIRED_INITIAL_DIRECTS = 2;
+  const hasMetInitialDirectRequirement = effectiveDirectCount >= REQUIRED_INITIAL_DIRECTS;
+
+  const deadlineEndISO = useMemo(() => {
+    if (!displayUser || displayUser.isAdmin || hasMetInitialDirectRequirement) return null;
+    const settings = Database.getSettings();
+    const baseDate = displayUser.reactivatedAt
+      ? new Date(displayUser.reactivatedAt)
+      : (displayUser.activatedAt ? new Date(displayUser.activatedAt) : null);
+    if (!baseDate) return null;
+    const deadlineDays = settings.directReferralDeadlineDays || 30;
+    const deadlineEnd = new Date(baseDate.getTime() + deadlineDays * 24 * 60 * 60 * 1000);
+    return deadlineEnd.toISOString();
+  }, [displayUser, hasMetInitialDirectRequirement]);
+
+  const [countdown, setCountdown] = useState<{ days: number; hours: number; minutes: number; seconds: number; expired: boolean } | null>(null);
+
+  useEffect(() => {
+    if (!deadlineEndISO) {
+      setCountdown(null);
+      return;
+    }
+    const tick = () => setCountdown(calculateTimeRemainingWithDays(deadlineEndISO));
+    tick();
+    const intervalId = setInterval(tick, 1000);
+    return () => clearInterval(intervalId);
+  }, [deadlineEndISO]);
+
+  // Next level direct referral progress
+  const nextLevelDirectInfo = useMemo(() => {
+    if (!displayUser || !hasMetInitialDirectRequirement) return null;
+    const currentLevel = Database.getCurrentMatrixLevel(displayUser.id);
+    for (let lvl = currentLevel + 1; lvl <= helpDistributionTable.length; lvl++) {
+      const cumulativeRequired = Database.getCumulativeDirectRequired(lvl);
+      if (effectiveDirectCount < cumulativeRequired) {
+        const remaining = cumulativeRequired - effectiveDirectCount;
+        return { nextLevel: lvl, totalRequired: cumulativeRequired, remaining };
+      }
+    }
+    return null; // qualified for all levels
+  }, [displayUser, hasMetInitialDirectRequirement, effectiveDirectCount]);
+
   const isOutflowTransaction = (tx: { amount: number; type: string }) =>
     tx.amount < 0
     || tx.type === 'withdrawal'
@@ -605,6 +650,64 @@ export default function Dashboard() {
             <p className="text-sm text-amber-300">
               Pending system fee: <span className="font-semibold">${wallet?.pendingSystemFee}</span> — will be deducted automatically from your next income.
             </p>
+          </div>
+        )}
+
+        {/* Direct Referral Deadline Countdown */}
+        {countdown && !countdown.expired && !hasMetInitialDirectRequirement && (
+          <div className="mb-6 p-4 rounded-xl border border-red-500/30 bg-red-500/10">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-red-400 flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5" />
+                  Direct Referral Deadline
+                </p>
+                <p className="text-xs text-red-300/80 mt-1">
+                  Get {REQUIRED_INITIAL_DIRECTS - effectiveDirectCount} more direct referral(s) before the deadline or your account will be deactivated.
+                </p>
+                <p className="text-xs text-white/40 mt-1">
+                  Current: {effectiveDirectCount} / {REQUIRED_INITIAL_DIRECTS} direct referrals
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-xs text-white/50">Time Remaining</p>
+                <p className="text-2xl font-mono font-bold text-red-400">
+                  {formatCountdownWithDays(countdown)}
+                </p>
+                <p className="text-[10px] text-white/40">Day : Hour : Min : Sec</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Direct Referral Progress (after meeting 2-direct requirement) */}
+        {hasMetInitialDirectRequirement && nextLevelDirectInfo && (
+          <div className="mb-6 p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-emerald-400 flex items-center gap-2">
+                  <CheckCircle className="w-5 h-5" />
+                  Direct Referral Progress
+                </p>
+                <p className="text-xs text-emerald-300/80 mt-1">
+                  You need <span className="font-semibold">+{nextLevelDirectInfo.remaining}</span> more direct referral(s) (total {nextLevelDirectInfo.totalRequired}) to start receiving Level {nextLevelDirectInfo.nextLevel} helps.
+                </p>
+              </div>
+              <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-lg px-3 py-1">
+                {effectiveDirectCount} Direct{effectiveDirectCount !== 1 ? 's' : ''}
+              </Badge>
+            </div>
+          </div>
+        )}
+
+        {hasMetInitialDirectRequirement && !nextLevelDirectInfo && (
+          <div className="mb-6 p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10">
+            <div className="flex items-center gap-3">
+              <CheckCircle className="w-5 h-5 text-emerald-400" />
+              <p className="text-sm text-emerald-400 font-semibold">
+                All direct referral requirements met! You are qualified for all levels.
+              </p>
+            </div>
           </div>
         )}
 

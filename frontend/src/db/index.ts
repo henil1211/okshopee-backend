@@ -82,7 +82,7 @@ const defaultSettings: AdminSettings = {
   reEntryEnabled: true,
   safetyPoolEnabled: true,
   activationDeadlineDays: 7,
-  directReferralDeadlineDays: 15,
+  directReferralDeadlineDays: 30,
   requireOtpForTransactions: true,
   masterPassword: 'master@2024' // Default master password
 };
@@ -1309,6 +1309,14 @@ class Database {
       blockedUntil: null,
       blockedReason: null,
       isActive: true
+    });
+  }
+
+  static reactivateUser(userId: string): User | null {
+    return this.updateUser(userId, {
+      isActive: true,
+      deactivationReason: null,
+      reactivatedAt: new Date().toISOString(),
     });
   }
 
@@ -3545,6 +3553,48 @@ class Database {
       createdAt: new Date().toISOString(),
       completedAt: new Date().toISOString()
     });
+  }
+
+  static checkDirectReferralDeadline(userId: string): {
+    deactivated: boolean;
+    deadlineActive: boolean;
+    deadlineEnd: string | null;
+    effectiveDirects: number;
+    requiredDirects: number;
+  } {
+    const noAction = { deactivated: false, deadlineActive: false, deadlineEnd: null, effectiveDirects: 0, requiredDirects: 2 };
+    if (this._bulkRebuildMode) return noAction;
+
+    const user = this.getUserById(userId);
+    if (!user || user.isAdmin || !user.activatedAt || !user.isActive) return noAction;
+
+    const requiredDirects = 2;
+    const effectiveDirects = this.getEffectiveDirectCount(user);
+
+    // Already met 2 direct requirement — no deadline concern
+    if (effectiveDirects >= requiredDirects) {
+      return { deactivated: false, deadlineActive: false, deadlineEnd: null, effectiveDirects, requiredDirects };
+    }
+
+    // Compute deadline from reactivatedAt (if admin reactivated) or activatedAt
+    const settings = this.getSettings();
+    const deadlineDays = settings.directReferralDeadlineDays || 30;
+    const baseDate = new Date(user.reactivatedAt || user.activatedAt);
+    const deadlineEnd = new Date(baseDate.getTime() + deadlineDays * 24 * 60 * 60 * 1000);
+    const now = new Date();
+
+    if (now < deadlineEnd) {
+      // Deadline still active, user still has time
+      return { deactivated: false, deadlineActive: true, deadlineEnd: deadlineEnd.toISOString(), effectiveDirects, requiredDirects };
+    }
+
+    // Deadline passed — auto-deactivate
+    this.updateUser(userId, {
+      isActive: false,
+      deactivationReason: 'direct_referral_deadline',
+    });
+
+    return { deactivated: true, deadlineActive: false, deadlineEnd: deadlineEnd.toISOString(), effectiveDirects, requiredDirects };
   }
 
   static processMonthlySystemFee(userId: string): { deducted: boolean; pending: boolean; alreadyCurrent: boolean } {

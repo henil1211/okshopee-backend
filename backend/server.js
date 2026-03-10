@@ -1287,6 +1287,9 @@ async function authenticateUser(userId, password) {
   }
 
   if (!user.isActive) {
+    if (user.deactivationReason === 'direct_referral_deadline') {
+      return { ok: false, status: 403, error: 'Your ID is inactive as per direct refer terms & conditions.' };
+    }
     return { ok: false, status: 403, error: 'Account is inactive. Contact admin.' };
   }
 
@@ -1315,7 +1318,7 @@ async function buildAdminAuditReport() {
   const presentStateKeys = Object.keys(snapshot.state).sort();
   const missingStateKeys = DB_KEYS.filter((key) => !presentStateKeys.includes(key));
 
-  const users = await mongoDb.collection('users').find({}, { projection: { id: 1, userId: 1, email: 1, password: 1, isAdmin: 1, isActive: 1, accountStatus: 1 } }).toArray();
+  const users = await mongoDb.collection('users').find({}, { projection: { id: 1, userId: 1, email: 1, password: 1, isAdmin: 1, isActive: 1, accountStatus: 1, deactivationReason: 1 } }).toArray();
   const wallets = await mongoDb.collection('wallets').find({}, { projection: { userId: 1 } }).toArray();
   const matrix = await mongoDb.collection('matrix').find({}, { projection: { userId: 1, parentId: 1, leftChild: 1, rightChild: 1 } }).toArray();
   const safetyPoolTransactions = await mongoDb.collection(SAFETY_POOL_TRANSACTIONS_COLLECTION).countDocuments();
