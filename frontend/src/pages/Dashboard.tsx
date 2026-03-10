@@ -326,12 +326,24 @@ export default function Dashboard() {
   // Next level direct referral progress
   const nextLevelDirectInfo = useMemo(() => {
     if (!displayUser || !hasMetInitialDirectRequirement) return null;
-    const currentLevel = Database.getCurrentMatrixLevel(displayUser.id);
-    for (let lvl = currentLevel + 1; lvl <= helpDistributionTable.length; lvl++) {
+    const currentMatrixLevel = Database.getCurrentMatrixLevel(displayUser.id);
+    // Find the first level (starting from 2) where user hasn't met cumulative direct requirement
+    for (let lvl = 2; lvl <= helpDistributionTable.length; lvl++) {
       const cumulativeRequired = Database.getCumulativeDirectRequired(lvl);
+      if (cumulativeRequired === 0) continue;
       if (effectiveDirectCount < cumulativeRequired) {
         const remaining = cumulativeRequired - effectiveDirectCount;
-        return { nextLevel: lvl, totalRequired: cumulativeRequired, remaining };
+        return { targetLevel: lvl, totalRequired: cumulativeRequired, remaining, currentMatrixLevel };
+      }
+    }
+    // User has met all direct requirements up to level 10
+    // Show next level beyond current if applicable
+    const nextBeyond = currentMatrixLevel + 1;
+    if (nextBeyond <= helpDistributionTable.length) {
+      const cumulativeRequired = Database.getCumulativeDirectRequired(nextBeyond);
+      if (effectiveDirectCount < cumulativeRequired) {
+        const remaining = cumulativeRequired - effectiveDirectCount;
+        return { targetLevel: nextBeyond, totalRequired: cumulativeRequired, remaining, currentMatrixLevel };
       }
     }
     return null; // qualified for all levels
@@ -705,17 +717,24 @@ export default function Dashboard() {
         {/* Direct Referral Progress (after meeting 2-direct requirement) */}
         {hasMetInitialDirectRequirement && nextLevelDirectInfo && (
           <div className="mb-6 p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-emerald-400 flex items-center gap-2">
                   <CheckCircle className="w-5 h-5" />
                   Direct Referral Progress
                 </p>
-                <p className="text-xs text-emerald-300/80 mt-1">
-                  You need <span className="font-semibold">+{nextLevelDirectInfo.remaining}</span> more direct referral(s) (total {nextLevelDirectInfo.totalRequired}) to start receiving Level {nextLevelDirectInfo.nextLevel} helps.
-                </p>
+                {nextLevelDirectInfo.currentMatrixLevel >= nextLevelDirectInfo.targetLevel && (
+                  <p className="text-xs text-amber-300/80 mt-1">
+                    You are currently at Level {nextLevelDirectInfo.currentMatrixLevel} but need <span className="font-semibold">+{nextLevelDirectInfo.remaining}</span> more direct referral(s) (total {nextLevelDirectInfo.totalRequired}) to receive Level {nextLevelDirectInfo.targetLevel} helps.
+                  </p>
+                )}
+                {nextLevelDirectInfo.currentMatrixLevel < nextLevelDirectInfo.targetLevel && (
+                  <p className="text-xs text-emerald-300/80 mt-1">
+                    You need <span className="font-semibold">+{nextLevelDirectInfo.remaining}</span> more direct referral(s) (total {nextLevelDirectInfo.totalRequired}) to start receiving Level {nextLevelDirectInfo.targetLevel} helps.
+                  </p>
+                )}
               </div>
-              <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-lg px-3 py-1">
+              <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-lg px-3 py-1 shrink-0">
                 {effectiveDirectCount} Direct{effectiveDirectCount !== 1 ? 's' : ''}
               </Badge>
             </div>
