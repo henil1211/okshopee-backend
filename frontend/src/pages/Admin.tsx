@@ -12,13 +12,14 @@ import {
   Users, ArrowLeft, TrendingUp, Wallet, Shield,
   Settings, DollarSign, Search, CheckCircle, RefreshCw, Download,
   CreditCard, XCircle, Eye, LogOut, IdCard, Ticket, UserCog,
-  BarChart3, Copy, Check, Ban, UserCheck, ArrowUp, ArrowDown, MessageCircle, Share2
+  BarChart3, Copy, Check, Ban, UserCheck, ArrowUp, ArrowDown, MessageCircle, Share2,
+  ShoppingBag, Plus, Pencil, Trash2, FileText, Award
 } from 'lucide-react';
 import { formatCurrency, formatNumber, formatDate, getInitials, generateAvatarColor, getTransactionTypeLabel } from '@/utils/helpers';
 import { toast } from 'sonner';
 import Database from '@/db';
 import { helpDistributionTable } from '@/db';
-import type { Payment, PaymentMethod, Pin, SupportTicket, SupportTicketAttachment, SupportTicketStatus } from '@/types';
+import type { Payment, PaymentMethod, Pin, SupportTicket, SupportTicketAttachment, SupportTicketStatus, MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal } from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
@@ -154,6 +155,285 @@ const SUPPORT_CATEGORY_LABELS: Record<string, string> = {
   technical_issues: 'Technical Issues'
 };
 
+// ==================== MARKETPLACE FORM COMPONENTS ====================
+
+function MarketplaceRetailerForm({ retailer, categories, onSave, onCancel }: {
+  retailer: MarketplaceRetailer | null;
+  categories: MarketplaceCategory[];
+  onSave: (data: Partial<MarketplaceRetailer>) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState(retailer?.name || '');
+  const [logoUrl, setLogoUrl] = useState(retailer?.logoUrl || '');
+  const [discountPercent, setDiscountPercent] = useState(retailer?.discountPercent?.toString() || '0');
+  const [discountText, setDiscountText] = useState(retailer?.discountText || '');
+  const [websiteUrl, setWebsiteUrl] = useState(retailer?.websiteUrl || '');
+  const [affiliateLink, setAffiliateLink] = useState(retailer?.affiliateLink || '');
+  const [categoryId, setCategoryId] = useState(retailer?.categoryId || (categories[0]?.id || ''));
+  const [isTopRetailer, setIsTopRetailer] = useState(retailer?.isTopRetailer ?? false);
+  const [isActive, setIsActive] = useState(retailer?.isActive ?? true);
+  const [sortOrder, setSortOrder] = useState(retailer?.sortOrder?.toString() || '0');
+
+  const handleLogoUpload = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setLogoUrl(reader.result as string);
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div className="p-4 bg-[#1a2332] rounded-lg border border-white/10 space-y-3">
+      <h4 className="text-white font-medium text-sm">{retailer ? 'Edit Retailer' : 'Add Retailer'}</h4>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Name *</Label>
+          <Input value={name} onChange={e => setName(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="Amazon" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Category</Label>
+          <select value={categoryId} onChange={e => setCategoryId(e.target.value)} className="w-full h-9 bg-[#1f2937] border border-white/10 text-white rounded-md px-2 text-sm">
+            {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Discount %</Label>
+          <Input type="number" value={discountPercent} onChange={e => setDiscountPercent(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Discount Text</Label>
+          <Input value={discountText} onChange={e => setDiscountText(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="Up to 30% Cashback" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Website URL</Label>
+          <Input value={websiteUrl} onChange={e => setWebsiteUrl(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="https://amazon.com" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Affiliate Link</Label>
+          <Input value={affiliateLink} onChange={e => setAffiliateLink(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="https://..." />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Sort Order</Label>
+          <Input type="number" value={sortOrder} onChange={e => setSortOrder(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Logo Image</Label>
+          <Input type="file" accept="image/*" onChange={handleLogoUpload} className="bg-[#1f2937] border-white/10 text-white h-9 text-xs" />
+          {logoUrl && <img src={logoUrl} alt="Logo" className="w-10 h-10 rounded mt-1 object-cover" />}
+        </div>
+      </div>
+      <div className="flex gap-4 items-center">
+        <label className="flex items-center gap-2 text-white/70 text-xs cursor-pointer">
+          <input type="checkbox" checked={isTopRetailer} onChange={e => setIsTopRetailer(e.target.checked)} className="rounded" />
+          Top Retailer
+        </label>
+        <label className="flex items-center gap-2 text-white/70 text-xs cursor-pointer">
+          <input type="checkbox" checked={isActive} onChange={e => setIsActive(e.target.checked)} className="rounded" />
+          Active
+        </label>
+      </div>
+      <div className="flex gap-2">
+        <Button size="sm" className="bg-[#118bdd]" disabled={!name} onClick={() => onSave({ name, logoUrl, discountPercent: Number(discountPercent), discountText, websiteUrl, affiliateLink, categoryId, isTopRetailer, isActive, sortOrder: Number(sortOrder) })}>
+          {retailer ? 'Update' : 'Create'}
+        </Button>
+        <Button size="sm" variant="outline" className="border-white/20 text-white/70" onClick={onCancel}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
+function MarketplaceCategoryForm({ category, onSave, onCancel }: {
+  category: MarketplaceCategory | null;
+  onSave: (data: Partial<MarketplaceCategory>) => void;
+  onCancel: () => void;
+}) {
+  const ICON_OPTIONS = ['Star', 'GraduationCap', 'Laptop', 'Shirt', 'Landmark', 'Briefcase', 'Plane', 'Pill', 'UtensilsCrossed', 'Heart', 'Home', 'ShoppingBag', 'Gift', 'Music', 'Camera', 'Gamepad2', 'Dumbbell', 'Baby', 'Car', 'Smartphone'];
+  const [name, setName] = useState(category?.name || '');
+  const [slug, setSlug] = useState(category?.slug || '');
+  const [icon, setIcon] = useState(category?.icon || 'Star');
+  const [sortOrder, setSortOrder] = useState(category?.sortOrder?.toString() || '0');
+  const [isActive, setIsActive] = useState(category?.isActive ?? true);
+
+  return (
+    <div className="p-4 bg-[#1a2332] rounded-lg border border-white/10 space-y-3">
+      <h4 className="text-white font-medium text-sm">{category ? 'Edit Category' : 'Add Category'}</h4>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Name *</Label>
+          <Input value={name} onChange={e => { setName(e.target.value); if (!category) setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-')); }} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Slug</Label>
+          <Input value={slug} onChange={e => setSlug(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Icon</Label>
+          <select value={icon} onChange={e => setIcon(e.target.value)} className="w-full h-9 bg-[#1f2937] border border-white/10 text-white rounded-md px-2 text-sm">
+            {ICON_OPTIONS.map(i => <option key={i} value={i}>{i}</option>)}
+          </select>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Sort Order</Label>
+          <Input type="number" value={sortOrder} onChange={e => setSortOrder(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+      </div>
+      <label className="flex items-center gap-2 text-white/70 text-xs cursor-pointer">
+        <input type="checkbox" checked={isActive} onChange={e => setIsActive(e.target.checked)} className="rounded" />
+        Active
+      </label>
+      <div className="flex gap-2">
+        <Button size="sm" className="bg-[#118bdd]" disabled={!name} onClick={() => onSave({ name, slug, icon, sortOrder: Number(sortOrder), isActive })}>
+          {category ? 'Update' : 'Create'}
+        </Button>
+        <Button size="sm" variant="outline" className="border-white/20 text-white/70" onClick={onCancel}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
+function MarketplaceBannerForm({ banner, onSave, onCancel }: {
+  banner: MarketplaceBanner | null;
+  onSave: (data: Partial<MarketplaceBanner>) => void;
+  onCancel: () => void;
+}) {
+  const [title, setTitle] = useState(banner?.title || '');
+  const [subtitle, setSubtitle] = useState(banner?.subtitle || '');
+  const [imageUrl, setImageUrl] = useState(banner?.imageUrl || '');
+  const [linkUrl, setLinkUrl] = useState(banner?.linkUrl || '');
+  const [sortOrder, setSortOrder] = useState(banner?.sortOrder?.toString() || '0');
+  const [isActive, setIsActive] = useState(banner?.isActive ?? true);
+
+  const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setImageUrl(reader.result as string);
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div className="p-4 bg-[#1a2332] rounded-lg border border-white/10 space-y-3">
+      <h4 className="text-white font-medium text-sm">{banner ? 'Edit Banner' : 'Add Banner'}</h4>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Title *</Label>
+          <Input value={title} onChange={e => setTitle(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Subtitle</Label>
+          <Input value={subtitle} onChange={e => setSubtitle(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Link URL</Label>
+          <Input value={linkUrl} onChange={e => setLinkUrl(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="https://..." />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Sort Order</Label>
+          <Input type="number" value={sortOrder} onChange={e => setSortOrder(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1 md:col-span-2">
+          <Label className="text-white/70 text-xs">Banner Image</Label>
+          <Input type="file" accept="image/*" onChange={handleImageUpload} className="bg-[#1f2937] border-white/10 text-white h-9 text-xs" />
+          {imageUrl && <img src={imageUrl} alt="Banner" className="w-full max-w-xs h-20 rounded mt-1 object-cover" />}
+        </div>
+      </div>
+      <label className="flex items-center gap-2 text-white/70 text-xs cursor-pointer">
+        <input type="checkbox" checked={isActive} onChange={e => setIsActive(e.target.checked)} className="rounded" />
+        Active
+      </label>
+      <div className="flex gap-2">
+        <Button size="sm" className="bg-[#118bdd]" disabled={!title} onClick={() => onSave({ title, subtitle, imageUrl, linkUrl, sortOrder: Number(sortOrder), isActive })}>
+          {banner ? 'Update' : 'Create'}
+        </Button>
+        <Button size="sm" variant="outline" className="border-white/20 text-white/70" onClick={onCancel}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
+function MarketplaceDealForm({ deal, retailers, onSave, onCancel }: {
+  deal: MarketplaceDeal | null;
+  retailers: MarketplaceRetailer[];
+  onSave: (data: Partial<MarketplaceDeal>) => void;
+  onCancel: () => void;
+}) {
+  const [title, setTitle] = useState(deal?.title || '');
+  const [description, setDescription] = useState(deal?.description || '');
+  const [imageUrl, setImageUrl] = useState(deal?.imageUrl || '');
+  const [linkUrl, setLinkUrl] = useState(deal?.linkUrl || '');
+  const [retailerId, setRetailerId] = useState(deal?.retailerId || (retailers[0]?.id || ''));
+  const [badgeText, setBadgeText] = useState(deal?.badgeText || '');
+  const [sortOrder, setSortOrder] = useState(deal?.sortOrder?.toString() || '0');
+  const [isActive, setIsActive] = useState(deal?.isActive ?? true);
+  const [startDate, setStartDate] = useState(deal?.startDate || '');
+  const [endDate, setEndDate] = useState(deal?.endDate || '');
+
+  const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setImageUrl(reader.result as string);
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div className="p-4 bg-[#1a2332] rounded-lg border border-white/10 space-y-3">
+      <h4 className="text-white font-medium text-sm">{deal ? 'Edit Deal' : 'Add Deal'}</h4>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Title *</Label>
+          <Input value={title} onChange={e => setTitle(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Retailer</Label>
+          <select value={retailerId} onChange={e => setRetailerId(e.target.value)} className="w-full h-9 bg-[#1f2937] border border-white/10 text-white rounded-md px-2 text-sm">
+            {retailers.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+        </div>
+        <div className="space-y-1 md:col-span-2">
+          <Label className="text-white/70 text-xs">Description</Label>
+          <Input value={description} onChange={e => setDescription(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Badge Text</Label>
+          <Input value={badgeText} onChange={e => setBadgeText(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="Hot Deal" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Link URL</Label>
+          <Input value={linkUrl} onChange={e => setLinkUrl(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Start Date</Label>
+          <Input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">End Date</Label>
+          <Input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Sort Order</Label>
+          <Input type="number" value={sortOrder} onChange={e => setSortOrder(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-white/70 text-xs">Deal Image</Label>
+          <Input type="file" accept="image/*" onChange={handleImageUpload} className="bg-[#1f2937] border-white/10 text-white h-9 text-xs" />
+          {imageUrl && <img src={imageUrl} alt="Deal" className="w-12 h-12 rounded mt-1 object-cover" />}
+        </div>
+      </div>
+      <label className="flex items-center gap-2 text-white/70 text-xs cursor-pointer">
+        <input type="checkbox" checked={isActive} onChange={e => setIsActive(e.target.checked)} className="rounded" />
+        Active
+      </label>
+      <div className="flex gap-2">
+        <Button size="sm" className="bg-[#118bdd]" disabled={!title} onClick={() => onSave({ title, description, imageUrl, linkUrl, retailerId, badgeText, sortOrder: Number(sortOrder), isActive, startDate, endDate })}>
+          {deal ? 'Update' : 'Create'}
+        </Button>
+        <Button size="sm" variant="outline" className="border-white/20 text-white/70" onClick={onCancel}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
 export default function Admin() {
   const navigate = useNavigate();
   const { user, isAuthenticated, logout, adminLoginAsUser } = useAuthStore();
@@ -162,7 +442,10 @@ export default function Admin() {
     loadStats, loadSettings, loadAllUsers, loadAllTransactions, loadAllPins, loadAllPinRequests, loadPendingPinRequests,
     updateSettings, addFundsToUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
     suspendPin, unsuspendPin, blockUser, unblockUser, reactivateAutoDeactivatedUser, bulkCreateUsersWithoutPin, createServerBackup,
-    deleteAllIdsFromSystem, getLevelWiseReport
+    deleteAllIdsFromSystem, getLevelWiseReport,
+    marketplaceCategories, marketplaceRetailers, marketplaceBanners, marketplaceDeals,
+    marketplaceInvoices, marketplaceRedemptions,
+    loadMarketplaceData
   } = useAdminStore();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -215,6 +498,14 @@ export default function Admin() {
   const [supportDataLoaded, setSupportDataLoaded] = useState(false);
   const [sweepRunning, setSweepRunning] = useState(false);
   const [sweepResult, setSweepResult] = useState<string | null>(null);
+
+  // Marketplace admin state
+  const [mktSubTab, setMktSubTab] = useState<'banners' | 'deals' | 'categories' | 'retailers' | 'invoices' | 'redemptions'>('retailers');
+  const [mktEditingBanner, setMktEditingBanner] = useState<MarketplaceBanner | null>(null);
+  const [mktEditingDeal, setMktEditingDeal] = useState<MarketplaceDeal | null>(null);
+  const [mktEditingCategory, setMktEditingCategory] = useState<MarketplaceCategory | null>(null);
+  const [mktEditingRetailer, setMktEditingRetailer] = useState<MarketplaceRetailer | null>(null);
+  const [mktShowForm, setMktShowForm] = useState(false);
 
   const [memberFilters, setMemberFilters] = useState({
     dateFrom: '',
@@ -323,6 +614,7 @@ export default function Admin() {
     loadPendingPinRequests();
     loadPayments();
     loadPaymentMethods();
+    loadMarketplaceData();
   };
 
   const hydrateDeferredAdminState = async () => {
@@ -387,6 +679,7 @@ export default function Admin() {
             loadPendingPinRequests();
             loadPayments();
             loadPaymentMethods();
+            loadMarketplaceData();
           }
         });
       }
@@ -1433,6 +1726,7 @@ export default function Admin() {
                       loadPendingPinRequests();
                       loadPayments();
                       loadPaymentMethods();
+                      loadMarketplaceData();
                     });
                   } else {
                     loadAllTransactions();
@@ -1644,6 +1938,7 @@ export default function Admin() {
             <TabsTrigger value="reports" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Reports</TabsTrigger>
             <TabsTrigger value="matrix" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Matrix Table</TabsTrigger>
             <TabsTrigger value="settings" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Settings</TabsTrigger>
+            <TabsTrigger value="marketplace" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Marketplace</TabsTrigger>
           </TabsList>
 
           {/* Users Tab */}
@@ -3683,6 +3978,428 @@ export default function Admin() {
                     Delete All IDs
                   </Button>
                 </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Marketplace Tab */}
+          <TabsContent value="marketplace">
+            <Card className="glass border-white/10">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center gap-2">
+                  <ShoppingBag className="w-5 h-5 text-[#118bdd]" />
+                  Marketplace Management
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                {/* Sub-tabs */}
+                <div className="flex gap-2 flex-wrap">
+                  {(['retailers', 'categories', 'banners', 'deals', 'invoices', 'redemptions'] as const).map(tab => (
+                    <Button
+                      key={tab}
+                      variant={mktSubTab === tab ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => { setMktSubTab(tab); setMktShowForm(false); setMktEditingBanner(null); setMktEditingDeal(null); setMktEditingCategory(null); setMktEditingRetailer(null); }}
+                      className={mktSubTab === tab ? 'bg-[#118bdd]' : 'border-white/20 text-white/70 hover:text-white'}
+                    >
+                      {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                    </Button>
+                  ))}
+                </div>
+
+                {/* === RETAILERS SUB-TAB === */}
+                {mktSubTab === 'retailers' && (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-white/80 text-sm font-medium">Retailers ({marketplaceRetailers.length})</h3>
+                      <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingRetailer(null); setMktShowForm(true); }}>
+                        <Plus className="w-4 h-4 mr-1" /> Add Retailer
+                      </Button>
+                    </div>
+                    {mktShowForm && (
+                      <MarketplaceRetailerForm
+                        retailer={mktEditingRetailer}
+                        categories={marketplaceCategories}
+                        onSave={(data) => {
+                          if (mktEditingRetailer) {
+                            Database.updateMarketplaceRetailer(mktEditingRetailer.id, data);
+                          } else {
+                            Database.createMarketplaceRetailer(data as Omit<MarketplaceRetailer, 'id'>);
+                          }
+                          loadMarketplaceData();
+                          setMktShowForm(false);
+                          setMktEditingRetailer(null);
+                          toast.success(mktEditingRetailer ? 'Retailer updated' : 'Retailer added');
+                        }}
+                        onCancel={() => { setMktShowForm(false); setMktEditingRetailer(null); }}
+                      />
+                    )}
+                    <div className="space-y-2">
+                      {marketplaceRetailers
+                        .sort((a, b) => a.sortOrder - b.sortOrder)
+                        .map(r => (
+                        <div key={r.id} className="flex items-center justify-between p-3 bg-[#1f2937] rounded-lg border border-white/10">
+                          <div className="flex items-center gap-3">
+                            {r.logoUrl ? (
+                              <img src={r.logoUrl} alt={r.name} className="w-10 h-10 rounded-lg object-cover" />
+                            ) : (
+                              <div className="w-10 h-10 rounded-lg bg-[#118bdd]/20 flex items-center justify-center text-[#118bdd] font-bold text-sm">{r.name.charAt(0)}</div>
+                            )}
+                            <div>
+                              <div className="text-white text-sm font-medium">{r.name}</div>
+                              <div className="text-white/50 text-xs">{r.discountText || `${r.discountPercent}% off`} · {marketplaceCategories.find(c => c.id === r.categoryId)?.name || 'No category'}</div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {r.isTopRetailer && <Badge className="bg-amber-500/20 text-amber-400 text-xs">Top</Badge>}
+                            <Badge className={r.isActive ? 'bg-green-500/20 text-green-400 text-xs' : 'bg-red-500/20 text-red-400 text-xs'}>{r.isActive ? 'Active' : 'Inactive'}</Badge>
+                            <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingRetailer(r); setMktShowForm(true); }}>
+                              <Pencil className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={() => { Database.deleteMarketplaceRetailer(r.id); loadMarketplaceData(); toast.success('Retailer deleted'); }}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                      {marketplaceRetailers.length === 0 && <p className="text-white/40 text-sm text-center py-4">No retailers added yet</p>}
+                    </div>
+                  </div>
+                )}
+
+                {/* === CATEGORIES SUB-TAB === */}
+                {mktSubTab === 'categories' && (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-white/80 text-sm font-medium">Categories ({marketplaceCategories.length})</h3>
+                      <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingCategory(null); setMktShowForm(true); }}>
+                        <Plus className="w-4 h-4 mr-1" /> Add Category
+                      </Button>
+                    </div>
+                    {mktShowForm && (
+                      <MarketplaceCategoryForm
+                        category={mktEditingCategory}
+                        onSave={(data) => {
+                          if (mktEditingCategory) {
+                            Database.updateMarketplaceCategory(mktEditingCategory.id, data);
+                          } else {
+                            Database.createMarketplaceCategory(data as Omit<MarketplaceCategory, 'id'>);
+                          }
+                          loadMarketplaceData();
+                          setMktShowForm(false);
+                          setMktEditingCategory(null);
+                          toast.success(mktEditingCategory ? 'Category updated' : 'Category added');
+                        }}
+                        onCancel={() => { setMktShowForm(false); setMktEditingCategory(null); }}
+                      />
+                    )}
+                    <div className="space-y-2">
+                      {marketplaceCategories
+                        .sort((a, b) => a.sortOrder - b.sortOrder)
+                        .map(c => (
+                        <div key={c.id} className="flex items-center justify-between p-3 bg-[#1f2937] rounded-lg border border-white/10">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-lg bg-[#118bdd]/20 flex items-center justify-center text-[#118bdd] text-sm">{c.icon}</div>
+                            <div>
+                              <div className="text-white text-sm font-medium">{c.name}</div>
+                              <div className="text-white/50 text-xs">Sort: {c.sortOrder} · {marketplaceRetailers.filter(r => r.categoryId === c.id).length} retailers</div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge className={c.isActive ? 'bg-green-500/20 text-green-400 text-xs' : 'bg-red-500/20 text-red-400 text-xs'}>{c.isActive ? 'Active' : 'Inactive'}</Badge>
+                            <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingCategory(c); setMktShowForm(true); }}>
+                              <Pencil className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={() => { Database.deleteMarketplaceCategory(c.id); loadMarketplaceData(); toast.success('Category deleted'); }}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* === BANNERS SUB-TAB === */}
+                {mktSubTab === 'banners' && (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-white/80 text-sm font-medium">Banners ({marketplaceBanners.length})</h3>
+                      <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingBanner(null); setMktShowForm(true); }}>
+                        <Plus className="w-4 h-4 mr-1" /> Add Banner
+                      </Button>
+                    </div>
+                    {mktShowForm && (
+                      <MarketplaceBannerForm
+                        banner={mktEditingBanner}
+                        onSave={(data) => {
+                          if (mktEditingBanner) {
+                            Database.updateMarketplaceBanner(mktEditingBanner.id, data);
+                          } else {
+                            Database.createMarketplaceBanner(data as Omit<MarketplaceBanner, 'id'>);
+                          }
+                          loadMarketplaceData();
+                          setMktShowForm(false);
+                          setMktEditingBanner(null);
+                          toast.success(mktEditingBanner ? 'Banner updated' : 'Banner added');
+                        }}
+                        onCancel={() => { setMktShowForm(false); setMktEditingBanner(null); }}
+                      />
+                    )}
+                    <div className="space-y-2">
+                      {marketplaceBanners
+                        .sort((a, b) => a.sortOrder - b.sortOrder)
+                        .map(b => (
+                        <div key={b.id} className="flex items-center justify-between p-3 bg-[#1f2937] rounded-lg border border-white/10">
+                          <div className="flex items-center gap-3">
+                            {b.imageUrl ? (
+                              <img src={b.imageUrl} alt={b.title} className="w-16 h-10 rounded object-cover" />
+                            ) : (
+                              <div className="w-16 h-10 rounded bg-gradient-to-r from-[#118bdd] to-purple-500 flex items-center justify-center text-white text-xs">Banner</div>
+                            )}
+                            <div>
+                              <div className="text-white text-sm font-medium">{b.title}</div>
+                              <div className="text-white/50 text-xs">{b.subtitle || 'No subtitle'}</div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge className={b.isActive ? 'bg-green-500/20 text-green-400 text-xs' : 'bg-red-500/20 text-red-400 text-xs'}>{b.isActive ? 'Active' : 'Inactive'}</Badge>
+                            <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingBanner(b); setMktShowForm(true); }}>
+                              <Pencil className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={() => { Database.deleteMarketplaceBanner(b.id); loadMarketplaceData(); toast.success('Banner deleted'); }}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                      {marketplaceBanners.length === 0 && <p className="text-white/40 text-sm text-center py-4">No banners added yet</p>}
+                    </div>
+                  </div>
+                )}
+
+                {/* === DEALS SUB-TAB === */}
+                {mktSubTab === 'deals' && (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-white/80 text-sm font-medium">Deals ({marketplaceDeals.length})</h3>
+                      <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingDeal(null); setMktShowForm(true); }}>
+                        <Plus className="w-4 h-4 mr-1" /> Add Deal
+                      </Button>
+                    </div>
+                    {mktShowForm && (
+                      <MarketplaceDealForm
+                        deal={mktEditingDeal}
+                        retailers={marketplaceRetailers}
+                        onSave={(data) => {
+                          if (mktEditingDeal) {
+                            Database.updateMarketplaceDeal(mktEditingDeal.id, data);
+                          } else {
+                            Database.createMarketplaceDeal(data as Omit<MarketplaceDeal, 'id'>);
+                          }
+                          loadMarketplaceData();
+                          setMktShowForm(false);
+                          setMktEditingDeal(null);
+                          toast.success(mktEditingDeal ? 'Deal updated' : 'Deal added');
+                        }}
+                        onCancel={() => { setMktShowForm(false); setMktEditingDeal(null); }}
+                      />
+                    )}
+                    <div className="space-y-2">
+                      {marketplaceDeals
+                        .sort((a, b) => a.sortOrder - b.sortOrder)
+                        .map(d => (
+                        <div key={d.id} className="flex items-center justify-between p-3 bg-[#1f2937] rounded-lg border border-white/10">
+                          <div className="flex items-center gap-3">
+                            {d.imageUrl ? (
+                              <img src={d.imageUrl} alt={d.title} className="w-12 h-12 rounded object-cover" />
+                            ) : (
+                              <div className="w-12 h-12 rounded bg-orange-500/20 flex items-center justify-center text-orange-400 text-xs">Deal</div>
+                            )}
+                            <div>
+                              <div className="text-white text-sm font-medium">{d.title}</div>
+                              <div className="text-white/50 text-xs">{d.badgeText || 'No badge'} · {marketplaceRetailers.find(r => r.id === d.retailerId)?.name || 'N/A'}</div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge className={d.isActive ? 'bg-green-500/20 text-green-400 text-xs' : 'bg-red-500/20 text-red-400 text-xs'}>{d.isActive ? 'Active' : 'Inactive'}</Badge>
+                            <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingDeal(d); setMktShowForm(true); }}>
+                              <Pencil className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={() => { Database.deleteMarketplaceDeal(d.id); loadMarketplaceData(); toast.success('Deal deleted'); }}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                      {marketplaceDeals.length === 0 && <p className="text-white/40 text-sm text-center py-4">No deals added yet</p>}
+                    </div>
+                  </div>
+                )}
+
+                {/* === INVOICES SUB-TAB === */}
+                {mktSubTab === 'invoices' && (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-white/80 text-sm font-medium flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-[#118bdd]" />
+                        Invoice Verification ({marketplaceInvoices.filter(i => i.status === 'pending').length} pending)
+                      </h3>
+                    </div>
+                    <div className="space-y-2">
+                      {[...marketplaceInvoices]
+                        .sort((a, b) => {
+                          if (a.status === 'pending' && b.status !== 'pending') return -1;
+                          if (a.status !== 'pending' && b.status === 'pending') return 1;
+                          return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+                        })
+                        .map(inv => (
+                        <div key={inv.id} className="p-4 bg-[#1f2937] rounded-lg border border-white/10 space-y-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-white text-sm font-semibold">{inv.retailerName}</span>
+                                <Badge className={`text-[9px] ${
+                                  inv.status === 'pending' ? 'bg-amber-500/15 text-amber-400 border-amber-500/20' :
+                                  inv.status === 'approved' ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20' :
+                                  'bg-red-500/15 text-red-400 border-red-500/20'
+                                }`}>{inv.status}</Badge>
+                              </div>
+                              <p className="text-white/40 text-xs mt-0.5">
+                                User: {inv.userId} • Amount: ${inv.amount.toFixed(2)} • {new Date(inv.createdAt).toLocaleDateString()}
+                              </p>
+                              {inv.status === 'approved' && <p className="text-emerald-400/60 text-xs mt-0.5">Awarded: {inv.rewardPoints} RP</p>}
+                              {inv.status === 'rejected' && inv.adminNotes && <p className="text-red-400/60 text-xs mt-0.5">Reason: {inv.adminNotes}</p>}
+                            </div>
+                          </div>
+                          {inv.invoiceImage && inv.invoiceImage.startsWith('data:image') && (
+                            <div className="rounded-lg overflow-hidden border border-white/10 max-w-xs">
+                              <img src={inv.invoiceImage} alt="Invoice" className="w-full max-h-48 object-contain bg-white/5" />
+                            </div>
+                          )}
+                          {inv.invoiceImage && inv.invoiceImage.startsWith('data:application/pdf') && (
+                            <div className="rounded-lg border border-white/10 p-3 flex items-center gap-2 max-w-xs bg-white/5">
+                              <FileText className="w-5 h-5 text-red-400" />
+                              <span className="text-white/60 text-xs">PDF Invoice Uploaded</span>
+                              <a href={inv.invoiceImage} download={`invoice-${inv.id}.pdf`} className="text-[#118bdd] text-xs underline ml-auto">Download</a>
+                            </div>
+                          )}
+                          {inv.status === 'pending' && (
+                            <div className="flex items-end gap-2 flex-wrap">
+                              <div className="flex-1 min-w-[120px]">
+                                <Label className="text-white/60 text-xs">Reward Points to Award</Label>
+                                <Input
+                                  id={`inv-rp-${inv.id}`}
+                                  type="number"
+                                  placeholder="e.g. 100"
+                                  className="bg-[#111827] border-white/10 text-white h-9 text-sm mt-1"
+                                />
+                              </div>
+                              <Button
+                                size="sm"
+                                className="bg-emerald-600 hover:bg-emerald-700 h-9"
+                                onClick={() => {
+                                  const rpInput = document.getElementById(`inv-rp-${inv.id}`) as HTMLInputElement;
+                                  const rp = parseInt(rpInput?.value || '0');
+                                  if (!rp || rp <= 0) { toast.error('Enter valid reward points'); return; }
+                                  Database.approveMarketplaceInvoice(inv.id, user?.userId || '', rp);
+                                  loadMarketplaceData();
+                                  toast.success(`Invoice approved with ${rp} RP`);
+                                }}
+                              >
+                                <CheckCircle className="w-3.5 h-3.5 mr-1" /> Approve
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="border-red-500/30 text-red-400 hover:bg-red-500/10 h-9"
+                                onClick={() => {
+                                  const reason = prompt('Rejection reason (optional):') || '';
+                                  Database.rejectMarketplaceInvoice(inv.id, user?.userId || '', reason);
+                                  loadMarketplaceData();
+                                  toast.success('Invoice rejected');
+                                }}
+                              >
+                                <XCircle className="w-3.5 h-3.5 mr-1" /> Reject
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      {marketplaceInvoices.length === 0 && <p className="text-white/40 text-sm text-center py-4">No invoices submitted yet</p>}
+                    </div>
+                  </div>
+                )}
+
+                {/* === REDEMPTIONS SUB-TAB === */}
+                {mktSubTab === 'redemptions' && (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-white/80 text-sm font-medium flex items-center gap-2">
+                        <Award className="w-4 h-4 text-[#118bdd]" />
+                        Redemption Requests ({marketplaceRedemptions.filter(r => r.status === 'pending').length} pending)
+                      </h3>
+                    </div>
+                    <div className="space-y-2">
+                      {[...marketplaceRedemptions]
+                        .sort((a, b) => {
+                          if (a.status === 'pending' && b.status !== 'pending') return -1;
+                          if (a.status !== 'pending' && b.status === 'pending') return 1;
+                          return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+                        })
+                        .map(red => (
+                        <div key={red.id} className="p-4 bg-[#1f2937] rounded-lg border border-white/10">
+                          <div className="flex items-center justify-between gap-3 flex-wrap">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-white text-sm font-semibold">{red.rewardPoints} RP → ${red.usdtAmount.toFixed(2)} USDT</span>
+                                <Badge className={`text-[9px] ${
+                                  red.status === 'pending' ? 'bg-amber-500/15 text-amber-400 border-amber-500/20' :
+                                  red.status === 'approved' ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/20' :
+                                  'bg-red-500/15 text-red-400 border-red-500/20'
+                                }`}>{red.status}</Badge>
+                              </div>
+                              <p className="text-white/40 text-xs mt-0.5">
+                                User: {red.userId} • {new Date(red.createdAt).toLocaleDateString()}
+                                {red.status === 'approved' && ' • Credited to Fund Wallet'}
+                              </p>
+                              {red.status === 'rejected' && red.adminNotes && <p className="text-red-400/60 text-xs mt-0.5">Reason: {red.adminNotes}</p>}
+                            </div>
+                            {red.status === 'pending' && (
+                              <div className="flex gap-2 flex-shrink-0">
+                                <Button
+                                  size="sm"
+                                  className="bg-emerald-600 hover:bg-emerald-700 h-8"
+                                  onClick={() => {
+                                    Database.approveRedemption(red.id, user?.userId || '');
+                                    loadMarketplaceData();
+                                    toast.success(`Approved. $${red.usdtAmount.toFixed(2)} credited to user's Fund Wallet`);
+                                  }}
+                                >
+                                  <CheckCircle className="w-3.5 h-3.5 mr-1" /> Approve
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-red-500/30 text-red-400 hover:bg-red-500/10 h-8"
+                                  onClick={() => {
+                                    const reason = prompt('Rejection reason (optional):') || '';
+                                    Database.rejectRedemption(red.id, user?.userId || '', reason);
+                                    loadMarketplaceData();
+                                    toast.success('Rejected. Points refunded to user.');
+                                  }}
+                                >
+                                  <XCircle className="w-3.5 h-3.5 mr-1" /> Reject
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {marketplaceRedemptions.length === 0 && <p className="text-white/40 text-sm text-center py-4">No redemption requests yet</p>}
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

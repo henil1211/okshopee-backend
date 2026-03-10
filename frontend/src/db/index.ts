@@ -4,7 +4,9 @@ import type {
   Pin, PinTransfer, OtpRecord, PinPurchaseRequest, EmailLog,
   ImpersonationSession, SupportTicket, SupportTicketAttachment,
   SupportTicketCategory, SupportTicketMessage, SupportTicketPriority,
-  SupportTicketStatus
+  SupportTicketStatus,
+  MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal,
+  MarketplaceInvoice, RewardRedemption
 } from '@/types';
 
 // Database Keys
@@ -31,7 +33,14 @@ const DB_KEYS = {
   IMPERSONATION: 'mlm_impersonation',
   SUPPORT_TICKETS: 'mlm_support_tickets',
   HELP_TRACKERS: 'mlm_help_trackers',
-  MATRIX_PENDING_CONTRIBUTIONS: 'mlm_matrix_pending_contributions'
+  MATRIX_PENDING_CONTRIBUTIONS: 'mlm_matrix_pending_contributions',
+  // Marketplace Keys
+  MARKETPLACE_CATEGORIES: 'mlm_marketplace_categories',
+  MARKETPLACE_RETAILERS: 'mlm_marketplace_retailers',
+  MARKETPLACE_BANNERS: 'mlm_marketplace_banners',
+  MARKETPLACE_DEALS: 'mlm_marketplace_deals',
+  MARKETPLACE_INVOICES: 'mlm_marketplace_invoices',
+  MARKETPLACE_REDEMPTIONS: 'mlm_marketplace_redemptions'
 };
 
 // Generate 7-digit unique ID
@@ -291,7 +300,9 @@ class Database {
     [DB_KEYS.USERS],
     [DB_KEYS.WALLETS],
     [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL],
-    [DB_KEYS.TRANSACTIONS]
+    [DB_KEYS.TRANSACTIONS],
+    [DB_KEYS.MARKETPLACE_CATEGORIES, DB_KEYS.MARKETPLACE_RETAILERS, DB_KEYS.MARKETPLACE_BANNERS, DB_KEYS.MARKETPLACE_DEALS],
+    [DB_KEYS.MARKETPLACE_INVOICES, DB_KEYS.MARKETPLACE_REDEMPTIONS]
   ] as const;
   private static readonly ADMIN_REMOTE_SYNC_BATCHES = [
     [DB_KEYS.USERS],
@@ -299,7 +310,9 @@ class Database {
     [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL],
     [DB_KEYS.TRANSACTIONS],
     [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS, DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.PAYMENT_METHODS, DB_KEYS.PAYMENTS],
-    [DB_KEYS.MATRIX, DB_KEYS.HELP_TRACKERS, DB_KEYS.MATRIX_PENDING_CONTRIBUTIONS, DB_KEYS.GRACE_PERIODS, DB_KEYS.RE_ENTRIES]
+    [DB_KEYS.MATRIX, DB_KEYS.HELP_TRACKERS, DB_KEYS.MATRIX_PENDING_CONTRIBUTIONS, DB_KEYS.GRACE_PERIODS, DB_KEYS.RE_ENTRIES],
+    [DB_KEYS.MARKETPLACE_CATEGORIES, DB_KEYS.MARKETPLACE_RETAILERS, DB_KEYS.MARKETPLACE_BANNERS, DB_KEYS.MARKETPLACE_DEALS],
+    [DB_KEYS.MARKETPLACE_INVOICES, DB_KEYS.MARKETPLACE_REDEMPTIONS]
   ] as const;
   private static remoteSyncTimer: ReturnType<typeof setTimeout> | null = null;
   private static remoteSyncInFlight = false;
@@ -1077,19 +1090,37 @@ class Database {
               const value = serverState[key];
               if (typeof value === 'string') {
                 this.setStorageItem(key, value);
-              } else {
+              } else if (key in serverState) {
+                // Server explicitly has this key but value is null/empty — clear local
                 this.removeStorageItem(key);
               }
+              // If the key is not in serverState at all, keep local data intact
             }
           } finally {
             this.remoteSyncPending = false;
             this.remoteSyncQueued = false;
             this.remoteSyncDirtyKeys.clear();
             this.remoteSyncApplyingServerState = false;
-            this.resumeRemoteSync(false);
+
+            // Re-mark local-only keys as dirty: if a sync key has local data but
+            // was NOT present on the server, it still needs to be pushed upstream.
+            for (const key of syncKeys) {
+              if (!(key in serverState)) {
+                const localValue = this.getStorageItem(key);
+                if (typeof localValue === 'string') {
+                  this.remoteSyncDirtyKeys.add(key);
+                }
+              }
+            }
+
+            this.resumeRemoteSync(this.remoteSyncDirtyKeys.size > 0);
           }
           this.remoteStateUpdatedAt = typeof payload?.updatedAt === 'string' ? payload.updatedAt : null;
-          this.markSynced('Synced with server');
+          if (this.remoteSyncDirtyKeys.size > 0) {
+            this.markSyncPending();
+          } else {
+            this.markSynced('Synced with server');
+          }
           return;
         }
 
@@ -1417,7 +1448,10 @@ class Database {
         totalReceived: Number.isFinite(totalReceivedValue) ? totalReceivedValue : 0,
         totalGiven: Number.isFinite(totalGivenValue) ? totalGivenValue : 0,
         pendingSystemFee: Number.isFinite(pendingSystemFeeValue) ? pendingSystemFeeValue : 0,
-        lastSystemFeeDate: typeof lastSystemFeeDateValue === 'string' ? lastSystemFeeDateValue : null
+        lastSystemFeeDate: typeof lastSystemFeeDateValue === 'string' ? lastSystemFeeDateValue : null,
+        rewardPoints: Number.isFinite(Number(rest.rewardPoints)) ? Number(rest.rewardPoints) : 0,
+        totalRewardPointsEarned: Number.isFinite(Number(rest.totalRewardPointsEarned)) ? Number(rest.totalRewardPointsEarned) : 0,
+        totalRewardPointsRedeemed: Number.isFinite(Number(rest.totalRewardPointsRedeemed)) ? Number(rest.totalRewardPointsRedeemed) : 0,
       };
     });
     if (hasLegacyFields) {
@@ -3520,7 +3554,10 @@ class Database {
       totalReceived: 0,
       totalGiven: 0,
       pendingSystemFee: 0,
-      lastSystemFeeDate: null
+      lastSystemFeeDate: null,
+      rewardPoints: 0,
+      totalRewardPointsEarned: 0,
+      totalRewardPointsRedeemed: 0,
     };
     const wallets = this.getWallets();
     wallets.push(wallet);
@@ -5596,7 +5633,10 @@ class Database {
         totalReceived: 0,
         totalGiven: 0,
         pendingSystemFee: 0,
-        lastSystemFeeDate: null
+        lastSystemFeeDate: null,
+        rewardPoints: 0,
+        totalRewardPointsEarned: 0,
+        totalRewardPointsRedeemed: 0,
       });
     }
     this.saveWallets(Array.from(mergedWalletByUser.values()));
@@ -6010,7 +6050,10 @@ class Database {
         totalReceived: 0,
         totalGiven: 0,
         pendingSystemFee: 0,
-        lastSystemFeeDate: null
+        lastSystemFeeDate: null,
+        rewardPoints: 0,
+        totalRewardPointsEarned: 0,
+        totalRewardPointsRedeemed: 0,
       }))
     );
     this.saveMatrix([
@@ -6054,6 +6097,336 @@ class Database {
       deletedPins,
       deletedMatrixNodes
     };
+  }
+
+  // ==================== MARKETPLACE: CATEGORIES ====================
+
+  static readonly DEFAULT_MARKETPLACE_CATEGORIES: Omit<MarketplaceCategory, 'id'>[] = [
+    { name: 'Popular Stores', slug: 'popular-stores', icon: 'Star', sortOrder: 1, isActive: true },
+    { name: 'Education', slug: 'education', icon: 'GraduationCap', sortOrder: 2, isActive: true },
+    { name: 'Electronics', slug: 'electronics', icon: 'Laptop', sortOrder: 3, isActive: true },
+    { name: 'Fashion', slug: 'fashion', icon: 'Shirt', sortOrder: 4, isActive: true },
+    { name: 'Finance', slug: 'finance', icon: 'Landmark', sortOrder: 5, isActive: true },
+    { name: 'Accessories & Bags', slug: 'accessories-bags', icon: 'Briefcase', sortOrder: 6, isActive: true },
+    { name: 'Travel', slug: 'travel', icon: 'Plane', sortOrder: 7, isActive: true },
+    { name: 'Medicines', slug: 'medicines', icon: 'Pill', sortOrder: 8, isActive: true },
+    { name: 'Food & Grocery', slug: 'food-grocery', icon: 'UtensilsCrossed', sortOrder: 9, isActive: true },
+    { name: 'Health & Beauty', slug: 'health-beauty', icon: 'Heart', sortOrder: 10, isActive: true },
+    { name: 'Home & Kitchen', slug: 'home-kitchen', icon: 'Home', sortOrder: 11, isActive: true },
+  ];
+
+  static getMarketplaceCategories(): MarketplaceCategory[] {
+    let cats = this.getCached<MarketplaceCategory[]>(DB_KEYS.MARKETPLACE_CATEGORIES, []);
+    if (cats.length === 0) {
+      cats = this.DEFAULT_MARKETPLACE_CATEGORIES.map((c) => ({
+        ...c,
+        id: generateEventId('mcat', c.slug),
+      }));
+      this.setCached(DB_KEYS.MARKETPLACE_CATEGORIES, cats);
+    }
+    return cats;
+  }
+
+  static saveMarketplaceCategories(cats: MarketplaceCategory[]): void {
+    this.setCached(DB_KEYS.MARKETPLACE_CATEGORIES, cats);
+  }
+
+  static updateMarketplaceCategory(id: string, updates: Partial<MarketplaceCategory>): MarketplaceCategory | null {
+    const cats = this.getMarketplaceCategories();
+    const idx = cats.findIndex(c => c.id === id);
+    if (idx === -1) return null;
+    cats[idx] = { ...cats[idx], ...updates };
+    this.saveMarketplaceCategories(cats);
+    return cats[idx];
+  }
+
+  static createMarketplaceCategory(cat: Omit<MarketplaceCategory, 'id'>): MarketplaceCategory {
+    const cats = this.getMarketplaceCategories();
+    const newCat: MarketplaceCategory = { ...cat, id: generateEventId('mcat', cat.slug) };
+    cats.push(newCat);
+    this.saveMarketplaceCategories(cats);
+    return newCat;
+  }
+
+  static deleteMarketplaceCategory(id: string): boolean {
+    const cats = this.getMarketplaceCategories();
+    const filtered = cats.filter(c => c.id !== id);
+    if (filtered.length === cats.length) return false;
+    this.saveMarketplaceCategories(filtered);
+    return true;
+  }
+
+  // ==================== MARKETPLACE: RETAILERS ====================
+
+  static getMarketplaceRetailers(): MarketplaceRetailer[] {
+    return this.getCached<MarketplaceRetailer[]>(DB_KEYS.MARKETPLACE_RETAILERS, []);
+  }
+
+  static saveMarketplaceRetailers(retailers: MarketplaceRetailer[]): void {
+    this.setCached(DB_KEYS.MARKETPLACE_RETAILERS, retailers);
+  }
+
+  static createMarketplaceRetailer(retailer: Omit<MarketplaceRetailer, 'id'>): MarketplaceRetailer {
+    const retailers = this.getMarketplaceRetailers();
+    const newRetailer: MarketplaceRetailer = { ...retailer, id: generateEventId('mret', retailer.name.slice(0, 20)) };
+    retailers.push(newRetailer);
+    this.saveMarketplaceRetailers(retailers);
+    return newRetailer;
+  }
+
+  static updateMarketplaceRetailer(id: string, updates: Partial<MarketplaceRetailer>): MarketplaceRetailer | null {
+    const retailers = this.getMarketplaceRetailers();
+    const idx = retailers.findIndex(r => r.id === id);
+    if (idx === -1) return null;
+    retailers[idx] = { ...retailers[idx], ...updates };
+    this.saveMarketplaceRetailers(retailers);
+    return retailers[idx];
+  }
+
+  static deleteMarketplaceRetailer(id: string): boolean {
+    const retailers = this.getMarketplaceRetailers();
+    const filtered = retailers.filter(r => r.id !== id);
+    if (filtered.length === retailers.length) return false;
+    this.saveMarketplaceRetailers(filtered);
+    return true;
+  }
+
+  // ==================== MARKETPLACE: BANNERS ====================
+
+  static getMarketplaceBanners(): MarketplaceBanner[] {
+    return this.getCached<MarketplaceBanner[]>(DB_KEYS.MARKETPLACE_BANNERS, []);
+  }
+
+  static saveMarketplaceBanners(banners: MarketplaceBanner[]): void {
+    this.setCached(DB_KEYS.MARKETPLACE_BANNERS, banners);
+  }
+
+  static createMarketplaceBanner(banner: Omit<MarketplaceBanner, 'id'>): MarketplaceBanner {
+    const banners = this.getMarketplaceBanners();
+    const newBanner: MarketplaceBanner = { ...banner, id: generateEventId('mban', banner.title.slice(0, 20)) };
+    banners.push(newBanner);
+    this.saveMarketplaceBanners(banners);
+    return newBanner;
+  }
+
+  static updateMarketplaceBanner(id: string, updates: Partial<MarketplaceBanner>): MarketplaceBanner | null {
+    const banners = this.getMarketplaceBanners();
+    const idx = banners.findIndex(b => b.id === id);
+    if (idx === -1) return null;
+    banners[idx] = { ...banners[idx], ...updates };
+    this.saveMarketplaceBanners(banners);
+    return banners[idx];
+  }
+
+  static deleteMarketplaceBanner(id: string): boolean {
+    const banners = this.getMarketplaceBanners();
+    const filtered = banners.filter(b => b.id !== id);
+    if (filtered.length === banners.length) return false;
+    this.saveMarketplaceBanners(filtered);
+    return true;
+  }
+
+  // ==================== MARKETPLACE: DEALS ====================
+
+  static getMarketplaceDeals(): MarketplaceDeal[] {
+    return this.getCached<MarketplaceDeal[]>(DB_KEYS.MARKETPLACE_DEALS, []);
+  }
+
+  static saveMarketplaceDeals(deals: MarketplaceDeal[]): void {
+    this.setCached(DB_KEYS.MARKETPLACE_DEALS, deals);
+  }
+
+  static createMarketplaceDeal(deal: Omit<MarketplaceDeal, 'id'>): MarketplaceDeal {
+    const deals = this.getMarketplaceDeals();
+    const newDeal: MarketplaceDeal = { ...deal, id: generateEventId('mdeal', deal.title.slice(0, 20)) };
+    deals.push(newDeal);
+    this.saveMarketplaceDeals(deals);
+    return newDeal;
+  }
+
+  static updateMarketplaceDeal(id: string, updates: Partial<MarketplaceDeal>): MarketplaceDeal | null {
+    const deals = this.getMarketplaceDeals();
+    const idx = deals.findIndex(d => d.id === id);
+    if (idx === -1) return null;
+    deals[idx] = { ...deals[idx], ...updates };
+    this.saveMarketplaceDeals(deals);
+    return deals[idx];
+  }
+
+  static deleteMarketplaceDeal(id: string): boolean {
+    const deals = this.getMarketplaceDeals();
+    const filtered = deals.filter(d => d.id !== id);
+    if (filtered.length === deals.length) return false;
+    this.saveMarketplaceDeals(filtered);
+    return true;
+  }
+
+  // ==================== MARKETPLACE: INVOICES (Phase 2) ====================
+
+  static getMarketplaceInvoices(): MarketplaceInvoice[] {
+    return this.getCached<MarketplaceInvoice[]>(DB_KEYS.MARKETPLACE_INVOICES, []);
+  }
+
+  static saveMarketplaceInvoices(invoices: MarketplaceInvoice[]): void {
+    this.setCached(DB_KEYS.MARKETPLACE_INVOICES, invoices);
+  }
+
+  static getUserInvoices(userId: string): MarketplaceInvoice[] {
+    return this.getMarketplaceInvoices()
+      .filter(inv => inv.userId === userId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  static getPendingInvoices(): MarketplaceInvoice[] {
+    return this.getMarketplaceInvoices()
+      .filter(inv => inv.status === 'pending')
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  static createMarketplaceInvoice(invoice: Omit<MarketplaceInvoice, 'id'>): MarketplaceInvoice {
+    const invoices = this.getMarketplaceInvoices();
+    const newInvoice: MarketplaceInvoice = { ...invoice, id: generateEventId('minv', invoice.userId) };
+    invoices.push(newInvoice);
+    this.saveMarketplaceInvoices(invoices);
+    return newInvoice;
+  }
+
+  static approveMarketplaceInvoice(invoiceId: string, adminId: string, rewardPoints: number): MarketplaceInvoice | null {
+    const invoices = this.getMarketplaceInvoices();
+    const idx = invoices.findIndex(inv => inv.id === invoiceId);
+    if (idx === -1) return null;
+    invoices[idx] = {
+      ...invoices[idx],
+      status: 'approved',
+      rewardPoints,
+      processedAt: new Date().toISOString(),
+      processedBy: adminId,
+    };
+    this.saveMarketplaceInvoices(invoices);
+    // Add reward points to user's wallet
+    // Invoice stores user.userId (7-digit), but wallet uses user.id (internal UUID)
+    const invoiceUser = this.getUserByUserId(invoices[idx].userId);
+    const walletUserId = invoiceUser ? invoiceUser.id : invoices[idx].userId;
+    const wallet = this.getWallet(walletUserId);
+    if (wallet) {
+      this.updateWallet(walletUserId, {
+        rewardPoints: (wallet.rewardPoints || 0) + rewardPoints,
+        totalRewardPointsEarned: (wallet.totalRewardPointsEarned || 0) + rewardPoints,
+      });
+    }
+    return invoices[idx];
+  }
+
+  static rejectMarketplaceInvoice(invoiceId: string, adminId: string, notes: string): MarketplaceInvoice | null {
+    const invoices = this.getMarketplaceInvoices();
+    const idx = invoices.findIndex(inv => inv.id === invoiceId);
+    if (idx === -1) return null;
+    invoices[idx] = {
+      ...invoices[idx],
+      status: 'rejected',
+      adminNotes: notes,
+      processedAt: new Date().toISOString(),
+      processedBy: adminId,
+    };
+    this.saveMarketplaceInvoices(invoices);
+    return invoices[idx];
+  }
+
+  // ==================== MARKETPLACE: REDEMPTIONS (Phase 2) ====================
+
+  static getMarketplaceRedemptions(): RewardRedemption[] {
+    return this.getCached<RewardRedemption[]>(DB_KEYS.MARKETPLACE_REDEMPTIONS, []);
+  }
+
+  static saveMarketplaceRedemptions(redemptions: RewardRedemption[]): void {
+    this.setCached(DB_KEYS.MARKETPLACE_REDEMPTIONS, redemptions);
+  }
+
+  static getUserRedemptions(userId: string): RewardRedemption[] {
+    return this.getMarketplaceRedemptions()
+      .filter(r => r.userId === userId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  static getPendingRedemptions(): RewardRedemption[] {
+    return this.getMarketplaceRedemptions()
+      .filter(r => r.status === 'pending')
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  static createRedemptionRequest(userId: string, rewardPoints: number): RewardRedemption | null {
+    // userId could be either 7-digit userId or internal id — resolve to wallet userId
+    const userObj = this.getUserByUserId(userId);
+    const walletUserId = userObj ? userObj.id : userId;
+    const wallet = this.getWallet(walletUserId);
+    if (!wallet) return null;
+    const currentRP = wallet.rewardPoints || 0;
+    if (currentRP < rewardPoints) return null;
+    // Deduct RP immediately on request
+    this.updateWallet(walletUserId, { rewardPoints: currentRP - rewardPoints });
+    const redemption: RewardRedemption = {
+      id: generateEventId('mred', userId),
+      userId,
+      rewardPoints,
+      usdtAmount: rewardPoints * 0.01,
+      status: 'pending',
+      adminNotes: '',
+      createdAt: new Date().toISOString(),
+      processedAt: null,
+      processedBy: null,
+    };
+    const redemptions = this.getMarketplaceRedemptions();
+    redemptions.push(redemption);
+    this.saveMarketplaceRedemptions(redemptions);
+    return redemption;
+  }
+
+  static approveRedemption(redemptionId: string, adminId: string): RewardRedemption | null {
+    const redemptions = this.getMarketplaceRedemptions();
+    const idx = redemptions.findIndex(r => r.id === redemptionId);
+    if (idx === -1) return null;
+    redemptions[idx] = {
+      ...redemptions[idx],
+      status: 'approved',
+      processedAt: new Date().toISOString(),
+      processedBy: adminId,
+    };
+    this.saveMarketplaceRedemptions(redemptions);
+    // Credit deposit wallet
+    const redUser = this.getUserByUserId(redemptions[idx].userId);
+    const redWalletUserId = redUser ? redUser.id : redemptions[idx].userId;
+    const redWallet = this.getWallet(redWalletUserId);
+    if (redWallet) {
+      this.updateWallet(redWalletUserId, {
+        depositWallet: (redWallet.depositWallet || 0) + redemptions[idx].usdtAmount,
+        totalRewardPointsRedeemed: (redWallet.totalRewardPointsRedeemed || 0) + redemptions[idx].rewardPoints,
+      });
+    }
+    return redemptions[idx];
+  }
+
+  static rejectRedemption(redemptionId: string, adminId: string, notes: string): RewardRedemption | null {
+    const redemptions = this.getMarketplaceRedemptions();
+    const idx = redemptions.findIndex(r => r.id === redemptionId);
+    if (idx === -1) return null;
+    // Refund RP back to user
+    const rejUser = this.getUserByUserId(redemptions[idx].userId);
+    const rejWalletUserId = rejUser ? rejUser.id : redemptions[idx].userId;
+    const rejWallet = this.getWallet(rejWalletUserId);
+    if (rejWallet) {
+      this.updateWallet(rejWalletUserId, {
+        rewardPoints: (rejWallet.rewardPoints || 0) + redemptions[idx].rewardPoints,
+      });
+    }
+    redemptions[idx] = {
+      ...redemptions[idx],
+      status: 'rejected',
+      adminNotes: notes,
+      processedAt: new Date().toISOString(),
+      processedBy: adminId,
+    };
+    this.saveMarketplaceRedemptions(redemptions);
+    return redemptions[idx];
   }
 
   static clearAll(): void {

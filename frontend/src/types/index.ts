@@ -122,6 +122,10 @@ export interface Wallet {
   // System fee tracking
   pendingSystemFee: number;         // Outstanding unpaid system fee (0 or 1)
   lastSystemFeeDate: string | null; // ISO date of last successfully collected fee
+  // Reward points (marketplace)
+  rewardPoints: number;
+  totalRewardPointsEarned: number;
+  totalRewardPointsRedeemed: number;
 }
 
 // Transaction Types - Updated
@@ -538,6 +542,86 @@ export interface SupportTicket {
   admin_reply: string;
   name: string;
   email: string;
+}
+
+// ==================== MARKETPLACE TYPES ====================
+
+export interface MarketplaceCategory {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string; // Lucide icon name
+  sortOrder: number;
+  isActive: boolean;
+}
+
+export interface MarketplaceRetailer {
+  id: string;
+  name: string;
+  logoUrl: string; // base64 data URL or external URL
+  discountPercent: number;
+  discountText: string; // e.g. "Up to 30% Cashback"
+  websiteUrl: string;
+  affiliateLink: string;
+  categoryId: string;
+  isTopRetailer: boolean;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+export interface MarketplaceBanner {
+  id: string;
+  title: string;
+  subtitle: string;
+  imageUrl: string; // base64 data URL or gradient CSS
+  linkUrl: string;
+  sortOrder: number;
+  isActive: boolean;
+}
+
+export interface MarketplaceDeal {
+  id: string;
+  title: string;
+  description: string;
+  imageUrl: string;
+  linkUrl: string;
+  retailerId: string;
+  badgeText: string; // e.g. "Hot Deal", "New"
+  sortOrder: number;
+  isActive: boolean;
+  startDate: string;
+  endDate: string;
+}
+
+export type MarketplaceInvoiceStatus = 'pending' | 'approved' | 'rejected';
+
+export interface MarketplaceInvoice {
+  id: string;
+  userId: string;
+  retailerId: string;
+  retailerName: string;
+  amount: number;
+  invoiceImage: string; // base64 data URL
+  status: MarketplaceInvoiceStatus;
+  rewardPoints: number; // points awarded on approval
+  adminNotes: string;
+  createdAt: string;
+  processedAt: string | null;
+  processedBy: string | null;
+}
+
+export type RedemptionStatus = 'pending' | 'approved' | 'rejected';
+
+export interface RewardRedemption {
+  id: string;
+  userId: string;
+  rewardPoints: number;
+  usdtAmount: number; // rewardPoints * 0.01
+  status: RedemptionStatus;
+  adminNotes: string;
+  createdAt: string;
+  processedAt: string | null;
+  processedBy: string | null;
 }
 
 // Admin Impersonation Session

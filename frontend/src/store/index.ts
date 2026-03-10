@@ -2,7 +2,9 @@ import { create } from 'zustand';
 import { useEffect, useRef, useState } from 'react';
 import type {
   User, Wallet, Transaction, MatrixNode, Notification,
-  AdminSettings, DashboardStats, Pin, PinTransfer, PinPurchaseRequest, RegisterData, PaymentMethodType
+  AdminSettings, DashboardStats, Pin, PinTransfer, PinPurchaseRequest, RegisterData, PaymentMethodType,
+  MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal,
+  MarketplaceInvoice, RewardRedemption
 } from '@/types';
 import Database from '@/db';
 import { isValidPhoneNumber, normalizePhoneNumber } from '@/utils/helpers';
@@ -1166,6 +1168,14 @@ interface AdminState {
   getLevelWiseReport: (level?: number, startDate?: string, endDate?: string) => any[];
   createServerBackup: () => Promise<{ success: boolean; message: string; backup?: any }>;
   deleteAllIdsFromSystem: () => Promise<{ success: boolean; message: string; report?: any }>;
+  // Marketplace
+  marketplaceCategories: MarketplaceCategory[];
+  marketplaceRetailers: MarketplaceRetailer[];
+  marketplaceBanners: MarketplaceBanner[];
+  marketplaceDeals: MarketplaceDeal[];
+  marketplaceInvoices: MarketplaceInvoice[];
+  marketplaceRedemptions: RewardRedemption[];
+  loadMarketplaceData: () => void;
 }
 
 export const useAdminStore = create<AdminState>((set, get) => ({
@@ -1177,6 +1187,13 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   allPinRequests: [],
   pendingPinRequests: [],
   safetyPoolAmount: 0,
+  // Marketplace
+  marketplaceCategories: [],
+  marketplaceRetailers: [],
+  marketplaceBanners: [],
+  marketplaceDeals: [],
+  marketplaceInvoices: [],
+  marketplaceRedemptions: [],
 
   loadSettings: () => {
     const settings = Database.getSettings();
@@ -1893,6 +1910,17 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     const message = `Deleted ${report.deletedUsers} IDs. Cleared ${report.deletedTransactions} transactions, ${report.deletedPins} PINs, ${report.deletedMatrixNodes} matrix nodes.`;
     return { success: true, message, report };
+  },
+
+  loadMarketplaceData: () => {
+    set({
+      marketplaceCategories: Database.getMarketplaceCategories(),
+      marketplaceRetailers: Database.getMarketplaceRetailers(),
+      marketplaceBanners: Database.getMarketplaceBanners(),
+      marketplaceDeals: Database.getMarketplaceDeals(),
+      marketplaceInvoices: Database.getMarketplaceInvoices(),
+      marketplaceRedemptions: Database.getMarketplaceRedemptions(),
+    });
   }
 }));
 

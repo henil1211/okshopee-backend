@@ -107,7 +107,14 @@ const STATE_COLLECTIONS = {
   mlm_email_logs: { collection: 'email_logs', kind: 'array', idField: 'id' },
   mlm_impersonation: { collection: 'impersonation', kind: 'array', idField: 'id' },
   mlm_help_trackers: { collection: 'help_trackers', kind: 'array', idField: 'userId' },
-  mlm_matrix_pending_contributions: { collection: 'matrix_pending_contributions', kind: 'array', idField: 'id' }
+  mlm_matrix_pending_contributions: { collection: 'matrix_pending_contributions', kind: 'array', idField: 'id' },
+  // Marketplace collections
+  mlm_marketplace_categories: { collection: 'marketplace_categories', kind: 'array', idField: 'id' },
+  mlm_marketplace_retailers: { collection: 'marketplace_retailers', kind: 'array', idField: 'id' },
+  mlm_marketplace_banners: { collection: 'marketplace_banners', kind: 'array', idField: 'id' },
+  mlm_marketplace_deals: { collection: 'marketplace_deals', kind: 'array', idField: 'id' },
+  mlm_marketplace_invoices: { collection: 'marketplace_invoices', kind: 'array', idField: 'id' },
+  mlm_marketplace_redemptions: { collection: 'marketplace_redemptions', kind: 'array', idField: 'id' }
 };
 
 const DB_KEYS = Object.keys(STATE_COLLECTIONS);
