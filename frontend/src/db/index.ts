@@ -4862,11 +4862,14 @@ class Database {
       if (!node.parentId) continue;
       const parent = normalizedMap.get(node.parentId);
       if (!parent) continue;
-      if (node.position === 0 && parent.leftChild !== node.userId) {
+      // Use loose equality to handle string/number position values
+      const isLeft = node.position == 0 || node.position === 'left' as any;
+      const isRight = node.position == 1 || node.position === 'right' as any;
+      if (isLeft && parent.leftChild !== node.userId) {
         parent.leftChild = node.userId;
         changed = true;
       }
-      if (node.position === 1 && parent.rightChild !== node.userId) {
+      if (isRight && parent.rightChild !== node.userId) {
         parent.rightChild = node.userId;
         changed = true;
       }
