@@ -11,7 +11,7 @@ import {
   DollarSign, UserPlus, BarChart3, PlusCircle, LogOut, Shield,
   Ticket, Plane, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Train, CarFront
 } from 'lucide-react';
-import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel, calculateTimeRemainingWithDays, formatCountdownWithDays } from '@/utils/helpers';
+import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel, calculateTimeRemainingWithDays } from '@/utils/helpers';
 import { helpDistributionTable } from '@/db';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -656,9 +656,9 @@ export default function Dashboard() {
         {/* Direct Referral Deadline Countdown */}
         {countdown && !countdown.expired && !hasMetInitialDirectRequirement && (
           <div className="mb-6 p-4 rounded-xl border border-red-500/30 bg-red-500/10">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-semibold text-red-400 flex items-center gap-2">
+            <div className="flex flex-col items-center gap-3">
+              <div className="text-center">
+                <p className="text-sm font-semibold text-red-400 flex items-center justify-center gap-2">
                   <AlertCircle className="w-5 h-5" />
                   Direct Referral Deadline
                 </p>
@@ -669,12 +669,34 @@ export default function Dashboard() {
                   Current: {effectiveDirectCount} / {REQUIRED_INITIAL_DIRECTS} direct referrals
                 </p>
               </div>
-              <div className="text-right">
-                <p className="text-xs text-white/50">Time Remaining</p>
-                <p className="text-2xl font-mono font-bold text-red-400">
-                  {formatCountdownWithDays(countdown)}
-                </p>
-                <p className="text-[10px] text-white/40">Day : Hour : Min : Sec</p>
+              <div className="flex items-center gap-2 sm:gap-3">
+                <div className="flex flex-col items-center">
+                  <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg bg-red-500/20 border border-red-500/30 flex items-center justify-center">
+                    <span className="text-xl sm:text-2xl font-mono font-bold text-red-400">{String(countdown.days).padStart(2, '0')}</span>
+                  </div>
+                  <span className="text-[10px] text-white/40 mt-1">Day</span>
+                </div>
+                <span className="text-xl font-bold text-red-400/50 -mt-4">:</span>
+                <div className="flex flex-col items-center">
+                  <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg bg-red-500/20 border border-red-500/30 flex items-center justify-center">
+                    <span className="text-xl sm:text-2xl font-mono font-bold text-red-400">{String(countdown.hours).padStart(2, '0')}</span>
+                  </div>
+                  <span className="text-[10px] text-white/40 mt-1">Hour</span>
+                </div>
+                <span className="text-xl font-bold text-red-400/50 -mt-4">:</span>
+                <div className="flex flex-col items-center">
+                  <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg bg-red-500/20 border border-red-500/30 flex items-center justify-center">
+                    <span className="text-xl sm:text-2xl font-mono font-bold text-red-400">{String(countdown.minutes).padStart(2, '0')}</span>
+                  </div>
+                  <span className="text-[10px] text-white/40 mt-1">Min</span>
+                </div>
+                <span className="text-xl font-bold text-red-400/50 -mt-4">:</span>
+                <div className="flex flex-col items-center">
+                  <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-lg bg-red-500/20 border border-red-500/30 flex items-center justify-center">
+                    <span className="text-xl sm:text-2xl font-mono font-bold text-red-400">{String(countdown.seconds).padStart(2, '0')}</span>
+                  </div>
+                  <span className="text-[10px] text-white/40 mt-1">Sec</span>
+                </div>
               </div>
             </div>
           </div>

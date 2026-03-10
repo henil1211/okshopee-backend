@@ -5092,7 +5092,13 @@ class Database {
   static getSettings(): AdminSettings {
     const data = this.getCached<AdminSettings | null>(DB_KEYS.SETTINGS, null);
     if (!data) return defaultSettings;
-    return { ...defaultSettings, ...data };
+    const merged = { ...defaultSettings, ...data };
+    // Migrate: ensure directReferralDeadlineDays is 30 (was previously defaulted to 15)
+    if (merged.directReferralDeadlineDays === 15) {
+      merged.directReferralDeadlineDays = 30;
+      this.saveSettings(merged);
+    }
+    return merged;
   }
 
   static saveSettings(settings: AdminSettings): void {
