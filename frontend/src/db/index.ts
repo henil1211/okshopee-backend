@@ -2770,8 +2770,8 @@ class Database {
           Object.assign(recipientState, freshRecState);
           recipientTracker.levels[String(recipientLevel)] = recipientState;
         }
-      } else if (receiveIndex % 5 === 0) {
-        this.addToSafetyPool(transferAmount, recipient.id, `Every 5th help deduction at level ${recipientLevel}`);
+      } else if (receiveIndex === 5) {
+        this.addToSafetyPool(transferAmount, recipient.id, `5th help deduction at level ${recipientLevel}`);
         this.createTransaction({
           id: generateEventId('tx', `upline_help_safety_l${recipientLevel}`),
           userId: recipient.id,
@@ -2779,7 +2779,7 @@ class Database {
           amount: -transferAmount,
           level: recipientLevel,
           status: 'completed',
-          description: `Every 5th help deduction at level ${recipientLevel}`,
+          description: `5th help deduction at level ${recipientLevel}`,
           createdAt: new Date().toISOString(),
           completedAt: new Date().toISOString()
         });
