@@ -548,6 +548,12 @@ async function getStateSnapshotCached(options = {}) {
     return cloneStateSnapshot(stateSnapshotCache.snapshot);
   }
 
+  // For filtered key requests, try to serve from the full cache first
+  // This avoids hitting MongoDB for every batched request
+  if (!isFullSnapshot && !options.forceFresh && stateSnapshotCache?.snapshot) {
+    return filterStateSnapshot(stateSnapshotCache.snapshot, requestedKeys);
+  }
+
   const snapshot = await readStateFromCollections(requestedKeys);
   if (!isFullSnapshot) {
     return cloneStateSnapshot(snapshot);
@@ -1267,12 +1273,27 @@ async function authenticateUser(userId, password) {
     return { ok: false, status: 400, error: 'User ID must be exactly 7 digits' };
   }
 
-  const userDoc = await mongoDb.collection('users').findOne({ userId: normalizedUserId });
-  if (!userDoc) {
-    return { ok: false, status: 404, error: 'User ID not found' };
+  // Try to find user from the in-memory snapshot cache first (avoids MongoDB query)
+  let user = null;
+  if (stateSnapshotCache?.snapshot?.state?.mlm_users) {
+    try {
+      const usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
+      if (Array.isArray(usersData)) {
+        user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+      }
+    } catch {
+      user = null;
+    }
   }
 
-  const user = cleanupReadDoc(userDoc);
+  // Fallback to MongoDB if not found in cache
+  if (!user) {
+    const userDoc = await mongoDb.collection('users').findOne({ userId: normalizedUserId });
+    if (!userDoc) {
+      return { ok: false, status: 404, error: 'User ID not found' };
+    }
+    user = cleanupReadDoc(userDoc);
+  }
 
   if (user.accountStatus === 'permanent_blocked') {
     return {
@@ -1827,6 +1848,14 @@ async function start() {
   await migrateExistingSingletonArrayCollections();
   await backfillSafetyPoolTransactionsMirror();
   await deduplicateUsersByUserId();
+
+  // Pre-warm the state snapshot cache so the first request doesn't hit MongoDB cold
+  try {
+    await getStateSnapshotCached({ forceFresh: true });
+    console.log('State snapshot cache pre-warmed successfully');
+  } catch (error) {
+    console.warn('Failed to pre-warm state snapshot cache:', error instanceof Error ? error.message : error);
+  }
 
   server.listen(PORT, HOST, () => {
     console.log(`Backend listening on http://${HOST}:${PORT}`);

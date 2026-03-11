@@ -20,10 +20,11 @@ import MobileBottomNav from '@/components/MobileBottomNav';
 interface TreeNodeProps {
   node: MatrixNode | null;
   displayName?: string;
+  realIsActive?: boolean;
   onNodeClick: (node: MatrixNode) => void;
 }
 
-const TreeNode = ({ node, displayName, onNodeClick }: TreeNodeProps) => {
+const TreeNode = ({ node, displayName, realIsActive, onNodeClick }: TreeNodeProps) => {
   if (!node) {
     return (
       <div className="flex flex-col items-center">
@@ -35,11 +36,13 @@ const TreeNode = ({ node, displayName, onNodeClick }: TreeNodeProps) => {
     );
   }
 
+  const active = realIsActive ?? node.isActive;
+
   return (
     <div className="flex flex-col items-center">
       <button
         onClick={() => onNodeClick(node)}
-        className={`relative w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 ${node.isActive
+        className={`relative w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 ${active
             ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 shadow-lg shadow-emerald-500/30'
             : 'bg-gradient-to-br from-amber-500 to-amber-600 shadow-lg shadow-amber-500/30'
           } hover:scale-110`}
@@ -47,7 +50,7 @@ const TreeNode = ({ node, displayName, onNodeClick }: TreeNodeProps) => {
         <span className="text-white font-bold text-sm">
           {getInitials(displayName || node.username)}
         </span>
-        {node.isActive && (
+        {active && (
           <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-400 rounded-full border-2 border-[#0a0e17]" />
         )}
       </button>
@@ -272,7 +275,10 @@ export default function Matrix() {
     // Filter by status
     if (filterStatus !== 'all') {
       const active = filterStatus === 'active';
-      result = result.filter((m) => m.isActive === active);
+      result = result.filter((m) => {
+        const realActive = usersByUserId.get(m.userId)?.isActive ?? m.isActive;
+        return realActive === active;
+      });
     }
 
     // Filter by position
@@ -482,7 +488,7 @@ export default function Matrix() {
                 <>
                   <div className="mb-8">
                     <p className="text-center text-white/60 mb-3">Your ID</p>
-                    <TreeNode node={userNode} displayName={getDisplayName(userNode.userId, userNode.username)} onNodeClick={setSelectedNode} />
+                    <TreeNode node={userNode} displayName={getDisplayName(userNode.userId, userNode.username)} realIsActive={usersByUserId.get(userNode.userId)?.isActive ?? userNode.isActive} onNodeClick={setSelectedNode} />
                   </div>
 
                   <div className="w-full space-y-8">
@@ -512,6 +518,7 @@ export default function Matrix() {
                                 key={`${node.userId}_${group.level}_${idx}`}
                                 node={node}
                                 displayName={getDisplayName(node.userId, node.username)}
+                                realIsActive={usersByUserId.get(node.userId)?.isActive ?? node.isActive}
                                 onNodeClick={setSelectedNode}
                               />
                             ))}
@@ -756,7 +763,7 @@ export default function Matrix() {
                           </Badge>
                         </td>
                         <td className="py-3 px-4">
-                          {member.isActive ? (
+                          {(memberUser?.isActive ?? member.isActive) ? (
                             <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
                               Active
                             </Badge>
@@ -837,8 +844,8 @@ export default function Matrix() {
                     <div className="grid grid-cols-2 gap-4">
                       <div className="p-3 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Status</p>
-                        <Badge className={selectedNode.isActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}>
-                          {selectedNode.isActive ? 'Active' : 'Inactive'}
+                        <Badge className={(memberUser?.isActive ?? selectedNode.isActive) ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}>
+                          {(memberUser?.isActive ?? selectedNode.isActive) ? 'Active' : 'Inactive'}
                         </Badge>
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">
@@ -857,7 +864,7 @@ export default function Matrix() {
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Direct Referrals</p>
-                        <p className="text-lg font-bold text-white">{memberUser?.directCount || 0}</p>
+                        <p className="text-lg font-bold text-white">{memberUser ? Database.getEffectiveDirectCount(memberUser) : 0}</p>
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Total Earnings</p>

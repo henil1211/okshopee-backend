@@ -297,10 +297,10 @@ class Database {
     Object.values(DB_KEYS).filter((key) => key !== DB_KEYS.CURRENT_USER && key !== DB_KEYS.SESSION)
   );
   private static readonly STARTUP_REMOTE_SYNC_BATCHES = [
-    [DB_KEYS.USERS],
-    [DB_KEYS.WALLETS],
-    [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL],
-    [DB_KEYS.TRANSACTIONS],
+    [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.SETTINGS],
+  ] as const;
+  private static readonly STARTUP_DEFERRED_SYNC_BATCHES = [
+    [DB_KEYS.TRANSACTIONS, DB_KEYS.SAFETY_POOL],
     [DB_KEYS.MARKETPLACE_CATEGORIES, DB_KEYS.MARKETPLACE_RETAILERS, DB_KEYS.MARKETPLACE_BANNERS, DB_KEYS.MARKETPLACE_DEALS],
     [DB_KEYS.MARKETPLACE_INVOICES, DB_KEYS.MARKETPLACE_REDEMPTIONS]
   ] as const;
@@ -487,13 +487,25 @@ class Database {
     const status = this.remoteSyncStatus.state;
     if (status !== 'offline' && status !== 'pending') return;
 
+    // Use batched approach instead of downloading everything at once
     try {
-      await this.hydrateFromServer({
+      await this.hydrateFromServerBatches(this.getStartupRemoteSyncBatches(), {
+        strict: false,
+        maxAttempts: 2,
+        timeoutMs: 60000,
+        retryDelayMs: 2000,
+        continueOnError: true,
+        requireAnySuccess: true
+      });
+      // If critical data loaded, load deferred in background too
+      void this.hydrateFromServerBatches(this.getStartupDeferredRemoteSyncBatches(), {
         strict: false,
         maxAttempts: 1,
-        timeoutMs: 8000,
-        retryDelayMs: 500
-      });
+        timeoutMs: 60000,
+        retryDelayMs: 1000,
+        continueOnError: true,
+        requireAnySuccess: false
+      }).catch(() => { /* deferred data is non-critical */ });
     } catch {
       this.markOffline('Backend still unavailable. Retrying automatically.');
     }
@@ -1317,8 +1329,20 @@ class Database {
     const index = users.findIndex(u => u.id === id);
     if (index === -1) return null;
 
+    const prevActive = users[index].isActive;
     users[index] = { ...users[index], ...updates };
     this.saveUsers(users);
+
+    // Sync MatrixNode.isActive when user active status changes
+    if ('isActive' in updates && updates.isActive !== prevActive) {
+      const matrix = this.getMatrix();
+      const mIdx = matrix.findIndex(m => m.userId === users[index].userId);
+      if (mIdx !== -1 && matrix[mIdx].isActive !== updates.isActive) {
+        matrix[mIdx] = { ...matrix[mIdx], isActive: !!updates.isActive };
+        this.saveMatrix(matrix);
+      }
+    }
+
     return users[index];
   }
 
@@ -4542,7 +4566,7 @@ class Database {
     }
 
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeoutMs = 15000;
+    const timeoutMs = 30000;
     const timeout = setTimeout(() => controller?.abort(), timeoutMs);
 
     try {
@@ -4587,6 +4611,10 @@ class Database {
 
   static getStartupRemoteSyncBatches(): string[][] {
     return this.STARTUP_REMOTE_SYNC_BATCHES.map((batch) => [...batch]);
+  }
+
+  static getStartupDeferredRemoteSyncBatches(): string[][] {
+    return this.STARTUP_DEFERRED_SYNC_BATCHES.map((batch) => [...batch]);
   }
 
   static getAdminCriticalRemoteSyncBatches(): string[][] {

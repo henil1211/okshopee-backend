@@ -212,11 +212,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ user: backendAuth.user, isAuthenticated: true });
       void Database.hydrateFromServerBatches(Database.getStartupRemoteSyncBatches(), {
         strict: true,
-        maxAttempts: 2,
-        timeoutMs: 45000,
-        retryDelayMs: 1500,
+        maxAttempts: 3,
+        timeoutMs: 60000,
+        retryDelayMs: 2000,
         continueOnError: true,
         requireAnySuccess: true
+      }).then(() => {
+        // Load deferred data (transactions, marketplace) in background after critical data is ready
+        void Database.hydrateFromServerBatches(Database.getStartupDeferredRemoteSyncBatches(), {
+          strict: false,
+          maxAttempts: 3,
+          timeoutMs: 60000,
+          retryDelayMs: 2000,
+          continueOnError: true,
+          requireAnySuccess: false
+        }).catch(() => { /* deferred data is non-critical */ });
       }).catch((error) => {
         console.warn('Post-login hydration failed:', error);
       });
@@ -227,11 +237,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     let user = Database.getUserByUserId(userId);
     if (!user || syncStatusBeforeLogin.state !== 'synced') {
       try {
-        await Database.hydrateFromServer({
+        await Database.hydrateFromServerBatches(Database.getStartupRemoteSyncBatches(), {
           strict: true,
           maxAttempts: 3,
-          timeoutMs: 45000,
-          retryDelayMs: 1500
+          timeoutMs: 60000,
+          retryDelayMs: 2000,
+          continueOnError: true,
+          requireAnySuccess: true
         });
       } catch {
         // Retry lookup below. If hydration still fails, return a sync-specific message instead of a false "not found".
@@ -277,6 +289,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
     Database.setCurrentUser(user);
     set({ user, isAuthenticated: true });
+    // Load deferred data in background
+    void Database.hydrateFromServerBatches(Database.getStartupDeferredRemoteSyncBatches(), {
+      strict: false, maxAttempts: 3, timeoutMs: 60000, retryDelayMs: 2000,
+      continueOnError: true, requireAnySuccess: false
+    }).catch(() => { /* deferred data is non-critical */ });
     return { success: true, message: 'Login successful' };
   },
 
@@ -1717,6 +1734,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
               totalReceived: sponsorWallet.totalReceived + sponsorIncomeCredits
             });
           }
+          // Try to collect any pending system fee now that income arrived
+          Database.deductPendingSystemFee(latestSponsor.id);
         }
         Database.releaseLockedGiveHelp(latestSponsor.id);
         Database.releaseLockedReceiveHelp(latestSponsor.id);

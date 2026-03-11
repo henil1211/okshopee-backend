@@ -449,7 +449,7 @@ export default function Dashboard() {
                 </Button>
 
                 {showNotifications && (
-                  <div className="absolute right-0 top-full mt-2 w-80 sm:w-96 max-h-[400px] rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#111827] shadow-2xl z-[100] overflow-hidden">
+                  <div className="fixed inset-x-3 top-auto sm:absolute sm:inset-x-auto sm:right-0 sm:top-full mt-2 sm:w-96 max-h-[400px] rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#111827] shadow-2xl z-[100] overflow-hidden">
                     <div className="px-4 py-3 border-b border-slate-200 dark:border-white/10 flex items-center justify-between">
                       <p className="text-sm font-semibold text-slate-900 dark:text-white">Notifications</p>
                       {unreadCount > 0 && (
@@ -897,7 +897,7 @@ export default function Dashboard() {
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm text-slate-600 dark:text-white/60">Direct Referrals</span>
                   <div className="flex items-center gap-3">
-                    <span className="text-sm font-medium text-slate-900 dark:text-white">{displayUser.directCount}</span>
+                    <span className="text-sm font-medium text-slate-900 dark:text-white">{effectiveDirectCount}</span>
                     <Button
                       type="button"
                       variant="outline"
@@ -909,7 +909,7 @@ export default function Dashboard() {
                     </Button>
                   </div>
                 </div>
-                <Progress value={Math.min(displayUser.directCount * 10, 100)} className="h-2" />
+                <Progress value={Math.min(effectiveDirectCount * 10, 100)} className="h-2" />
                 <p className="text-xs text-slate-500 dark:text-white/40 mt-2">
                   Click `View` to see referral IDs and member details.
                 </p>
