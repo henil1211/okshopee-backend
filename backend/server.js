@@ -129,9 +129,9 @@ let activeStateBackupPromise = null;
 const mongoClient = new MongoClient(MONGODB_URI, {
   maxPoolSize: 5,
   minPoolSize: 1,
-  serverSelectionTimeoutMS: 60000,
-  socketTimeoutMS: 120000,
-  connectTimeoutMS: 60000
+  serverSelectionTimeoutMS: 20000,
+  socketTimeoutMS: 25000,
+  connectTimeoutMS: 20000
 });
 let mongoDb;
 
@@ -1471,11 +1471,24 @@ const server = createServer(async (req, res) => {
         .split(',')
         .map((key) => key.trim())
         .filter(Boolean);
+
+      // Add a 25-second timeout to prevent Render from killing the request at 30s
+      const timeoutMs = 25000;
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Request timed out')), timeoutMs)
+      );
+
       if (requestedKeys.length > 0) {
-        const snapshot = await getStateSnapshotCached({ keys: requestedKeys });
+        const snapshot = await Promise.race([
+          getStateSnapshotCached({ keys: requestedKeys }),
+          timeoutPromise
+        ]);
         sendJson(res, 200, snapshot, req);
       } else {
-        const snapshot = await getStateSnapshotCached();
+        const snapshot = await Promise.race([
+          getStateSnapshotCached(),
+          timeoutPromise
+        ]);
         sendStateSnapshot(res, snapshot, req);
       }
     } catch (error) {
@@ -1491,7 +1504,13 @@ const server = createServer(async (req, res) => {
     try {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
-      const result = await authenticateUser(parsed?.userId, parsed?.password);
+      const loginTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Login request timed out')), 25000)
+      );
+      const result = await Promise.race([
+        authenticateUser(parsed?.userId, parsed?.password),
+        loginTimeout
+      ]);
       if (!result.ok) {
         sendJson(res, result.status, { ok: false, error: result.error });
         return;
@@ -1849,14 +1868,6 @@ async function start() {
   await backfillSafetyPoolTransactionsMirror();
   await deduplicateUsersByUserId();
 
-  // Pre-warm the state snapshot cache so the first request doesn't hit MongoDB cold
-  try {
-    await getStateSnapshotCached({ forceFresh: true });
-    console.log('State snapshot cache pre-warmed successfully');
-  } catch (error) {
-    console.warn('Failed to pre-warm state snapshot cache:', error instanceof Error ? error.message : error);
-  }
-
   server.listen(PORT, HOST, () => {
     console.log(`Backend listening on http://${HOST}:${PORT}`);
     console.log(`Environment: NODE_ENV=${NODE_ENV} envFile=${ENV_FILE_PATH ? path.basename(ENV_FILE_PATH) : 'process.env'}`);
@@ -1893,6 +1904,11 @@ async function start() {
         const message = error instanceof Error ? error.message : String(error);
         console.warn(`State snapshot cache warm failed: ${message}`);
       });
+
+    // Refresh the cache every 5 minutes to keep it fresh and MongoDB connection alive
+    setInterval(() => {
+      void getStateSnapshotCached({ forceFresh: true }).catch(() => {});
+    }, 5 * 60 * 1000);
   });
 }
 
