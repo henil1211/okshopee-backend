@@ -129,9 +129,9 @@ let activeStateBackupPromise = null;
 const mongoClient = new MongoClient(MONGODB_URI, {
   maxPoolSize: 5,
   minPoolSize: 1,
-  serverSelectionTimeoutMS: 20000,
-  socketTimeoutMS: 25000,
-  connectTimeoutMS: 20000
+  serverSelectionTimeoutMS: 60000,
+  socketTimeoutMS: 120000,
+  connectTimeoutMS: 60000
 });
 let mongoDb;
 
@@ -1471,24 +1471,11 @@ const server = createServer(async (req, res) => {
         .split(',')
         .map((key) => key.trim())
         .filter(Boolean);
-
-      // Add a 25-second timeout to prevent Render from killing the request at 30s
-      const timeoutMs = 25000;
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Request timed out')), timeoutMs)
-      );
-
       if (requestedKeys.length > 0) {
-        const snapshot = await Promise.race([
-          getStateSnapshotCached({ keys: requestedKeys }),
-          timeoutPromise
-        ]);
+        const snapshot = await getStateSnapshotCached({ keys: requestedKeys });
         sendJson(res, 200, snapshot, req);
       } else {
-        const snapshot = await Promise.race([
-          getStateSnapshotCached(),
-          timeoutPromise
-        ]);
+        const snapshot = await getStateSnapshotCached();
         sendStateSnapshot(res, snapshot, req);
       }
     } catch (error) {
@@ -1504,13 +1491,7 @@ const server = createServer(async (req, res) => {
     try {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
-      const loginTimeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Login request timed out')), 25000)
-      );
-      const result = await Promise.race([
-        authenticateUser(parsed?.userId, parsed?.password),
-        loginTimeout
-      ]);
+      const result = await authenticateUser(parsed?.userId, parsed?.password);
       if (!result.ok) {
         sendJson(res, result.status, { ok: false, error: result.error });
         return;
