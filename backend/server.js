@@ -117,6 +117,12 @@ async function getMySQLHealth() {
   }
 }
 
+// Convert ISO datetime to MySQL-compatible format: '2026-03-12 14:30:00.000'
+function toMySQLDatetime(isoString) {
+  if (!isoString) return null;
+  return isoString.replace('T', ' ').replace('Z', '');
+}
+
 // ─── In-memory snapshot cache ────────────────────────────────────────
 let stateSnapshotCache = null;
 let activeStateBackupPromise = null;
@@ -373,7 +379,7 @@ async function writeStateToDB(nextState, replaceMissing = true) {
     await pool.execute(
       `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
        ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-      [key, rawValue, now]
+      [key, rawValue, toMySQLDatetime(now)]
     );
   }
 
@@ -892,28 +898,28 @@ const server = createServer(async (req, res) => {
       await pool.execute(
         `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
          ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-        ['mlm_transactions', '[]', now]
+        ['mlm_transactions', '[]', toMySQLDatetime(now)]
       );
 
       // Clear help trackers
       await pool.execute(
         `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
          ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-        ['mlm_help_trackers', '[]', now]
+        ['mlm_help_trackers', '[]', toMySQLDatetime(now)]
       );
 
       // Clear safety pool
       await pool.execute(
         `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
          ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-        ['mlm_safety_pool', JSON.stringify({ totalAmount: 0, transactions: [] }), now]
+        ['mlm_safety_pool', JSON.stringify({ totalAmount: 0, transactions: [] }), toMySQLDatetime(now)]
       );
 
       // Clear pending matrix contributions
       await pool.execute(
         `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
          ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-        ['mlm_matrix_pending_contributions', '[]', now]
+        ['mlm_matrix_pending_contributions', '[]', toMySQLDatetime(now)]
       );
 
       // Reset wallet balances
@@ -931,7 +937,7 @@ const server = createServer(async (req, res) => {
           await pool.execute(
             `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
              ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-            ['mlm_wallets', JSON.stringify(resetWallets), now]
+            ['mlm_wallets', JSON.stringify(resetWallets), toMySQLDatetime(now)]
           );
         }
       }
