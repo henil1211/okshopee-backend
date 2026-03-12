@@ -90,9 +90,7 @@ async function connectMySQL() {
     connectionLimit: 10,
     queueLimit: 0,
     charset: 'utf8mb4',
-    connectTimeout: 30000,
-    // Allow large packets for state values (16 MB default may be too small)
-    maxAllowedPacket: 256 * 1024 * 1024
+    connectTimeout: 30000
   });
 
   // Create the state_store table if it doesn't exist
