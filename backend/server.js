@@ -441,22 +441,10 @@ async function readStateFromDB(requestedKeys = []) {
 
   const keysToRead = requestedKeys.length > 0 ? requestedKeys : DB_KEYS;
   const placeholders = keysToRead.map(() => '?').join(',');
-  let rows;
-  try {
-    [rows] = await pool.execute(
-      `SELECT state_key, state_value, updated_at FROM state_store WHERE state_key IN (${placeholders})`,
-      keysToRead
-    );
-  } catch (err) {
-    console.warn('[readStateFromDB] primary SELECT failed, falling back without updated_at:', getErrorMessage(err), {
-      code: err?.code, errno: err?.errno, sqlState: err?.sqlState
-    });
-    // Fallback: query without updated_at to keep API working even if schema differs.
-    [rows] = await pool.execute(
-      `SELECT state_key, state_value, NULL as updated_at FROM state_store WHERE state_key IN (${placeholders})`,
-      keysToRead
-    );
-  }
+  const [rows] = await pool.execute(
+    `SELECT state_key, state_value, NULL as updated_at FROM state_store WHERE state_key IN (${placeholders})`,
+    keysToRead
+  );
 
   const state = {};
   let latestUpdatedAt = null;
