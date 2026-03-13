@@ -3,6 +3,7 @@ import type {
   GracePeriod, Notification, AdminSettings, PaymentMethod, Payment,
   Pin, PinTransfer, OtpRecord, PinPurchaseRequest, EmailLog,
   ImpersonationSession, SupportTicket, SupportTicketAttachment,
+  AdminAnnouncement,
   SupportTicketCategory, SupportTicketMessage, SupportTicketPriority,
   SupportTicketStatus,
   MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal,
@@ -19,6 +20,7 @@ const DB_KEYS = {
   GRACE_PERIODS: 'mlm_grace_periods',
   RE_ENTRIES: 'mlm_reentries',
   NOTIFICATIONS: 'mlm_notifications',
+  ANNOUNCEMENTS: 'mlm_announcements',
   SETTINGS: 'mlm_settings',
   PAYMENT_METHODS: 'mlm_payment_methods',
   PAYMENTS: 'mlm_payments',
@@ -122,7 +124,7 @@ const defaultPaymentMethods: PaymentMethod[] = [
     instructions: 'Send USDT BEP-20 to the provided wallet address. Upload transaction proof for verification.',
     walletAddress: '0x1234567890abcdef1234567890abcdef12345678',
     isActive: true,
-    minAmount: 11,
+    minAmount: 10,
     maxAmount: 50000,
     processingFee: 0,
     processingTime: 'Within 24 hours'
@@ -301,6 +303,7 @@ class Database {
   ] as const;
   private static readonly STARTUP_DEFERRED_SYNC_BATCHES = [
     [DB_KEYS.TRANSACTIONS, DB_KEYS.SAFETY_POOL],
+    [DB_KEYS.NOTIFICATIONS, DB_KEYS.ANNOUNCEMENTS],
     [DB_KEYS.MARKETPLACE_CATEGORIES, DB_KEYS.MARKETPLACE_RETAILERS, DB_KEYS.MARKETPLACE_BANNERS, DB_KEYS.MARKETPLACE_DEALS],
     [DB_KEYS.MARKETPLACE_INVOICES, DB_KEYS.MARKETPLACE_REDEMPTIONS]
   ] as const;
@@ -309,6 +312,7 @@ class Database {
     [DB_KEYS.WALLETS],
     [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL],
     [DB_KEYS.TRANSACTIONS],
+    [DB_KEYS.NOTIFICATIONS, DB_KEYS.ANNOUNCEMENTS],
     [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS, DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.PAYMENT_METHODS, DB_KEYS.PAYMENTS],
     [DB_KEYS.MATRIX, DB_KEYS.HELP_TRACKERS, DB_KEYS.MATRIX_PENDING_CONTRIBUTIONS, DB_KEYS.GRACE_PERIODS, DB_KEYS.RE_ENTRIES],
     [DB_KEYS.MARKETPLACE_CATEGORIES, DB_KEYS.MARKETPLACE_RETAILERS, DB_KEYS.MARKETPLACE_BANNERS, DB_KEYS.MARKETPLACE_DEALS],
@@ -882,12 +886,13 @@ class Database {
       if (this.remoteSyncSuspendDepth > 0) {
         this.remoteSyncPending = this.remoteSyncPending || this.remoteSyncQueued;
         this.remoteSyncQueued = false;
-        return;
-      }
-      if (this.remoteSyncQueued) {
+      } else if (this.remoteSyncQueued) {
         this.remoteSyncQueued = false;
         void this.flushRemoteSync();
       }
+    }
+    if (this.remoteSyncSuspendDepth > 0) {
+      return;
     }
   }
 
@@ -4890,6 +4895,91 @@ class Database {
     return normalized;
   }
 
+  static getWithdrawalTransactions(): Transaction[] {
+    return this.getTransactions()
+      .filter((tx) => tx.type === 'withdrawal')
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  static processWithdrawalRequest(params: {
+    transactionId: string;
+    adminUserId: string;
+    action: 'approve' | 'reject';
+    adminReason?: string;
+    adminReceipt?: string;
+  }): { success: boolean; message: string; transaction?: Transaction } {
+    const transactions = this.getTransactions();
+    const index = transactions.findIndex((tx) => tx.id === params.transactionId && tx.type === 'withdrawal');
+    if (index === -1) return { success: false, message: 'Withdrawal request not found' };
+
+    const request = transactions[index];
+    if (request.status !== 'pending') {
+      return { success: false, message: `Withdrawal request is already ${request.status}` };
+    }
+
+    const now = new Date().toISOString();
+    const reason = String(params.adminReason || '').trim();
+    const receipt = String(params.adminReceipt || '').trim();
+
+    if (params.action === 'approve') {
+      const completedAmount = Math.abs(Number(request.amount || 0));
+      const approved: Transaction = {
+        ...request,
+        status: 'completed',
+        description: `Withdrawal Completed of $${completedAmount.toFixed(2)} Amount`,
+        completedAt: now,
+        processedByAdminUserId: params.adminUserId,
+        ...(reason ? { adminReason: reason } : {}),
+        ...(receipt ? { adminReceipt: receipt } : {})
+      };
+      transactions[index] = approved;
+      this.saveTransactions(transactions);
+      return { success: true, message: 'Withdrawal marked as completed', transaction: approved };
+    }
+
+    const refundAmount = Math.abs(Number(request.amount || 0));
+    if (refundAmount > 0) {
+      const requestUser = this.resolveUserByRef(request.userId);
+      const walletOwnerId = requestUser?.id || request.userId;
+      const wallet = this.getWallet(walletOwnerId);
+      if (wallet) {
+        this.updateWallet(walletOwnerId, {
+          incomeWallet: (wallet.incomeWallet || 0) + refundAmount
+        });
+      }
+
+      this.createTransaction({
+        id: generateEventId('tx', 'withdraw_refund'),
+        userId: walletOwnerId,
+        type: 'income_transfer',
+        amount: refundAmount,
+        status: 'completed',
+        description: reason
+          ? `Withdrawal request rejected. Amount refunded to income wallet. Reason: ${reason}`
+          : 'Withdrawal request rejected. Amount refunded to income wallet.',
+        createdAt: now,
+        completedAt: now
+      });
+    }
+
+    const rejectedDescription = reason
+      ? `Withdrawal Rejected due to: ${reason}`
+      : 'Withdrawal Rejected by admin';
+
+    const rejected: Transaction = {
+      ...request,
+      status: 'failed',
+      description: rejectedDescription,
+      completedAt: now,
+      processedByAdminUserId: params.adminUserId,
+      ...(reason ? { adminReason: reason } : {}),
+      ...(receipt ? { adminReceipt: receipt } : {})
+    };
+    transactions[index] = rejected;
+    this.saveTransactions(transactions);
+    return { success: true, message: 'Withdrawal request rejected and refunded', transaction: rejected };
+  }
+
   // ==================== MATRIX ====================
   private static sanitizeMatrixReferences(matrix: MatrixNode[]): { matrix: MatrixNode[]; changed: boolean } {
     const nodeMap = new Map(matrix.map((node) => [node.userId, node]));
@@ -5044,29 +5134,95 @@ class Database {
     };
   }
 
-  static findNextPosition(sponsorId: string): { parentId: string; position: 'left' | 'right' } | null {
-    const matrix = this.getMatrix();
-    // Build Map once — O(N) — then BFS with O(1) lookups.
-    const nodeMap = new Map<string, MatrixNode>(matrix.map(m => [m.userId, m]));
+  private static normalizeMatrixSide(position: unknown): 'left' | 'right' | null {
+    if (position === 'left' || position === 0 || position === '0') return 'left';
+    if (position === 'right' || position === 1 || position === '1') return 'right';
+    return null;
+  }
 
-    const queue: string[] = [sponsorId];
+  private static ensureMatrixNodeForUser(userId: string, visited: Set<string> = new Set()): MatrixNode | undefined {
+    const existingNode = this.getMatrixNode(userId);
+    if (existingNode) return existingNode;
+    if (visited.has(userId)) return undefined;
+    visited.add(userId);
+
+    const user = this.getUserByUserId(userId);
+    if (!user) return undefined;
+
+    let parentNode: MatrixNode | undefined;
+    if (user.parentId) {
+      parentNode = this.ensureMatrixNodeForUser(user.parentId, visited);
+      if (!parentNode) return undefined;
+    } else if (!user.isAdmin && user.userId !== '1000001') {
+      return undefined;
+    }
+
+    const side = user.parentId ? this.normalizeMatrixSide(user.position) : 'left';
+    if (user.parentId && !side) return undefined;
+
+    this.addMatrixNode({
+      userId: user.userId,
+      username: user.fullName,
+      level: parentNode ? parentNode.level + 1 : 0,
+      position: side === 'right' ? 1 : 0,
+      parentId: parentNode?.userId,
+      isActive: !!user.isActive && user.accountStatus !== 'permanent_blocked' && user.accountStatus !== 'temp_blocked'
+    });
+
+    return this.getMatrixNode(userId);
+  }
+
+  static findNextPosition(sponsorId: string): { parentId: string; position: 'left' | 'right' } | null {
+    const sponsorNode = this.getMatrixNode(sponsorId) || this.ensureMatrixNodeForUser(sponsorId);
+    if (!sponsorNode) return null;
+
+    const matrix = this.getMatrix();
+    const nodeMap = new Map<string, MatrixNode>(matrix.map((node) => [node.userId, node]));
+    const childSideMap = new Map<string, { left?: string; right?: string }>();
+
+    const setChild = (parentId: string | undefined, side: 'left' | 'right' | null, childId: string | undefined) => {
+      if (!parentId || !childId || !side) return;
+      if (!nodeMap.has(parentId) || !nodeMap.has(childId)) return;
+
+      const existing = childSideMap.get(parentId) || {};
+      if (side === 'left' && !existing.left) existing.left = childId;
+      if (side === 'right' && !existing.right) existing.right = childId;
+      childSideMap.set(parentId, existing);
+    };
+
+    for (const node of matrix) {
+      setChild(node.parentId, this.normalizeMatrixSide(node.position), node.userId);
+    }
+
+    for (const node of matrix) {
+      setChild(node.userId, 'left', node.leftChild);
+      setChild(node.userId, 'right', node.rightChild);
+    }
+
+    const queue: string[] = [sponsorNode.userId];
+    const visited = new Set<string>();
 
     while (queue.length > 0) {
       const currentId = queue.shift()!;
-      const currentNode = nodeMap.get(currentId);
+      if (visited.has(currentId)) continue;
+      visited.add(currentId);
 
+      const currentNode = nodeMap.get(currentId);
       if (!currentNode) continue;
 
-      if (!currentNode.leftChild) {
+      const children = childSideMap.get(currentId) || {};
+      const leftChild = children.left;
+      const rightChild = children.right;
+
+      if (!leftChild) {
         return { parentId: currentId, position: 'left' };
       }
 
-      if (!currentNode.rightChild) {
+      if (!rightChild) {
         return { parentId: currentId, position: 'right' };
       }
 
-      queue.push(currentNode.leftChild);
-      queue.push(currentNode.rightChild);
+      queue.push(leftChild, rightChild);
     }
 
     return null;
@@ -5141,7 +5297,16 @@ class Database {
     return period;
   }
 
-  // ==================== NOTIFICATIONS ====================
+  // ==================== NOTIFICATIONS / ANNOUNCEMENTS ====================
+  static getAnnouncements(): AdminAnnouncement[] {
+    return this.getCached<AdminAnnouncement[]>(DB_KEYS.ANNOUNCEMENTS, [])
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  static saveAnnouncements(announcements: AdminAnnouncement[]): void {
+    this.setCached(DB_KEYS.ANNOUNCEMENTS, announcements);
+  }
+
   static getNotifications(): Notification[] {
     return this.getCached<Notification[]>(DB_KEYS.NOTIFICATIONS, []);
   }
@@ -5161,6 +5326,140 @@ class Database {
     notifications.push(notification);
     this.saveNotifications(notifications);
     return notification;
+  }
+
+  static broadcastNotificationToAllUsers(params: {
+    title: string;
+    message: string;
+    type?: Notification['type'];
+    imageUrl?: string;
+    includeAdmins?: boolean;
+    announcementId?: string;
+  }): Notification[] {
+    const title = String(params.title || '').trim();
+    const message = String(params.message || '').trim();
+    if (!title || !message) return [];
+
+    const now = new Date().toISOString();
+    const imageUrl = String(params.imageUrl || '').trim();
+    const users = this.getUsers().filter((member) => (params.includeAdmins ? true : !member.isAdmin));
+    if (users.length === 0) return [];
+
+    const notifications = this.getNotifications();
+    const created: Notification[] = users.map((member) => ({
+      id: generateEventId('notif', 'admin_announcement'),
+      userId: member.id,
+      title,
+      message,
+      type: params.type || 'info',
+      isRead: false,
+      createdAt: now,
+      ...(params.announcementId ? { announcementId: params.announcementId } : {}),
+      ...(imageUrl ? { imageUrl } : {})
+    }));
+
+    notifications.push(...created);
+    this.saveNotifications(notifications);
+    return created;
+  }
+
+  static createAnnouncement(params: {
+    title: string;
+    message: string;
+    imageUrl?: string;
+    type?: Notification['type'];
+    createdById: string;
+    createdByUserId: string;
+    includeAdmins?: boolean;
+  }): AdminAnnouncement | null {
+    const title = String(params.title || '').trim();
+    const message = String(params.message || '').trim();
+    if (!title || !message) return null;
+
+    const imageUrl = String(params.imageUrl || '').trim();
+    const announcementId = generateEventId('ann', 'broadcast');
+    const created = this.broadcastNotificationToAllUsers({
+      title,
+      message,
+      type: params.type || 'info',
+      imageUrl: imageUrl || undefined,
+      includeAdmins: params.includeAdmins ?? true,
+      announcementId
+    });
+
+    if (created.length === 0) return null;
+
+    const announcement: AdminAnnouncement = {
+      id: announcementId,
+      title,
+      message,
+      type: params.type || 'info',
+      totalRecipients: created.length,
+      createdAt: new Date().toISOString(),
+      createdById: params.createdById,
+      createdByUserId: params.createdByUserId,
+      isRecalled: false,
+      ...(imageUrl ? { imageUrl } : {})
+    };
+
+    const announcements = this.getAnnouncements();
+    announcements.unshift(announcement);
+    this.saveAnnouncements(announcements);
+    return announcement;
+  }
+
+  static recallAnnouncement(announcementId: string, recalledByUserId: string): {
+    success: boolean;
+    message: string;
+    removedNotifications: number;
+    announcement?: AdminAnnouncement;
+  } {
+    const id = String(announcementId || '').trim();
+    if (!id) {
+      return { success: false, message: 'Announcement ID is required', removedNotifications: 0 };
+    }
+
+    const announcements = this.getAnnouncements();
+    const index = announcements.findIndex((announcement) => announcement.id === id);
+    if (index === -1) {
+      return { success: false, message: 'Announcement not found', removedNotifications: 0 };
+    }
+
+    const existing = announcements[index];
+    const currentNotifications = this.getNotifications();
+    const filteredNotifications = currentNotifications.filter((notification) => notification.announcementId !== id);
+    const removedNotifications = currentNotifications.length - filteredNotifications.length;
+    if (removedNotifications > 0) {
+      this.saveNotifications(filteredNotifications);
+    }
+
+    const now = new Date().toISOString();
+    const recalledAnnouncement: AdminAnnouncement = {
+      ...existing,
+      isRecalled: true,
+      recalledAt: existing.recalledAt || now,
+      recalledByUserId: existing.recalledByUserId || String(recalledByUserId || '').trim()
+    };
+    announcements[index] = recalledAnnouncement;
+    this.saveAnnouncements(announcements);
+
+    if (existing.isRecalled) {
+      return {
+        success: true,
+        message: removedNotifications > 0
+          ? `Announcement was already recalled. Removed ${removedNotifications} remaining notification(s).`
+          : 'Announcement was already recalled.',
+        removedNotifications,
+        announcement: recalledAnnouncement
+      };
+    }
+
+    return {
+      success: true,
+      message: `Announcement recalled successfully. Removed ${removedNotifications} notification(s).`,
+      removedNotifications,
+      announcement: recalledAnnouncement
+    };
   }
 
   static markNotificationRead(notificationId: string): void {
@@ -5197,6 +5496,12 @@ class Database {
 
   static savePaymentMethods(methods: PaymentMethod[]): void {
     this.setStorageItem(DB_KEYS.PAYMENT_METHODS, JSON.stringify(methods));
+  }
+
+  static addPaymentMethod(method: PaymentMethod): void {
+    const methods = this.getPaymentMethods();
+    methods.push(method);
+    this.savePaymentMethods(methods);
   }
 
   static getPaymentMethod(id: string): PaymentMethod | undefined {
@@ -5822,6 +6127,18 @@ class Database {
       this.saveNotifications(remappedNotifications);
     }
 
+    const announcements = this.getAnnouncements();
+    let announcementsChanged = false;
+    const remappedAnnouncements = announcements.map((announcement) => {
+      const createdById = remapId(announcement.createdById) || announcement.createdById;
+      if (createdById === announcement.createdById) return announcement;
+      announcementsChanged = true;
+      return { ...announcement, createdById };
+    });
+    if (announcementsChanged) {
+      this.saveAnnouncements(remappedAnnouncements);
+    }
+
     const periods = this.getGracePeriods();
     let periodsChanged = false;
     const remappedPeriods = periods.map((period) => {
@@ -6099,6 +6416,7 @@ class Database {
     this.saveGracePeriods([]);
     this.setStorageItem(DB_KEYS.RE_ENTRIES, JSON.stringify([]));
     this.saveNotifications([]);
+    this.saveAnnouncements([]);
     this.savePayments([]);
     this.savePins([]);
     this.savePinTransfers([]);
@@ -6313,7 +6631,13 @@ class Database {
 
   static createMarketplaceInvoice(invoice: Omit<MarketplaceInvoice, 'id'>): MarketplaceInvoice {
     const invoices = this.getMarketplaceInvoices();
-    const newInvoice: MarketplaceInvoice = { ...invoice, id: generateEventId('minv', invoice.userId) };
+    const newInvoice: MarketplaceInvoice = {
+      ...invoice,
+      id: generateEventId('minv', invoice.userId),
+      rpRevoked: false,
+      rpRevokedAt: null,
+      rpRevokedBy: null
+    };
     invoices.push(newInvoice);
     this.saveMarketplaceInvoices(invoices);
     return newInvoice;
@@ -6329,6 +6653,9 @@ class Database {
       rewardPoints,
       processedAt: new Date().toISOString(),
       processedBy: adminId,
+      rpRevoked: false,
+      rpRevokedAt: null,
+      rpRevokedBy: null
     };
     this.saveMarketplaceInvoices(invoices);
     // Add reward points to user's wallet
@@ -6343,6 +6670,74 @@ class Database {
       });
     }
     return invoices[idx];
+  }
+
+  static revokeMarketplaceInvoiceRewardPoints(invoiceId: string, adminId: string): {
+    success: boolean;
+    message: string;
+    invoice: MarketplaceInvoice | null;
+  } {
+    const invoices = this.getMarketplaceInvoices();
+    const idx = invoices.findIndex((inv) => inv.id === invoiceId);
+    if (idx === -1) {
+      return { success: false, message: 'Invoice not found', invoice: null };
+    }
+
+    const invoice = invoices[idx];
+    if (invoice.status !== 'approved') {
+      return { success: false, message: 'Only approved invoices can be taken back', invoice };
+    }
+
+    if (invoice.rpRevoked) {
+      return { success: false, message: 'Reward points already taken back for this invoice', invoice };
+    }
+
+    const rp = Number(invoice.rewardPoints || 0);
+    if (rp <= 0) {
+      return { success: false, message: 'No reward points found on this invoice', invoice };
+    }
+
+    const invoiceUser = this.getUserByUserId(invoice.userId);
+    const walletUserId = invoiceUser ? invoiceUser.id : invoice.userId;
+    const wallet = this.getWallet(walletUserId);
+    if (!wallet) {
+      return { success: false, message: 'User wallet not found', invoice };
+    }
+
+    const currentRP = Number(wallet.rewardPoints || 0);
+    if (currentRP < rp) {
+      return {
+        success: false,
+        message: `Cannot take back ${rp} RP. User currently has only ${currentRP} RP available.`,
+        invoice
+      };
+    }
+
+    this.updateWallet(walletUserId, {
+      rewardPoints: currentRP - rp,
+      totalRewardPointsEarned: Math.max(0, Number(wallet.totalRewardPointsEarned || 0) - rp)
+    });
+
+    const now = new Date().toISOString();
+    const updatedInvoice: MarketplaceInvoice = {
+      ...invoice,
+      status: 'pending',
+      rewardPoints: 0,
+      adminNotes: `RP corrected by admin (${adminId})`,
+      processedAt: null,
+      processedBy: null,
+      rpRevoked: true,
+      rpRevokedAt: now,
+      rpRevokedBy: adminId
+    };
+    invoices[idx] = updatedInvoice;
+    this.saveMarketplaceInvoices(invoices);
+
+    return {
+      success: true,
+      message: `${rp} RP taken back. Invoice moved to pending for re-approval.`,
+      invoice: updatedInvoice
+    };
   }
 
   static rejectMarketplaceInvoice(invoiceId: string, adminId: string, notes: string): MarketplaceInvoice | null {

@@ -10,7 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { 
   ArrowLeft, Wallet, Copy, CheckCircle, Clock, 
   AlertCircle, Upload, RefreshCw, Bitcoin, 
-  ChevronRight, QrCode, LogOut
+  ChevronRight, QrCode, LogOut, Maximize2, Download
 } from 'lucide-react';
 import { formatCurrency, copyToClipboard } from '@/utils/helpers';
 import Database from '@/db';
@@ -34,7 +34,11 @@ export default function Deposit() {
   const [userPayments, setUserPayments] = useState<Payment[]>([]);
   const [showSuccessDialog, setShowSuccessDialog] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [showQrFullscreen, setShowQrFullscreen] = useState(false);
+  const [amountError, setAmountError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const DEPOSIT_MULTIPLE = 10;
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -87,13 +91,12 @@ export default function Deposit() {
       toast.error(`Minimum amount is ${formatCurrency(selectedMethod.minAmount)}`);
       return;
     }
-    if (!Number.isInteger(numAmount / 11)) {
-      toast.error('Deposit amount must be in multiples of $11');
-      return;
-    }
-
     if (numAmount > selectedMethod.maxAmount) {
       toast.error(`Maximum amount is ${formatCurrency(selectedMethod.maxAmount)}`);
+      return;
+    }
+    if (numAmount % DEPOSIT_MULTIPLE !== 0) {
+      toast.error(`Deposit amount must be in multiples of $${DEPOSIT_MULTIPLE}`);
       return;
     }
 
@@ -290,10 +293,47 @@ export default function Deposit() {
                             </div>
                           </div>
                           
-                          <div className="flex justify-center">
-                            <div className="p-4 rounded-lg bg-white">
-                              <QrCode className="w-32 h-32 text-[#0a0e17]" />
+                          <div className="flex justify-center w-full">
+                            <div className="p-4 rounded-lg bg-white mx-auto max-w-sm w-full flex flex-col items-center">
+                              {selectedMethod.qrCode ? (
+                                <img
+                                  src={selectedMethod.qrCode}
+                                  alt={`${selectedMethod.name} QR`}
+                                  className="w-48 h-48 object-contain mx-auto"
+                                />
+                              ) : (
+                                <QrCode className="w-32 h-32 text-[#0a0e17] mx-auto" />
+                              )}
                               <p className="text-center text-[#0a0e17] text-xs mt-2">Scan to Pay</p>
+                              {selectedMethod.qrCode && (
+                                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setShowQrFullscreen(true)}
+                                    className="w-full border-[#0a0e17]/30 text-[#0a0e17] hover:bg-[#0a0e17]/10"
+                                  >
+                                    <Maximize2 className="w-3.5 h-3.5 mr-1" />
+                                    Full Screen QR
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => {
+                                      const link = document.createElement('a');
+                                      link.href = selectedMethod.qrCode!;
+                                      link.download = `${selectedMethod.name}-qr.png`;
+                                      link.click();
+                                    }}
+                                    className="w-full border-[#0a0e17]/30 text-[#0a0e17] hover:bg-[#0a0e17]/10"
+                                  >
+                                    <Download className="w-3.5 h-3.5 mr-1" />
+                                    Download QR
+                                  </Button>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -306,12 +346,29 @@ export default function Deposit() {
                           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40">$</span>
                           <Input
                             type="number"
+                            min={selectedMethod.minAmount}
+                            max={selectedMethod.maxAmount}
                             value={amount}
-                            onChange={(e) => setAmount(e.target.value)}
+                            onChange={(e) => {
+                              setAmount(e.target.value);
+                              const val = Number(e.target.value);
+                              if (Number.isNaN(val)) {
+                                setAmountError('Enter a valid number');
+                              } else if (val < selectedMethod.minAmount) {
+                                setAmountError(`Minimum amount is ${formatCurrency(selectedMethod.minAmount)}`);
+                              } else if (val > selectedMethod.maxAmount) {
+                                setAmountError(`Maximum amount is ${formatCurrency(selectedMethod.maxAmount)}`);
+                              } else if (val % DEPOSIT_MULTIPLE !== 0) {
+                                setAmountError(`Amount must be in multiples of $${DEPOSIT_MULTIPLE}`);
+                              } else {
+                                setAmountError(null);
+                              }
+                            }}
                             placeholder={`Min ${formatCurrency(selectedMethod.minAmount)}`}
                             className="pl-8 bg-[#1f2937] border-white/10 text-white"
                           />
                         </div>
+                        {amountError && <p className="text-red-400 text-xs">{amountError}</p>}
                       </div>
 
                       {/* Transaction Hash (for crypto) */}
@@ -356,7 +413,7 @@ export default function Deposit() {
                       {/* Submit Button */}
                       <Button
                         onClick={handleSubmit}
-                        disabled={isSubmitting || !amount}
+                        disabled={isSubmitting || !amount || !!amountError}
                         className="w-full btn-primary h-12"
                       >
                         {isSubmitting ? (
@@ -455,6 +512,28 @@ export default function Deposit() {
           </TabsContent>
         </Tabs>
       </main>
+
+      <Dialog open={showQrFullscreen} onOpenChange={setShowQrFullscreen}>
+        <DialogContent className="glass border-white/10 bg-[#0b1220] max-w-3xl w-[calc(100vw-1rem)] sm:w-[calc(100vw-2rem)] p-4">
+          <DialogHeader>
+            <DialogTitle className="text-white">Payment QR Code</DialogTitle>
+            <DialogDescription className="text-white/60">
+              {selectedMethod?.name || 'Scan this code for payment'}
+            </DialogDescription>
+          </DialogHeader>
+          {selectedMethod?.qrCode ? (
+            <div className="w-full h-[70vh] rounded-lg border border-white/10 bg-black/35 p-3 flex items-center justify-center">
+              <img
+                src={selectedMethod.qrCode}
+                alt={`${selectedMethod.name} Full QR`}
+                className="max-h-full max-w-full object-contain rounded bg-white p-2"
+              />
+            </div>
+          ) : (
+            <p className="text-white/60 text-sm">No QR available for this payment method.</p>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Success Dialog */}
       <Dialog open={showSuccessDialog} onOpenChange={setShowSuccessDialog}>
