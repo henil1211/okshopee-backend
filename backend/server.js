@@ -130,6 +130,19 @@ async function connectMySQL() {
   // Ensure existing deployments that predate updated_at have the column.
   await ensureStateStoreUpdatedAtColumn();
 
+  // Debug: print current DB and columns to confirm schema matches expectations
+  try {
+    const [[dbRow]] = await pool.query('SELECT DATABASE() AS db');
+    const [colRows] = await pool.execute(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = ? AND table_name = 'state_store'`,
+      [MYSQL_DATABASE]
+    );
+    console.log(`Connected DB: ${dbRow?.db}; state_store columns: ${colRows.map((c) => c.column_name).join(', ')}`);
+  } catch (schemaError) {
+    console.error('Schema inspection failed:', getErrorMessage(schemaError));
+  }
+
   // Verify connection
   const [rows] = await pool.execute('SELECT 1');
   console.log('MySQL connected and state_store table ready');
