@@ -30,6 +30,11 @@ if (ENV_FILE_PATH) {
 
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
+const STORAGE_MODE = String(process.env.STORAGE_MODE || 'mysql').toLowerCase();
+const STATE_FILE_PATH_RAW = process.env.STATE_FILE_PATH || path.join('data', 'app-state.local.json');
+const STATE_FILE_PATH = path.isAbsolute(STATE_FILE_PATH_RAW)
+  ? STATE_FILE_PATH_RAW
+  : path.join(__dirname, STATE_FILE_PATH_RAW);
 
 // MySQL config
 const MYSQL_HOST = process.env.MYSQL_HOST || '127.0.0.1';
@@ -79,6 +84,26 @@ const DB_KEYS_SET = new Set(DB_KEYS);
 // ─── MySQL connection pool ───────────────────────────────────────────
 let pool;
 
+async function ensureStateStoreUpdatedAtColumn() {
+  // Older databases may have state_store without updated_at; add it if missing to avoid SELECT errors.
+  const [rows] = await pool.execute(
+    `SELECT COUNT(*) AS column_exists
+       FROM information_schema.columns
+       WHERE table_schema = ? AND table_name = 'state_store' AND column_name = 'updated_at'`,
+    [MYSQL_DATABASE]
+  );
+
+  if (!rows[0]?.column_exists) {
+    await pool.execute(`
+      ALTER TABLE state_store
+        ADD COLUMN updated_at DATETIME(3)
+        DEFAULT CURRENT_TIMESTAMP(3)
+        ON UPDATE CURRENT_TIMESTAMP(3)
+    `);
+    console.log('Added missing state_store.updated_at column');
+  }
+}
+
 async function connectMySQL() {
   pool = mysql.createPool({
     host: MYSQL_HOST,
@@ -102,12 +127,42 @@ async function connectMySQL() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
+  // Ensure existing deployments that predate updated_at have the column.
+  await ensureStateStoreUpdatedAtColumn();
+
   // Verify connection
   const [rows] = await pool.execute('SELECT 1');
   console.log('MySQL connected and state_store table ready');
 }
 
+async function ensureFileStorageReady() {
+  await fs.mkdir(path.dirname(STATE_FILE_PATH), { recursive: true });
+  if (!existsSync(STATE_FILE_PATH)) {
+    await fs.writeFile(STATE_FILE_PATH, JSON.stringify({ state: {}, updatedAt: null }, null, 2), 'utf-8');
+  }
+}
+
+async function connectStorage() {
+  if (STORAGE_MODE === 'file') {
+    await ensureFileStorageReady();
+    console.log(`File storage ready: ${STATE_FILE_PATH}`);
+    return;
+  }
+
+  await connectMySQL();
+}
+
 async function getMySQLHealth() {
+  if (STORAGE_MODE === 'file') {
+    try {
+      await ensureFileStorageReady();
+      const stat = await fs.stat(STATE_FILE_PATH);
+      return { ok: true, error: null, mode: 'file', path: STATE_FILE_PATH, updatedAt: stat.mtime.toISOString() };
+    } catch (error) {
+      return { ok: false, error: getErrorMessage(error), mode: 'file', path: STATE_FILE_PATH };
+    }
+  }
+
   try {
     if (!pool) return { ok: false, error: 'MySQL pool not initialized' };
     await pool.execute('SELECT 1');
@@ -340,7 +395,33 @@ function filterStateSnapshot(snapshot, requestedKeys) {
 
 // ─── MySQL state read/write ──────────────────────────────────────────
 
+async function readStateFromFile(requestedKeys = []) {
+  await ensureFileStorageReady();
+  const raw = await fs.readFile(STATE_FILE_PATH, 'utf-8');
+  const parsed = safeParseJSON(raw);
+  const snapshotState = parsed && typeof parsed === 'object' && parsed.state && typeof parsed.state === 'object'
+    ? parsed.state
+    : {};
+  const keysToRead = requestedKeys.length > 0 ? requestedKeys : DB_KEYS;
+  const state = {};
+
+  for (const key of keysToRead) {
+    if (typeof snapshotState[key] === 'string') {
+      state[key] = snapshotState[key];
+    }
+  }
+
+  return {
+    state,
+    updatedAt: typeof parsed?.updatedAt === 'string' ? parsed.updatedAt : null
+  };
+}
+
 async function readStateFromDB(requestedKeys = []) {
+  if (STORAGE_MODE === 'file') {
+    return readStateFromFile(requestedKeys);
+  }
+
   const keysToRead = requestedKeys.length > 0 ? requestedKeys : DB_KEYS;
   const placeholders = keysToRead.map(() => '?').join(',');
   const [rows] = await pool.execute(
@@ -363,6 +444,45 @@ async function readStateFromDB(requestedKeys = []) {
 }
 
 async function writeStateToDB(nextState, replaceMissing = true) {
+  if (STORAGE_MODE === 'file') {
+    const currentSnapshot = await readStateFromFile();
+    const currentState = currentSnapshot.state || {};
+    const now = new Date().toISOString();
+    const keysToWrite = replaceMissing
+      ? DB_KEYS
+      : Object.keys(nextState).filter((key) => DB_KEYS_SET.has(key));
+    const finalState = replaceMissing ? {} : { ...currentState };
+
+    for (const key of keysToWrite) {
+      const rawValue = nextState[key];
+      if (typeof rawValue === 'string') {
+        finalState[key] = rawValue;
+      } else if (replaceMissing) {
+        delete finalState[key];
+      }
+    }
+
+    await fs.writeFile(STATE_FILE_PATH, JSON.stringify({ state: finalState, updatedAt: now }, null, 2), 'utf-8');
+
+    const canUpdateCacheFromWrite = replaceMissing || !!stateSnapshotCache?.snapshot;
+    if (canUpdateCacheFromWrite) {
+      const mergedState = {};
+      const previousState = stateSnapshotCache?.snapshot?.state || {};
+      for (const k of DB_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(nextState, k) && typeof nextState[k] === 'string') {
+          mergedState[k] = nextState[k];
+        } else if (typeof previousState[k] === 'string') {
+          mergedState[k] = previousState[k];
+        }
+      }
+      await setStateSnapshotCache({ state: mergedState, updatedAt: now });
+    } else {
+      invalidateStateSnapshotCache();
+    }
+
+    return { updatedAt: now };
+  }
+
   const now = new Date().toISOString();
   const entries = replaceMissing
     ? DB_KEYS.map((key) => [key, nextState[key]])
@@ -401,6 +521,37 @@ async function writeStateToDB(nextState, replaceMissing = true) {
   }
 
   return { updatedAt: now };
+}
+
+async function readStateKeyValue(key) {
+  if (!DB_KEYS_SET.has(key)) return null;
+
+  if (STORAGE_MODE === 'file') {
+    const snapshot = await readStateFromFile([key]);
+    return typeof snapshot.state[key] === 'string' ? snapshot.state[key] : null;
+  }
+
+  const [rows] = await pool.execute(
+    'SELECT state_value FROM state_store WHERE state_key = ?',
+    [key]
+  );
+  if (!rows.length || typeof rows[0].state_value !== 'string') return null;
+  return rows[0].state_value;
+}
+
+async function upsertStateKeyValue(key, rawValue, updatedAt = new Date().toISOString()) {
+  if (!DB_KEYS_SET.has(key)) return;
+
+  if (STORAGE_MODE === 'file') {
+    await writeStateToDB({ [key]: rawValue }, false);
+    return;
+  }
+
+  await pool.execute(
+    `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+    [key, rawValue, toMySQLDatetime(updatedAt)]
+  );
 }
 
 async function getStateSnapshotCached(options = {}) {
@@ -445,13 +596,10 @@ async function authenticateUser(userId, password) {
 
   // Fallback: read from MySQL
   if (!user) {
-    const [rows] = await pool.execute(
-      'SELECT state_value FROM state_store WHERE state_key = ?',
-      ['mlm_users']
-    );
-    if (rows.length === 0) return { ok: false, status: 404, error: 'User ID not found' };
+    const usersRaw = await readStateKeyValue('mlm_users');
+    if (!usersRaw) return { ok: false, status: 404, error: 'User ID not found' };
     try {
-      const usersData = JSON.parse(rows[0].state_value);
+      const usersData = JSON.parse(usersRaw);
       if (Array.isArray(usersData)) {
         user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
       }
@@ -547,7 +695,7 @@ async function buildAdminAuditReport() {
   return {
     generatedAt,
     database: MYSQL_DATABASE,
-    storage: 'mysql_key_value',
+    storage: STORAGE_MODE === 'file' ? 'file_snapshot' : 'mysql_key_value',
     keyCounts,
     stateCoverage: { expectedStateKeys: DB_KEYS, presentStateKeys, missingStateKeys },
     integrity: {
@@ -692,8 +840,8 @@ const server = createServer(async (req, res) => {
     sendJson(res, mysqlHealth.ok ? 200 : 503, {
       ok: mysqlHealth.ok,
       timestamp: new Date().toISOString(),
-      storage: 'mysql',
-      mode: 'key_value',
+      storage: STORAGE_MODE,
+      mode: STORAGE_MODE === 'file' ? 'snapshot_file' : 'key_value',
       database: MYSQL_DATABASE,
       mysql: mysqlHealth,
       stateKeys: DB_KEYS
@@ -752,12 +900,9 @@ const server = createServer(async (req, res) => {
 
       if (!forceWrite && !isChunked && Object.prototype.hasOwnProperty.call(incomingState, 'mlm_users') && incomingUsersCount === 0) {
         // Check if server already has users — protect against accidental wipe
-        const [rows] = await pool.execute(
-          'SELECT state_value FROM state_store WHERE state_key = ?',
-          ['mlm_users']
-        );
-        if (rows.length > 0) {
-          const existing = safeParseJSON(rows[0].state_value);
+        const usersRaw = await readStateKeyValue('mlm_users');
+        if (usersRaw) {
+          const existing = safeParseJSON(usersRaw);
           if (Array.isArray(existing) && existing.length > 0) {
             sendJson(res, 409, {
               ok: false,
@@ -895,32 +1040,16 @@ const server = createServer(async (req, res) => {
       const snapshot = await readStateFromDB();
 
       // Clear transactions
-      await pool.execute(
-        `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-        ['mlm_transactions', '[]', toMySQLDatetime(now)]
-      );
+      await upsertStateKeyValue('mlm_transactions', '[]', now);
 
       // Clear help trackers
-      await pool.execute(
-        `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-        ['mlm_help_trackers', '[]', toMySQLDatetime(now)]
-      );
+      await upsertStateKeyValue('mlm_help_trackers', '[]', now);
 
       // Clear safety pool
-      await pool.execute(
-        `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-        ['mlm_safety_pool', JSON.stringify({ totalAmount: 0, transactions: [] }), toMySQLDatetime(now)]
-      );
+      await upsertStateKeyValue('mlm_safety_pool', JSON.stringify({ totalAmount: 0, transactions: [] }), now);
 
       // Clear pending matrix contributions
-      await pool.execute(
-        `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-        ['mlm_matrix_pending_contributions', '[]', toMySQLDatetime(now)]
-      );
+      await upsertStateKeyValue('mlm_matrix_pending_contributions', '[]', now);
 
       // Reset wallet balances
       let walletsReset = 0;
@@ -934,11 +1063,7 @@ const server = createServer(async (req, res) => {
             incomeWallet: 0, matrixWallet: 0, totalReceived: 0, totalGiven: 0,
             giveHelpLocked: 0, lockedIncomeWallet: 0
           }));
-          await pool.execute(
-            `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-            ['mlm_wallets', JSON.stringify(resetWallets), toMySQLDatetime(now)]
-          );
+          await upsertStateKeyValue('mlm_wallets', JSON.stringify(resetWallets), now);
         }
       }
 
@@ -968,12 +1093,16 @@ const server = createServer(async (req, res) => {
 // ─── Startup ─────────────────────────────────────────────────────────
 
 async function start() {
-  await connectMySQL();
+  await connectStorage();
 
   server.listen(PORT, HOST, () => {
     console.log(`Backend listening on http://${HOST}:${PORT}`);
     console.log(`Environment: NODE_ENV=${NODE_ENV} envFile=${ENV_FILE_PATH ? path.basename(ENV_FILE_PATH) : 'process.env'}`);
-    console.log(`MySQL: ${MYSQL_USER}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}`);
+    if (STORAGE_MODE === 'file') {
+      console.log(`Storage: file ${STATE_FILE_PATH}`);
+    } else {
+      console.log(`MySQL: ${MYSQL_USER}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}`);
+    }
     const smtpErrors = getSmtpConfigErrors();
     if (smtpErrors.length === 0) {
       console.log(`SMTP ready: host=${SMTP_HOST} port=${SMTP_PORT} secure=${SMTP_SECURE} from=${SMTP_FROM}`);

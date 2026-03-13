@@ -60,3 +60,10 @@ Data is stored as real documents in separate MongoDB collections, including:
 - `pins`, `pin_transfers`, `pin_purchase_requests`
 - `payments`, `payment_methods`, `settings`
 - `help_trackers`, `matrix_pending_contributions`
+
+## MySQL sanity helpers (Hostinger)
+- `scripts/db-sanity-lite.sql`: counts, status breakdown, orphan-count check for `users_rel` / `transactions_rel`.
+- `scripts/db-wallet-consistency.sql`: per-type totals and top per-user aggregates to spot wallet/tx mismatches.
+- `scripts/rebuild-rel-from-state.sql`: re-creates `users_rel` and `transactions_rel` from the JSON stored in `state_store` (drops existing tables).
+
+Run in phpMyAdmin (select DB `okshopee24` → SQL tab → paste file contents → Go). These are read-only checks.
