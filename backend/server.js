@@ -889,6 +889,15 @@ const server = createServer(async (req, res) => {
       const status = getHttpStatusForRequestError(error);
       const message = getErrorMessage(error, 'Failed to read state');
       console.error(`[GET /api/state] ${message}`);
+      if (error && typeof error === 'object') {
+        console.error('[GET /api/state] details', {
+          code: error.code,
+          errno: error.errno,
+          sqlState: error.sqlState,
+          sqlMessage: error.sqlMessage,
+          sql: error.sql
+        });
+      }
       sendJson(res, status, { ok: false, error: message });
     }
     return;
