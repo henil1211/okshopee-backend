@@ -442,7 +442,9 @@ async function readStateFromDB(requestedKeys = []) {
   const keysToRead = requestedKeys.length > 0 ? requestedKeys : DB_KEYS;
   const placeholders = keysToRead.map(() => '?').join(',');
   const [rows] = await pool.execute(
-    `SELECT state_key, state_value FROM \`${MYSQL_DATABASE}\`.state_store WHERE state_key IN (${placeholders})`,
+    `SELECT state_key, state_value, updated_at
+       FROM \`${MYSQL_DATABASE}\`.state_store
+       WHERE state_key IN (${placeholders})`,
     keysToRead
   );
 
@@ -451,6 +453,10 @@ async function readStateFromDB(requestedKeys = []) {
 
   for (const row of rows) {
     state[row.state_key] = row.state_value;
+    if (row.updated_at) {
+      const ts = new Date(row.updated_at).toISOString();
+      if (!latestUpdatedAt || ts > latestUpdatedAt) latestUpdatedAt = ts;
+    }
   }
 
   return { state, updatedAt: latestUpdatedAt };
