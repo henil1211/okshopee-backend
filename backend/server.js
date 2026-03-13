@@ -86,21 +86,25 @@ let pool;
 
 async function ensureStateStoreUpdatedAtColumn() {
   // Older databases may have state_store without updated_at; add it if missing to avoid SELECT errors.
-  const [rows] = await pool.execute(
-    `SELECT COUNT(*) AS column_exists
-       FROM information_schema.columns
-       WHERE table_schema = ? AND table_name = 'state_store' AND column_name = 'updated_at'`,
-    [MYSQL_DATABASE]
-  );
+  try {
+    const [rows] = await pool.execute(
+      `SELECT COUNT(*) AS column_exists
+         FROM information_schema.columns
+         WHERE table_schema = ? AND table_name = 'state_store' AND column_name = 'updated_at'`,
+      [MYSQL_DATABASE]
+    );
 
-  if (!rows[0]?.column_exists) {
-    await pool.execute(`
-      ALTER TABLE state_store
-        ADD COLUMN updated_at DATETIME(3)
-        DEFAULT CURRENT_TIMESTAMP(3)
-        ON UPDATE CURRENT_TIMESTAMP(3)
-    `);
-    console.log('Added missing state_store.updated_at column');
+    if (!rows[0]?.column_exists) {
+      await pool.execute(`
+        ALTER TABLE state_store
+          ADD COLUMN updated_at DATETIME(3)
+          DEFAULT CURRENT_TIMESTAMP(3)
+          ON UPDATE CURRENT_TIMESTAMP(3)
+      `);
+      console.log('Added missing state_store.updated_at column');
+    }
+  } catch (err) {
+    console.error('ensureStateStoreUpdatedAtColumn failed:', getErrorMessage(err));
   }
 }
 
@@ -437,10 +441,23 @@ async function readStateFromDB(requestedKeys = []) {
 
   const keysToRead = requestedKeys.length > 0 ? requestedKeys : DB_KEYS;
   const placeholders = keysToRead.map(() => '?').join(',');
-  const [rows] = await pool.execute(
-    `SELECT state_key, state_value, updated_at FROM state_store WHERE state_key IN (${placeholders})`,
-    keysToRead
-  );
+  let rows;
+  try {
+    [rows] = await pool.execute(
+      `SELECT state_key, state_value, updated_at FROM state_store WHERE state_key IN (${placeholders})`,
+      keysToRead
+    );
+  } catch (err) {
+    if (err && err.code === 'ER_BAD_FIELD_ERROR') {
+      console.warn('updated_at column missing; falling back to legacy SELECT without it');
+      [rows] = await pool.execute(
+        `SELECT state_key, state_value, NULL as updated_at FROM state_store WHERE state_key IN (${placeholders})`,
+        keysToRead
+      );
+    } else {
+      throw err;
+    }
+  }
 
   const state = {};
   let latestUpdatedAt = null;
@@ -544,10 +561,23 @@ async function readStateKeyValue(key) {
     return typeof snapshot.state[key] === 'string' ? snapshot.state[key] : null;
   }
 
-  const [rows] = await pool.execute(
-    'SELECT state_value FROM state_store WHERE state_key = ?',
-    [key]
-  );
+  let rows;
+  try {
+    [rows] = await pool.execute(
+      'SELECT state_value FROM state_store WHERE state_key = ?',
+      [key]
+    );
+  } catch (err) {
+    if (err && err.code === 'ER_BAD_FIELD_ERROR') {
+      console.warn('updated_at column missing during readStateKeyValue; retrying without updated_at');
+      [rows] = await pool.execute(
+        'SELECT state_value FROM state_store WHERE state_key = ?',
+        [key]
+      );
+    } else {
+      throw err;
+    }
+  }
   if (!rows.length || typeof rows[0].state_value !== 'string') return null;
   return rows[0].state_value;
 }
