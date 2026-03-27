@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuthStore } from '@/store';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import {
   ArrowLeft, Check, ChevronLeft, ChevronRight, Copy, ExternalLink, LogOut, Search, ShoppingBag,
   Star, GraduationCap, Laptop, Shirt, Landmark, Briefcase, Plane, Pill, UtensilsCrossed, Heart, Home,
   Gift, Music, Camera, Gamepad2, Dumbbell, Baby, Car, Smartphone, Share2, Tag, Zap, TrendingUp,
-  ArrowRight, Percent, Award, Upload, FileText, Clock, CheckCircle, XCircle, Send, type LucideIcon
+  ArrowRight, Award, Upload, FileText, Clock, CheckCircle, XCircle, Send, type LucideIcon
 } from 'lucide-react';
 import { copyToClipboard } from '@/utils/helpers';
 import MobileBottomNav from '@/components/MobileBottomNav';
@@ -44,7 +44,9 @@ type TabId = 'top-retailers' | 'categories' | 'sub-categories' | 'my-rewards';
 
 export default function Ecommerce() {
   const navigate = useNavigate();
-  const { user, isAuthenticated, logout } = useAuthStore();
+  const location = useLocation();
+  const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
+  const displayUser = impersonatedUser || user;
 
   const [activeTab, setActiveTab] = useState<TabId>('top-retailers');
   const [searchTerm, setSearchTerm] = useState('');
@@ -52,17 +54,20 @@ export default function Ecommerce() {
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const [bannerIndex, setBannerIndex] = useState(0);
   const bannerTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const quickCategoriesRef = useRef<HTMLDivElement | null>(null);
+  const [showQuickCategoriesLeftArrow, setShowQuickCategoriesLeftArrow] = useState(false);
+  const [showQuickCategoriesRightArrow, setShowQuickCategoriesRightArrow] = useState(false);
 
   // Reward points / invoice / redemption state
   const [userWallet, setUserWallet] = useState(() => {
     const wallets = Database.getWallets();
-    return wallets.find(w => w.userId === user?.id) || null;
+    return wallets.find(w => w.userId === displayUser?.id) || null;
   });
   const [userInvoices, setUserInvoices] = useState<MarketplaceInvoice[]>(() =>
-    user?.userId ? Database.getUserInvoices(user.userId) : []
+    displayUser?.userId ? Database.getUserInvoices(displayUser.userId) : []
   );
   const [userRedemptions, setUserRedemptions] = useState<RewardRedemption[]>(() =>
-    user?.userId ? Database.getUserRedemptions(user.userId) : []
+    displayUser?.userId ? Database.getUserRedemptions(displayUser.userId) : []
   );
   const [showInvoiceForm, setShowInvoiceForm] = useState(false);
   const [invoiceRetailerId, setInvoiceRetailerId] = useState('');
@@ -71,6 +76,9 @@ export default function Ecommerce() {
   const [invoiceFileName, setInvoiceFileName] = useState('');
   const [showRedeemForm, setShowRedeemForm] = useState(false);
   const [redeemPoints, setRedeemPoints] = useState('');
+  const [marketplaceEnabled, setMarketplaceEnabled] = useState(() => Database.getSettings().marketplaceEnabled !== false);
+  const [invoicePreview, setInvoicePreview] = useState<{ url: string; mimeType: string } | null>(null);
+  const [showFullInstructions, setShowFullInstructions] = useState(false);
 
   // Marketplace data state
   const [categories, setCategories] = useState(() => Database.getMarketplaceCategories().filter(c => c.isActive).sort((a, b) => a.sortOrder - b.sortOrder));
@@ -87,6 +95,19 @@ export default function Ecommerce() {
     setBanners(Database.getMarketplaceBanners().filter(b => b.isActive).sort((a, b) => a.sortOrder - b.sortOrder));
     const now = new Date().toISOString();
     setDeals(Database.getMarketplaceDeals().filter(d => d.isActive && (!d.endDate || d.endDate >= now)).sort((a, b) => a.sortOrder - b.sortOrder));
+  }, []);
+
+  const updateQuickCategoryArrows = useCallback(() => {
+    const container = quickCategoriesRef.current;
+    if (!container) {
+      setShowQuickCategoriesLeftArrow(false);
+      setShowQuickCategoriesRightArrow(false);
+      return;
+    }
+
+    const maxScrollLeft = container.scrollWidth - container.clientWidth;
+    setShowQuickCategoriesLeftArrow(container.scrollLeft > 8);
+    setShowQuickCategoriesRightArrow(maxScrollLeft > 8 && container.scrollLeft < maxScrollLeft - 8);
   }, []);
 
   const topRetailers = useMemo(() => {
@@ -121,8 +142,18 @@ export default function Ecommerce() {
 
   const selectedCategory = useMemo(() => categories.find(c => c.id === selectedCategoryId), [categories, selectedCategoryId]);
 
+  const adminPreview = useMemo(() => {
+    if (!displayUser?.isAdmin) return false;
+    const search = new URLSearchParams(location.search);
+    const flag = search.get('preview');
+    return flag === 'admin' || flag === '1' || flag === 'true';
+  }, [location.search, displayUser?.isAdmin]);
+
+  const isMarketplaceOpen = marketplaceEnabled || adminPreview;
+
   useEffect(() => {
     if (!isAuthenticated) { navigate('/login'); return; }
+    setMarketplaceEnabled(Database.getSettings().marketplaceEnabled !== false);
 
     // Hydrate marketplace data from server, then reload state
     if (import.meta.env.PROD) {
@@ -135,6 +166,7 @@ export default function Ecommerce() {
         ]],
         { strict: true, maxAttempts: 2, timeoutMs: 20000, retryDelayMs: 1000, continueOnError: true, requireAnySuccess: false }
       ).then(() => {
+        setMarketplaceEnabled(Database.getSettings().marketplaceEnabled !== false);
         reloadMarketplaceData();
       }).catch(() => {
         // Even if hydration fails, try to reload from local cache
@@ -152,6 +184,20 @@ export default function Ecommerce() {
     return () => { if (bannerTimerRef.current) clearInterval(bannerTimerRef.current); };
   }, [banners.length]);
 
+  useEffect(() => {
+    return () => {
+      if (invoicePreview?.url.startsWith('blob:')) {
+        URL.revokeObjectURL(invoicePreview.url);
+      }
+    };
+  }, [invoicePreview]);
+
+  useEffect(() => {
+    updateQuickCategoryArrows();
+    window.addEventListener('resize', updateQuickCategoryArrows);
+    return () => window.removeEventListener('resize', updateQuickCategoryArrows);
+  }, [categories, updateQuickCategoryArrows]);
+
   const handleLogout = () => {
     logout();
     navigate('/login');
@@ -163,11 +209,13 @@ export default function Ecommerce() {
   };
 
   const handleShareNow = useCallback(async (retailer: MarketplaceRetailer) => {
-    const referralId = user?.userId || '';
+    const referralId = displayUser?.userId || '';
     const link = retailer.affiliateLink
       ? `${retailer.affiliateLink}${retailer.affiliateLink.includes('?') ? '&' : '?'}ref=${referralId}`
       : `${retailer.websiteUrl}?ref=${referralId}`;
-    const shareText = `Check out ${retailer.name} – ${retailer.discountText || `Up to ${retailer.discountPercent}% off`}!`;
+    const shareText = retailer.discountText
+      ? `Check out ${retailer.name} - ${retailer.discountText}!`
+      : `Check out ${retailer.name}!`;
 
     // Use native share sheet if available (mobile browsers, etc.)
     if (navigator.share) {
@@ -175,7 +223,7 @@ export default function Ecommerce() {
         await navigator.share({ title: retailer.name, text: shareText, url: link });
         return;
       } catch {
-        // User cancelled or share failed — fall back to copy
+        // User cancelled or share failed - fall back to copy
       }
     }
 
@@ -185,10 +233,10 @@ export default function Ecommerce() {
     setCopiedId(retailer.id);
     setTimeout(() => setCopiedId(null), 1800);
     toast.success('Link copied! Share it anywhere');
-  }, [user?.userId]);
+  }, [displayUser?.userId]);
 
   const handleCopyLink = useCallback(async (retailer: MarketplaceRetailer) => {
-    const referralId = user?.userId || '';
+    const referralId = displayUser?.userId || '';
     const link = retailer.affiliateLink
       ? `${retailer.affiliateLink}${retailer.affiliateLink.includes('?') ? '&' : '?'}ref=${referralId}`
       : `${retailer.websiteUrl}?ref=${referralId}`;
@@ -197,20 +245,31 @@ export default function Ecommerce() {
     setCopiedId(retailer.id);
     setTimeout(() => setCopiedId(null), 1800);
     toast.success('Link copied!');
-  }, [user?.userId]);
+  }, [displayUser?.userId]);
 
   const handleCategoryClick = (catId: string) => {
     setSelectedCategoryId(catId);
     setActiveTab('sub-categories');
   };
 
+  const handleQuickCategoryArrowClick = (direction: 'left' | 'right') => {
+    const container = quickCategoriesRef.current;
+    if (!container) return;
+    const scrollAmount = Math.max(container.clientWidth * 0.7, 180);
+    container.scrollBy({
+      left: direction === 'right' ? scrollAmount : -scrollAmount,
+      behavior: 'smooth',
+    });
+    window.setTimeout(updateQuickCategoryArrows, 220);
+  };
+
   const reloadRewardsData = useCallback(() => {
-    if (!user?.userId) return;
+    if (!displayUser?.userId) return;
     const wallets = Database.getWallets();
-    setUserWallet(wallets.find(w => w.userId === user.id) || null);
-    setUserInvoices(Database.getUserInvoices(user.userId));
-    setUserRedemptions(Database.getUserRedemptions(user.userId));
-  }, [user?.userId, user?.id]);
+    setUserWallet(wallets.find(w => w.userId === displayUser.id) || null);
+    setUserInvoices(Database.getUserInvoices(displayUser.userId));
+    setUserRedemptions(Database.getUserRedemptions(displayUser.userId));
+  }, [displayUser?.userId, displayUser?.id]);
 
   // Reload wallet + invoice + redemption data every time user opens My Rewards tab
   useEffect(() => {
@@ -247,13 +306,13 @@ export default function Ecommerce() {
   };
 
   const handleSubmitInvoice = () => {
-    if (!user?.userId) return;
+    if (!displayUser?.userId) return;
     if (!invoiceRetailerId) { toast.error('Please select a retailer'); return; }
     if (!invoiceAmount || parseFloat(invoiceAmount) <= 0) { toast.error('Please enter a valid amount'); return; }
     if (!invoiceImage) { toast.error('Please upload an invoice image'); return; }
     const retailer = allRetailers.find(r => r.id === invoiceRetailerId);
     Database.createMarketplaceInvoice({
-      userId: user.userId,
+      userId: displayUser.userId,
       retailerId: invoiceRetailerId,
       retailerName: retailer?.name || 'Unknown',
       amount: parseFloat(invoiceAmount),
@@ -275,12 +334,12 @@ export default function Ecommerce() {
   };
 
   const handleSubmitRedemption = () => {
-    if (!user?.userId) return;
+    if (!displayUser?.userId) return;
     const pts = parseInt(redeemPoints);
     if (!pts || pts <= 0) { toast.error('Enter a valid number of points'); return; }
     const currentRP = userWallet?.rewardPoints || 0;
     if (pts > currentRP) { toast.error(`You only have ${currentRP} reward points`); return; }
-    const result = Database.createRedemptionRequest(user.userId, pts);
+    const result = Database.createRedemptionRequest(displayUser.userId, pts);
     if (!result) { toast.error('Failed to create redemption request'); return; }
     toast.success(`Redemption request for ${pts} RP ($${(pts * 0.01).toFixed(2)} USDT) submitted`);
     setShowRedeemForm(false);
@@ -288,48 +347,132 @@ export default function Ecommerce() {
     reloadRewardsData();
   };
 
-  if (!user) return null;
+  const closeInvoicePreview = () => {
+    setInvoicePreview((current) => {
+      if (current?.url.startsWith('blob:')) {
+        URL.revokeObjectURL(current.url);
+      }
+      return null;
+    });
+  };
+
+  const handleViewInvoice = async (invoiceImage: string) => {
+    if (!invoiceImage) return;
+    try {
+      if (invoiceImage.startsWith('data:')) {
+        const response = await fetch(invoiceImage);
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        setInvoicePreview((current) => {
+          if (current?.url.startsWith('blob:')) {
+            URL.revokeObjectURL(current.url);
+          }
+          return { url: objectUrl, mimeType: blob.type };
+        });
+        return;
+      }
+
+      setInvoicePreview({ url: invoiceImage, mimeType: '' });
+    } catch {
+      toast.error('Unable to open invoice preview');
+    }
+  };
+
+  if (!isMarketplaceOpen) {
+    return (
+      <div className="min-h-screen bg-[#060b14] relative overflow-hidden flex flex-col items-center justify-center px-4 py-10 text-center">
+        <div className="absolute inset-0 opacity-45" style={{ background: 'radial-gradient(circle at 18% 22%, rgba(17,139,221,0.22), transparent 38%), radial-gradient(circle at 78% 18%, rgba(99,102,241,0.2), transparent 35%), radial-gradient(circle at 50% 80%, rgba(16,185,129,0.18), transparent 40%)' }} />
+        <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.03)_25%,transparent_25%,transparent_50%,rgba(255,255,255,0.03)_50%,rgba(255,255,255,0.03)_75%,transparent_75%,transparent)] bg-[length:14px_14px] opacity-15" />
+        <div className="relative max-w-2xl w-full">
+          <div className="bg-white/5 border border-white/10 rounded-2xl p-8 shadow-2xl backdrop-blur space-y-5">
+            <div className="flex items-center justify-center gap-3">
+              <div className="h-14 w-14 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/30" style={{ background: 'linear-gradient(135deg, #118bdd 0%, #6366f1 100%)' }}>
+                <ShoppingBag className="w-7 h-7 text-white" />
+              </div>
+              <div className="text-left">
+                <p className="text-xs uppercase tracking-[0.25em] text-[#84c5ff] font-semibold">Affiliate Marketplace</p>
+                <p className="text-sm text-amber-200 font-semibold">Launching soon</p>
+              </div>
+            </div>
+            <div className="space-y-2 text-center">
+              <h1 className="text-3xl sm:text-4xl font-black text-white tracking-tight">Coming Soon</h1>
+              <p className="text-white/70 text-sm sm:text-base leading-relaxed">
+                We’re finalizing offers and retailers. Check back shortly to start shopping and earning rewards.
+              </p>
+            </div>
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+              <button
+                onClick={() => navigate('/dashboard')}
+                className="px-4 py-2 rounded-lg bg-[#118bdd] text-white hover:bg-[#0f7ac7] w-full sm:w-auto shadow-lg shadow-blue-500/30 transition"
+              >
+                Back to Dashboard
+              </button>
+            </div>
+          </div>
+        </div>
+        <MobileBottomNav />
+      </div>
+    );
+  }
+
+  if (!displayUser) return null;
 
   return (
-    <div className="min-h-screen pb-24 md:pb-0" style={{ backgroundColor: '#060b14' }}>
+    <div className="min-h-screen pb-24 md:pb-0 overflow-x-hidden" style={{ backgroundColor: '#060b14' }}>
 
       {/* ====== PREMIUM HEADER ====== */}
       <header className="sticky top-0 z-40" style={{ background: 'linear-gradient(180deg, #0c1829 0%, #0a1422 100%)' }}>
         <div className="absolute inset-0 opacity-30" style={{ background: 'radial-gradient(ellipse at 50% 0%, rgba(17,139,221,0.15), transparent 70%)' }} />
-        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-3 pb-2 flex items-center justify-between gap-3">
+        <div className="relative max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 pt-3 pb-2 flex items-center justify-between gap-2 sm:gap-3">
           <div className="flex items-center gap-3 min-w-0">
-            <button onClick={() => navigate('/dashboard')} className="h-10 w-10 rounded-xl inline-flex items-center justify-center bg-white/5 border border-white/10 text-white/80 hover:bg-white/10 hover:text-white transition-all">
+            <button onClick={() => navigate('/dashboard')} className="h-9 w-9 sm:h-10 sm:w-10 rounded-xl inline-flex items-center justify-center bg-white/5 border border-white/10 text-white/80 hover:bg-white/10 hover:text-white transition-all">
               <ArrowLeft className="w-4 h-4" />
             </button>
-            <div className="h-10 w-10 rounded-xl inline-flex items-center justify-center shadow-lg shadow-blue-500/20" style={{ background: 'linear-gradient(135deg, #118bdd 0%, #6366f1 100%)' }}>
+            <div className="h-9 w-9 sm:h-10 sm:w-10 rounded-xl inline-flex items-center justify-center shadow-lg shadow-blue-500/20" style={{ background: 'linear-gradient(135deg, #118bdd 0%, #6366f1 100%)' }}>
               <ShoppingBag className="w-5 h-5 text-white" />
             </div>
             <div className="min-w-0">
-              <h1 className="font-bold text-base sm:text-lg text-white truncate leading-tight">Affiliate Marketplace</h1>
+              <h1 className="font-bold text-sm sm:text-lg text-white truncate leading-tight">Affiliate Marketplace</h1>
               <p className="text-[10px] text-white/40 leading-tight">Shop smart, earn rewards</p>
+              {impersonatedUser && (
+                <p className="text-[10px] text-amber-300/90 leading-tight mt-0.5">
+                  Viewing as {impersonatedUser.fullName} ({impersonatedUser.userId})
+                </p>
+              )}
             </div>
           </div>
-          <button onClick={handleLogout} className="h-10 w-10 rounded-xl inline-flex items-center justify-center bg-white/5 border border-white/10 text-white/60 hover:bg-red-500/15 hover:text-red-400 hover:border-red-500/30 transition-all">
+          <button onClick={handleLogout} className="h-9 w-9 sm:h-10 sm:w-10 rounded-xl inline-flex items-center justify-center bg-white/5 border border-white/10 text-white/60 hover:bg-red-500/15 hover:text-red-400 hover:border-red-500/30 transition-all">
             <LogOut className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Search bar */}
+        {/* Marketplace note */}
         <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-3 pt-1">
-          <div className="relative">
-            <Search className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-white/30" />
-            <input
-              value={searchTerm}
-              onChange={e => setSearchTerm(e.target.value)}
-              placeholder="Search brands, categories, deals..."
-              className="w-full h-11 rounded-xl pl-11 pr-4 text-sm bg-white/[0.06] border border-white/[0.08] text-white placeholder:text-white/30 outline-none focus:border-[#118bdd]/50 focus:bg-white/[0.08] transition-all"
-            />
+          <div className="rounded-2xl p-4 sm:p-5" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <h2 className="text-white font-bold text-base sm:text-lg">Instruction</h2>
+            <ol className="mt-3 space-y-2 text-sm sm:text-base text-white/80 leading-relaxed list-decimal pl-5">
+              <li>To get RP (Reward Points), upload your invoice in the &quot;My Reward&quot; section.</li>
+              <li>Upload the invoice only after the return policy period is completed.</li>
+              {showFullInstructions && (
+                <>
+                  <li>RP (Reward Points) will be reflected within 60-90 days once the retailer shares the order report.</li>
+                  <li>Before purchasing any product through third-party affiliate links/websites, please read the terms &amp; conditions and privacy policy carefully on that website.</li>
+                </>
+              )}
+            </ol>
+            <button
+              type="button"
+              onClick={() => setShowFullInstructions(current => !current)}
+              className="mt-3 text-[11px] sm:text-xs font-semibold text-[#118bdd] hover:text-blue-300 transition-colors"
+            >
+              {showFullInstructions ? 'Read less' : 'Read more'}
+            </button>
           </div>
         </div>
 
         {/* Tab navigation */}
-        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex border-b border-white/[0.06]">
+        <div className="relative max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+          <div className="grid grid-cols-2 border-b border-white/[0.06] sm:flex sm:overflow-x-auto sm:whitespace-nowrap" style={{ scrollbarWidth: 'none' }}>
             {([
               { id: 'top-retailers' as TabId, label: 'Top Retailers', icon: Star },
               { id: 'categories' as TabId, label: 'Categories', icon: ShoppingBag },
@@ -341,12 +484,13 @@ export default function Ecommerce() {
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`relative flex items-center gap-1.5 px-4 py-3 text-sm font-medium transition-colors ${
+                  className={`relative flex min-w-0 items-center justify-center gap-1.5 px-3 sm:px-4 py-3 text-xs sm:text-sm font-medium text-center transition-colors border-white/[0.06] sm:shrink-0 ${
                     isActive ? 'text-white' : 'text-white/40 hover:text-white/70'
                   }`}
+                  style={{ borderTopWidth: 0, borderLeftWidth: 0, borderRightWidth: 0, borderBottomWidth: 0 }}
                 >
                   <tab.icon className="w-3.5 h-3.5" />
-                  {tab.label}
+                  <span className="truncate sm:truncate-none">{tab.label}</span>
                   {isActive && (
                     <span className="absolute bottom-0 left-2 right-2 h-[2px] rounded-full" style={{ background: 'linear-gradient(90deg, #118bdd, #6366f1)' }} />
                   )}
@@ -357,7 +501,16 @@ export default function Ecommerce() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-5 space-y-7">
+      <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-5 space-y-6 sm:space-y-7">
+        <div className="relative">
+          <Search className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-white/30" />
+          <input
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            placeholder="Search brands, categories, deals..."
+            className="w-full h-11 rounded-xl pl-11 pr-4 text-sm bg-white/[0.06] border border-white/[0.08] text-white placeholder:text-white/30 outline-none focus:border-[#118bdd]/50 focus:bg-white/[0.08] transition-all"
+          />
+        </div>
 
         {/* ============ TOP RETAILERS TAB ============ */}
         {activeTab === 'top-retailers' && (
@@ -378,7 +531,7 @@ export default function Ecommerce() {
                       ) : (
                         <div className="w-full h-full flex items-center" style={{ background: 'linear-gradient(135deg, #0f172a 0%, #1e1b4b 40%, #312e81 70%, #4338ca 100%)' }}>
                           <div className="absolute inset-0 opacity-20" style={{ backgroundImage: 'radial-gradient(circle at 30% 70%, rgba(99,102,241,0.4), transparent 50%), radial-gradient(circle at 70% 30%, rgba(17,139,221,0.3), transparent 50%)' }} />
-                          <div className="relative pl-14 pr-6 sm:pl-16 sm:pr-10 py-6 max-w-xl">
+                          <div className="relative pl-4 pr-4 sm:pl-16 sm:pr-10 py-5 sm:py-6 max-w-xl">
                             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 backdrop-blur-sm border border-white/10 mb-3">
                               <Zap className="w-3 h-3 text-yellow-400" />
                               <span className="text-[10px] font-semibold text-white/80 uppercase tracking-wider">Featured</span>
@@ -395,7 +548,7 @@ export default function Ecommerce() {
                       )}
                       {banner.imageUrl && (
                         <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/40 to-transparent">
-                          <div className="h-full flex flex-col justify-center pl-14 pr-6 sm:pl-16 sm:pr-10 max-w-lg">
+                          <div className="h-full flex flex-col justify-center pl-4 pr-4 sm:pl-16 sm:pr-10 max-w-lg">
                             <h3 className="text-2xl sm:text-3xl font-extrabold text-white leading-tight">{banner.title}</h3>
                             {banner.subtitle && <p className="text-sm mt-2 text-white/70">{banner.subtitle}</p>}
                             {banner.linkUrl && (
@@ -439,7 +592,6 @@ export default function Ecommerce() {
                 <div className="absolute inset-0 opacity-30" style={{ backgroundImage: 'radial-gradient(circle at 80% 20%, rgba(99,102,241,0.4), transparent 50%), radial-gradient(circle at 20% 80%, rgba(17,139,221,0.3), transparent 50%)' }} />
                 <div className="relative px-6 sm:px-10 py-8 sm:py-12">
                   <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 backdrop-blur-sm border border-white/10 mb-4">
-                    <Percent className="w-3 h-3 text-emerald-400" />
                     <span className="text-[10px] font-semibold text-white/80 uppercase tracking-wider">Exclusive Deals</span>
                   </div>
                   <h2 className="text-2xl sm:text-3xl md:text-4xl font-extrabold text-white leading-tight max-w-lg">
@@ -448,7 +600,7 @@ export default function Ecommerce() {
                   <p className="text-sm sm:text-base mt-3 text-white/50 max-w-md">
                     Discover exclusive discounts from your favourite stores. Share and earn through affiliate links.
                   </p>
-                  <div className="flex gap-6 mt-6">
+                  <div className="flex flex-wrap gap-4 sm:gap-6 mt-6">
                     <div className="text-center">
                       <div className="text-xl font-bold text-white">{allRetailers.length}+</div>
                       <div className="text-[10px] text-white/40 uppercase tracking-wider">Brands</div>
@@ -471,7 +623,7 @@ export default function Ecommerce() {
             {/* Today's Best Deals */}
             {filteredDeals.length > 0 && (
               <section>
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center justify-between gap-2 mb-4">
                   <div className="flex items-center gap-2.5">
                     <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #f97316, #ef4444)' }}>
                       <Zap className="w-4 h-4 text-white" />
@@ -561,29 +713,56 @@ export default function Ecommerce() {
                     See All <ArrowRight className="w-3 h-3" />
                   </button>
                 </div>
-                <div className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
-                  {categories.slice(0, 8).map((cat, idx) => {
-                    const color = CATEGORY_COLORS[idx % CATEGORY_COLORS.length];
-                    return (
-                      <button
-                        key={cat.id}
-                        onClick={() => handleCategoryClick(cat.id)}
-                        className="flex flex-col items-center gap-2 min-w-[80px] flex-shrink-0 group"
-                      >
-                        <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${color.bg} border border-white/[0.08] flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform duration-200`}>
-                          <DynamicIcon name={cat.icon} className={`w-6 h-6 ${color.icon}`} />
-                        </div>
-                        <span className="text-[10px] text-white/50 group-hover:text-white/80 font-medium text-center leading-tight transition-colors line-clamp-2 w-[76px]">{cat.name}</span>
-                      </button>
-                    );
-                  })}
+                <div className="relative">
+                  <div
+                    ref={quickCategoriesRef}
+                    onScroll={updateQuickCategoryArrows}
+                    className="flex gap-3 overflow-x-auto pb-2 -mx-1 px-1"
+                    style={{ scrollbarWidth: 'none' }}
+                  >
+                    {categories.slice(0, 8).map((cat, idx) => {
+                      const color = CATEGORY_COLORS[idx % CATEGORY_COLORS.length];
+                      return (
+                        <button
+                          key={cat.id}
+                          onClick={() => handleCategoryClick(cat.id)}
+                          className="flex flex-col items-center gap-2 min-w-[80px] flex-shrink-0 group"
+                        >
+                          <div className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${color.bg} border border-white/[0.08] flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform duration-200`}>
+                            <DynamicIcon name={cat.icon} className={`w-6 h-6 ${color.icon}`} />
+                          </div>
+                          <span className="text-[10px] text-white/50 group-hover:text-white/80 font-medium text-center leading-tight transition-colors line-clamp-2 w-[76px]">{cat.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {showQuickCategoriesLeftArrow && (
+                    <button
+                      type="button"
+                      onClick={() => handleQuickCategoryArrowClick('left')}
+                      className="absolute left-0 top-4 -translate-x-1 h-8 w-8 rounded-full border border-white/10 bg-[#0b1220]/85 backdrop-blur-sm flex items-center justify-center shadow-lg shadow-black/30 sm:hidden z-10"
+                      aria-label="Scroll categories left"
+                    >
+                        <ChevronLeft className="w-4 h-4 text-white/70" />
+                    </button>
+                  )}
+                  {showQuickCategoriesRightArrow && (
+                    <button
+                      type="button"
+                      onClick={() => handleQuickCategoryArrowClick('right')}
+                      className="absolute right-0 top-4 translate-x-1 h-8 w-8 rounded-full border border-white/10 bg-[#0b1220]/85 backdrop-blur-sm flex items-center justify-center shadow-lg shadow-black/30 sm:hidden z-10"
+                      aria-label="Scroll categories right"
+                    >
+                        <ChevronRight className="w-4 h-4 text-white/70" />
+                    </button>
+                  )}
                 </div>
               </section>
             )}
 
             {/* Top Retailers Grid */}
             <section>
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center justify-between gap-2 mb-4">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #f59e0b, #ef4444)' }}>
                     <TrendingUp className="w-4 h-4 text-white" />
@@ -608,7 +787,7 @@ export default function Ecommerce() {
             {/* All Retailers */}
             {allRetailers.length > topRetailers.length && (
               <section>
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center justify-between gap-2 mb-4">
                   <div className="flex items-center gap-2.5">
                     <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-white/[0.06] border border-white/[0.06]">
                       <ShoppingBag className="w-4 h-4 text-white/50" />
@@ -633,8 +812,8 @@ export default function Ecommerce() {
         {activeTab === 'categories' && (
           <section>
             <div className="mb-5">
-              <h2 className="text-white font-bold text-xl">Browse by Category</h2>
-              <p className="text-white/40 text-sm mt-1">Find your favourite brands by category</p>
+              <h2 className="text-white font-bold text-lg sm:text-xl">Browse by Category</h2>
+              <p className="text-white/40 text-xs sm:text-sm mt-1">Find your favourite brands by category</p>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
               {filteredCategories.map((cat, idx) => {
@@ -686,7 +865,7 @@ export default function Ecommerce() {
             )}
 
             {/* Category pills */}
-            <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: 'none' }}>
+            <div className="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
               <button
                 onClick={() => setSelectedCategoryId(null)}
                 className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
@@ -745,8 +924,8 @@ export default function Ecommerce() {
                     <Award className="w-6 h-6 text-white" />
                   </div>
                   <div>
-                    <h2 className="text-white font-bold text-lg leading-tight">{user?.fullName || 'User'}</h2>
-                    <p className="text-white/40 text-xs">ID: {user?.userId}</p>
+                    <h2 className="text-white font-bold text-lg leading-tight">{displayUser?.fullName || 'User'}</h2>
+                    <p className="text-white/40 text-xs">ID: {displayUser?.userId}</p>
                   </div>
                 </div>
 
@@ -757,11 +936,11 @@ export default function Ecommerce() {
                     <span className="text-3xl sm:text-4xl font-extrabold text-white">{userWallet?.rewardPoints || 0}</span>
                     <span className="text-sm text-white/30 font-medium">RP</span>
                   </div>
-                  <p className="text-emerald-400/80 text-xs mt-1">≈ ${((userWallet?.rewardPoints || 0) * 0.01).toFixed(2)} USDT</p>
+                  <p className="text-emerald-400/80 text-xs mt-1">~ ${((userWallet?.rewardPoints || 0) * 0.01).toFixed(2)} USDT</p>
                 </div>
 
                 {/* Stats row */}
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-3 gap-2 sm:gap-3">
                   <div className="rounded-xl p-3 text-center" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
                     <p className="text-white/30 text-[9px] uppercase tracking-wider font-semibold">Earned</p>
                     <p className="text-white font-bold text-lg mt-0.5">{userWallet?.totalRewardPointsEarned || 0}</p>
@@ -780,21 +959,21 @@ export default function Ecommerce() {
                 </div>
 
                 {/* Action buttons */}
-                <div className="flex gap-3 mt-4">
-                  <button
-                    onClick={() => { setShowRedeemForm(!showRedeemForm); setShowInvoiceForm(false); }}
-                    className="flex-1 h-11 rounded-xl text-sm font-bold text-white inline-flex items-center justify-center gap-2 transition-all hover:shadow-lg hover:shadow-blue-500/20 active:scale-[0.98]"
-                    style={{ background: 'linear-gradient(135deg, #118bdd, #6366f1)' }}
-                  >
-                    <Send className="w-4 h-4" />
-                    Redeem Points
-                  </button>
+                <div className="grid grid-cols-2 gap-3 mt-5 sm:mt-4">
                   <button
                     onClick={() => { setShowInvoiceForm(!showInvoiceForm); setShowRedeemForm(false); }}
-                    className="flex-1 h-11 rounded-xl text-sm font-bold text-white inline-flex items-center justify-center gap-2 transition-all active:scale-[0.98] bg-white/[0.06] border border-white/[0.1] hover:bg-white/[0.1]"
+                    className="w-full min-w-0 h-12 sm:h-11 rounded-xl px-2 sm:px-3 text-[13px] sm:text-sm font-bold text-white inline-flex items-center justify-center gap-1.5 sm:gap-2 transition-all active:scale-[0.98] bg-white/[0.06] border border-white/[0.1] hover:bg-white/[0.1]"
                   >
-                    <Upload className="w-4 h-4" />
+                    <Upload className="w-4 h-4 flex-shrink-0" />
                     Upload Invoice
+                  </button>
+                  <button
+                    onClick={() => { setShowRedeemForm(!showRedeemForm); setShowInvoiceForm(false); }}
+                    className="w-full min-w-0 h-12 sm:h-11 rounded-xl px-2 sm:px-3 text-[13px] sm:text-sm font-bold text-white inline-flex items-center justify-center gap-1.5 sm:gap-2 transition-all hover:shadow-lg hover:shadow-blue-500/20 active:scale-[0.98]"
+                    style={{ background: 'linear-gradient(135deg, #118bdd, #6366f1)' }}
+                  >
+                    <Send className="w-4 h-4 flex-shrink-0" />
+                    Redeem RP
                   </button>
                 </div>
               </div>
@@ -806,7 +985,7 @@ export default function Ecommerce() {
                 <h3 className="text-white font-bold text-sm mb-3 flex items-center gap-2">
                   <Send className="w-4 h-4 text-[#118bdd]" /> Redeem Reward Points
                 </h3>
-                <p className="text-white/40 text-xs mb-4">Your points will be converted to USDT at 1 RP = $0.01 and credited to your Fund Wallet.</p>
+                <p className="text-white/40 text-xs mb-4">Your points will be converted to USDT at 1 RP = $0.01 and credited to your Income Wallet.</p>
                 <div className="space-y-3">
                   <div>
                     <label className="text-white/50 text-xs font-medium block mb-1.5">Points to Redeem</label>
@@ -821,11 +1000,11 @@ export default function Ecommerce() {
                       <p className="text-emerald-400/80 text-xs mt-1.5">You'll receive: ${(parseInt(redeemPoints) * 0.01).toFixed(2)} USDT</p>
                     )}
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={handleSubmitRedemption} className="flex-1 h-10 rounded-xl text-sm font-bold text-white inline-flex items-center justify-center gap-1.5" style={{ background: 'linear-gradient(135deg, #118bdd, #6366f1)' }}>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button onClick={handleSubmitRedemption} className="w-full min-w-0 h-11 rounded-xl px-2 sm:px-4 text-[13px] sm:text-sm font-bold text-white inline-flex items-center justify-center gap-1.5" style={{ background: 'linear-gradient(135deg, #118bdd, #6366f1)' }}>
                       Submit Request
                     </button>
-                    <button onClick={() => { setShowRedeemForm(false); setRedeemPoints(''); }} className="h-10 px-4 rounded-xl text-sm font-medium text-white/60 bg-white/[0.04] border border-white/[0.08] hover:text-white">
+                    <button onClick={() => { setShowRedeemForm(false); setRedeemPoints(''); }} className="w-full min-w-0 h-11 px-2 sm:px-4 rounded-xl text-[13px] sm:text-sm font-medium text-white/60 bg-white/[0.04] border border-white/[0.08] hover:text-white">
                       Cancel
                     </button>
                   </div>
@@ -879,11 +1058,11 @@ export default function Ecommerce() {
                       </div>
                     )}
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={handleSubmitInvoice} className="flex-1 h-10 rounded-xl text-sm font-bold text-white inline-flex items-center justify-center gap-1.5" style={{ background: 'linear-gradient(135deg, #118bdd, #6366f1)' }}>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button onClick={handleSubmitInvoice} className="w-full min-w-0 h-11 rounded-xl px-2 sm:px-4 text-[13px] sm:text-sm font-bold text-white inline-flex items-center justify-center gap-1.5" style={{ background: 'linear-gradient(135deg, #118bdd, #6366f1)' }}>
                       Submit Invoice
                     </button>
-                    <button onClick={() => { setShowInvoiceForm(false); setInvoiceRetailerId(''); setInvoiceAmount(''); setInvoiceImage(''); setInvoiceFileName(''); }} className="h-10 px-4 rounded-xl text-sm font-medium text-white/60 bg-white/[0.04] border border-white/[0.08] hover:text-white">
+                    <button onClick={() => { setShowInvoiceForm(false); setInvoiceRetailerId(''); setInvoiceAmount(''); setInvoiceImage(''); setInvoiceFileName(''); }} className="w-full min-w-0 h-11 px-2 sm:px-4 rounded-xl text-[13px] sm:text-sm font-medium text-white/60 bg-white/[0.04] border border-white/[0.08] hover:text-white">
                       Cancel
                     </button>
                   </div>
@@ -899,7 +1078,7 @@ export default function Ecommerce() {
               {userInvoices.length > 0 ? (
                 <div className="space-y-2">
                   {userInvoices.map(inv => (
-                    <div key={inv.id} className="rounded-xl p-3.5 flex items-center gap-3" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div key={inv.id} className="rounded-xl p-3.5 flex items-start gap-3" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
                       <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${
                         inv.status === 'approved' ? 'bg-emerald-500/15' :
                         inv.status === 'rejected' ? 'bg-red-500/15' : 'bg-amber-500/15'
@@ -909,7 +1088,7 @@ export default function Ecommerce() {
                          <Clock className="w-4 h-4 text-amber-400" />}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="text-white text-sm font-medium truncate">{inv.retailerName}</span>
                           <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${
                             inv.status === 'approved' ? 'bg-emerald-500/15 text-emerald-400' :
@@ -917,9 +1096,17 @@ export default function Ecommerce() {
                           }`}>{inv.status}</span>
                         </div>
                         <p className="text-white/30 text-xs mt-0.5">
-                          ${inv.amount.toFixed(2)} • {new Date(inv.createdAt).toLocaleDateString()}
-                          {inv.status === 'approved' && ` • +${inv.rewardPoints} RP`}
+                          ${inv.amount.toFixed(2)} - {new Date(inv.createdAt).toLocaleDateString()}
+                          {inv.status === 'approved' && ` - +${inv.rewardPoints} RP`}
                         </p>
+                        <button
+                          type="button"
+                          onClick={() => void handleViewInvoice(inv.invoiceImage)}
+                          className="mt-2 text-[11px] font-semibold text-[#118bdd] hover:text-blue-300 inline-flex items-center gap-1 transition-colors"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          View Invoice
+                        </button>
                         {inv.status === 'rejected' && inv.adminNotes && (
                           <p className="text-red-400/60 text-[10px] mt-0.5">Reason: {inv.adminNotes}</p>
                         )}
@@ -944,7 +1131,7 @@ export default function Ecommerce() {
               {userRedemptions.length > 0 ? (
                 <div className="space-y-2">
                   {userRedemptions.map(red => (
-                    <div key={red.id} className="rounded-xl p-3.5 flex items-center gap-3" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div key={red.id} className="rounded-xl p-3.5 flex items-start gap-3" style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
                       <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${
                         red.status === 'approved' ? 'bg-emerald-500/15' :
                         red.status === 'rejected' ? 'bg-red-500/15' : 'bg-amber-500/15'
@@ -954,8 +1141,10 @@ export default function Ecommerce() {
                          <Clock className="w-4 h-4 text-amber-400" />}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-white text-sm font-medium">{red.rewardPoints} RP → ${red.usdtAmount.toFixed(2)}</span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-white text-sm font-medium">
+                            {`${red.rewardPoints} RP -> $${red.usdtAmount.toFixed(2)}`}
+                          </span>
                           <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${
                             red.status === 'approved' ? 'bg-emerald-500/15 text-emerald-400' :
                             red.status === 'rejected' ? 'bg-red-500/15 text-red-400' : 'bg-amber-500/15 text-amber-400'
@@ -963,7 +1152,7 @@ export default function Ecommerce() {
                         </div>
                         <p className="text-white/30 text-xs mt-0.5">
                           {new Date(red.createdAt).toLocaleDateString()}
-                          {red.status === 'approved' && ' • Credited to Fund Wallet'}
+                          {red.status === 'approved' && ' - Credited to Income Wallet'}
                         </p>
                         {red.status === 'rejected' && red.adminNotes && (
                           <p className="text-red-400/60 text-[10px] mt-0.5">Reason: {red.adminNotes}</p>
@@ -983,6 +1172,45 @@ export default function Ecommerce() {
           </section>
         )}
       </main>
+      {invoicePreview && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
+          <button
+            type="button"
+            onClick={closeInvoicePreview}
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            aria-label="Close invoice preview"
+          />
+          <div className="relative w-full max-w-4xl rounded-2xl overflow-hidden" style={{ background: 'linear-gradient(180deg, #111827 0%, #0d1117 100%)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-white/[0.08]">
+              <h3 className="text-white font-semibold text-sm">Invoice Preview</h3>
+              <div className="flex items-center gap-2">
+                <a
+                  href={invoicePreview.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] font-semibold text-[#118bdd] hover:text-blue-300"
+                >
+                  Open in New Tab
+                </a>
+                <button
+                  type="button"
+                  onClick={closeInvoicePreview}
+                  className="h-8 px-3 rounded-lg text-xs font-medium text-white/70 bg-white/[0.04] border border-white/[0.08] hover:text-white"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="h-[75vh] bg-[#0b1220]">
+              {invoicePreview.mimeType.startsWith('image/') ? (
+                <img src={invoicePreview.url} alt="Invoice preview" className="w-full h-full object-contain" />
+              ) : (
+                <iframe src={invoicePreview.url} title="Invoice preview" className="w-full h-full bg-white" />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       <MobileBottomNav />
     </div>
   );
@@ -998,6 +1226,8 @@ function RetailerCard({ retailer, copiedId, onShop, onShare, onCopy }: {
   onCopy: (retailer: MarketplaceRetailer) => void;
 }) {
   const isCopied = copiedId === retailer.id;
+  const shopUrl = retailer.websiteUrl || retailer.affiliateLink;
+  const badgeText = retailer.badgeText?.trim();
 
   return (
     <div
@@ -1005,17 +1235,24 @@ function RetailerCard({ retailer, copiedId, onShop, onShare, onCopy }: {
       style={{ background: 'linear-gradient(180deg, #111827 0%, #0d1117 100%)', border: '1px solid rgba(255,255,255,0.06)' }}
     >
       {/* Discount ribbon */}
-      <div className="absolute top-0 right-0 z-10">
-        <div className="relative px-3 py-1 text-[10px] font-bold text-white" style={{ background: 'linear-gradient(135deg, #10b981, #059669)', borderBottomLeftRadius: '10px' }}>
-          {retailer.discountPercent > 0 ? `${retailer.discountPercent}% OFF` : 'DEAL'}
+      {badgeText && (
+        <div className="absolute top-0 right-0 z-10">
+          <div className="relative px-3 py-1 text-[10px] font-bold text-white" style={{ background: 'linear-gradient(135deg, #10b981, #059669)', borderBottomLeftRadius: '10px' }}>
+            {badgeText}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Card content */}
       <div className="pt-6 pb-3 px-4">
         {/* Logo area */}
         <div className="flex flex-col items-center">
-          <div className="relative">
+          <button
+            type="button"
+            onClick={() => { if (shopUrl) onShop(shopUrl); }}
+            className={`relative focus:outline-none focus-visible:ring-2 focus-visible:ring-[#118bdd]/60 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d1117] ${shopUrl ? 'cursor-pointer' : 'cursor-default'}`}
+            aria-label={`Shop ${retailer.name}`}
+          >
             {retailer.logoUrl ? (
               <div className="w-20 h-20 sm:w-[90px] sm:h-[90px] rounded-2xl overflow-hidden border-2 border-white/[0.08] shadow-lg shadow-black/20 p-2" style={{ background: 'rgba(255,255,255,0.05)' }}>
                 <img src={retailer.logoUrl} alt={retailer.name} className="w-full h-full rounded-xl object-contain" />
@@ -1025,19 +1262,22 @@ function RetailerCard({ retailer, copiedId, onShop, onShare, onCopy }: {
                 <span className="text-white font-black text-2xl">{retailer.name.charAt(0)}</span>
               </div>
             )}
-          </div>
-          <h3 className="text-white text-sm sm:text-base font-semibold mt-3 text-center truncate w-full">{retailer.name}</h3>
-          <div className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded-full" style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.15))', border: '1px solid rgba(16,185,129,0.2)' }}>
-            <Percent className="w-3 h-3 text-emerald-400" />
-            <span className="text-[11px] font-bold text-emerald-400">{retailer.discountText || `Up to ${retailer.discountPercent}% off`}</span>
-          </div>
+          </button>
+          <h3 className="text-white text-sm sm:text-base font-semibold mt-3 text-center w-full leading-tight break-words whitespace-normal min-h-[2.5rem] flex items-center justify-center">
+            {retailer.name}
+          </h3>
+          {retailer.discountText?.trim() && (
+            <div className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded-full" style={{ background: 'linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.15))', border: '1px solid rgba(16,185,129,0.2)' }}>
+              <span className="text-[11px] font-bold text-emerald-400">{retailer.discountText.trim()}</span>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Action buttons */}
       <div className="px-4 pb-4 space-y-2">
         <button
-          onClick={() => onShop(retailer.websiteUrl || retailer.affiliateLink)}
+          onClick={() => { if (shopUrl) onShop(shopUrl); }}
           className="w-full h-10 rounded-xl text-sm font-bold text-white inline-flex items-center justify-center gap-1.5 transition-all hover:shadow-lg hover:shadow-blue-500/20 active:scale-[0.98]"
           style={{ background: 'linear-gradient(135deg, #118bdd, #6366f1)' }}
         >
@@ -1084,3 +1324,4 @@ function EmptyState({ message, sub }: { message: string; sub: string }) {
     </div>
   );
 }
+

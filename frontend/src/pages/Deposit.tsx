@@ -21,9 +21,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 
 export default function Deposit() {
   const navigate = useNavigate();
-  const { user, isAuthenticated, logout } = useAuthStore();
+  const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
   const { wallet, loadWallet } = useWalletStore();
   const syncKey = useSyncRefreshKey();
+  const settings = Database.getSettings();
+  const displayUser = impersonatedUser || user;
 
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [selectedMethod, setSelectedMethod] = useState<PaymentMethod | null>(null);
@@ -51,12 +53,12 @@ export default function Deposit() {
     setPaymentMethods(methods);
     
     // Load user payments
-    if (user) {
-      loadWallet(user.id);
-      const payments = Database.getUserPayments(user.id);
+    if (displayUser) {
+      loadWallet(displayUser.id);
+      const payments = Database.getUserPayments(displayUser.id);
       setUserPayments(payments);
     }
-  }, [isAuthenticated, user, navigate, loadWallet, syncKey]);
+  }, [isAuthenticated, displayUser, navigate, loadWallet, syncKey]);
 
   const handleCopy = async (text: string, field: string) => {
     const success = await copyToClipboard(text);
@@ -79,7 +81,7 @@ export default function Deposit() {
   };
 
   const handleSubmit = async () => {
-    if (!user || !selectedMethod || !amount) return;
+    if (!displayUser || !selectedMethod || !amount) return;
     
     const numAmount = parseFloat(amount);
     if (isNaN(numAmount) || numAmount <= 0) {
@@ -105,7 +107,7 @@ export default function Deposit() {
     // Create payment record
     const payment: Payment = {
       id: `pay_${Date.now()}`,
-      userId: user.id,
+      userId: displayUser.id,
       amount: numAmount,
       method: selectedMethod.type,
       methodName: selectedMethod.name,
@@ -119,7 +121,7 @@ export default function Deposit() {
     Database.createPayment(payment);
     
     // Refresh payments
-    const payments = Database.getUserPayments(user.id);
+    const payments = Database.getUserPayments(displayUser.id);
     setUserPayments(payments);
 
     setIsSubmitting(false);
@@ -162,7 +164,7 @@ export default function Deposit() {
     }
   };
 
-  if (!user) return null;
+  if (!displayUser) return null;
 
   return (
     <div className="deposit-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
@@ -183,7 +185,14 @@ export default function Deposit() {
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center">
                   <Wallet className="w-5 h-5 text-white" />
                 </div>
-                <span className="text-base sm:text-xl font-bold text-white">Deposit Funds</span>
+                <div>
+                  <span className="text-base sm:text-xl font-bold text-white">Deposit Funds</span>
+                  {impersonatedUser && (
+                    <p className="text-[11px] text-amber-300/90 mt-0.5">
+                      Viewing as {impersonatedUser.fullName} ({impersonatedUser.userId})
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
             
@@ -554,7 +563,7 @@ export default function Deposit() {
                 <span className="font-medium">Processing Time</span>
               </div>
               <p className="text-white/60 text-sm">
-                {selectedMethod?.processingTime || 'Within 24 hours'}
+                {selectedMethod?.processingTime?.trim() || `Within ${settings.depositProcessingHours} hours`}
               </p>
             </div>
             <p className="text-white/60 text-sm">

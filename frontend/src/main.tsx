@@ -70,7 +70,7 @@ async function bootstrap() {
                   try {
                     const wallets = JSON.parse(localStorage.getItem('mlm_wallets') || '[]');
                     const resetWallets = wallets.map((w: any) => ({
-                      ...w, incomeWallet: 0, matrixWallet: 0, totalReceived: 0,
+                      ...w, incomeWallet: 0, royaltyWallet: 0, matrixWallet: 0, totalReceived: 0,
                       totalGiven: 0, giveHelpLocked: 0, lockedIncomeWallet: 0,
                     }));
                     localStorage.setItem('mlm_wallets', JSON.stringify(resetWallets));

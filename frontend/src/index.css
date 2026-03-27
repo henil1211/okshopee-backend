@@ -1072,7 +1072,6 @@ h1, h2, h3, h4, h5, h6 {
   background: linear-gradient(135deg, var(--dark-surface) 0%, var(--dark-surface-light) 100%);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 1rem;
-  padding: 1.5rem;
   position: relative;
   overflow: hidden;
 }
@@ -1206,5 +1205,19 @@ h1, h2, h3, h4, h5, h6 {
   
   .no-print {
     display: none !important;
+  }
+}
+
+/* Toast placement + safe area support */
+.toaster {
+  top: calc(env(safe-area-inset-top) + 72px) !important;
+  bottom: auto !important;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+@media (min-width: 768px) {
+  .toaster {
+    top: 88px !important;
   }
 }

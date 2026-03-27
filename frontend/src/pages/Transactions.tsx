@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+/* eslint-disable react-hooks/set-state-in-effect */
+/* eslint-disable react-hooks/preserve-manual-memoization */
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuthStore, useSyncRefreshKey } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -15,11 +17,22 @@ import { toast } from 'sonner';
 
 export default function Transactions() {
   const navigate = useNavigate();
-  const { user, isAuthenticated, logout } = useAuthStore();
+  const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
   const syncKey = useSyncRefreshKey();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [filterType, setFilterType] = useState<'all' | 'help' | 'direct_income' | 'others'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'help' | 'direct_income' | 'others' | 'deposit' | 'withdrawal'>('all');
   const [levelFilter, setLevelFilter] = useState<'all' | number>('all');
+  const displayUser = useMemo(() => {
+    const activeUser = impersonatedUser || user;
+    if (!activeUser) return null;
+    return Database.getUserByUserId(activeUser.userId) || Database.getUserById(activeUser.id) || activeUser;
+  }, [impersonatedUser, user]);
+
+  const loadTransactions = useCallback(() => {
+    if (!displayUser) return;
+    const userTransactions = Database.getUserTransactions(displayUser.id);
+    setTransactions(userTransactions);
+  }, [displayUser]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -27,22 +40,17 @@ export default function Transactions() {
       return;
     }
 
-    if (user) {
-      loadTransactions();
-    }
-  }, [isAuthenticated, user, navigate, syncKey]);
-
-  const loadTransactions = () => {
-    if (!user) return;
-    const userTransactions = Database.getUserTransactions(user.id);
-    setTransactions(userTransactions);
-  };
+    loadTransactions();
+  }, [isAuthenticated, navigate, loadTransactions, syncKey]);
 
   const handleLogout = () => {
     logout();
     navigate('/login');
     toast.success('Logged out successfully');
   };
+
+  const getVisibleTransactionDescription = (description: string | undefined) =>
+    String(description || '').replace(/\s*\[Redemption:[^\]]+\]\s*/g, '').trim();
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -57,13 +65,10 @@ export default function Transactions() {
     }
   };
 
-  const isReleaseUnlockEntry = (tx: Transaction) => {
+  const isWithdrawalRefundEntry = (tx: Transaction) => {
     const desc = (tx.description || '').toLowerCase();
-    return tx.type === 'receive_help'
-      && (
-        desc.startsWith('released locked receive help at level')
-        || desc.startsWith('unlocked locked receive help at level')
-      );
+    return tx.type === 'income_transfer'
+      && desc.startsWith('withdrawal request rejected. amount refunded to income wallet');
   };
 
   // Pre-build lookup maps for faster transaction processing
@@ -90,7 +95,7 @@ export default function Transactions() {
 
       let depth = 0;
       let current7DigitId = fromUser.userId;
-      const sponsor7DigitId = user?.userId;
+      const sponsor7DigitId = displayUser?.userId;
 
       while (current7DigitId) {
         const node = nodeMap.get(current7DigitId);
@@ -159,8 +164,78 @@ export default function Transactions() {
   };
 
   const getDisplayAmount = (tx: Transaction) => {
-    const absAmount = Math.abs(tx.amount);
-    return `${isOutflowTransaction(tx) ? '-' : '+'}${formatCurrency(absAmount)}`;
+    const rawAmount = Number.isFinite(tx.displayAmount) ? (tx.displayAmount as number) : tx.amount;
+    const absAmount = Math.abs(rawAmount || 0);
+    const sign = isOutflowTransaction(tx) ? '-' : '+';
+    return `${sign}${formatCurrency(absAmount)}`;
+  };
+
+  const renderWithdrawalMeta = (tx: Transaction) => {
+    if (tx.type !== 'withdrawal') return null;
+    const gross = Math.abs(tx.amount || 0);
+    const fee = Number(tx.fee || 0);
+    const net = Number(tx.netAmount || Math.max(0, gross - fee));
+
+    return (
+      <div className="mt-2 space-y-1">
+        <p className="text-xs text-white/50">
+          Gross: {formatCurrency(gross)} | Fee: {formatCurrency(fee)} | Net: {formatCurrency(net)}
+        </p>
+        {tx.walletAddress && (
+          <p className="text-xs text-white/45 break-all">Wallet: {tx.walletAddress}</p>
+        )}
+        {tx.adminReason && (
+          <p className={`text-xs ${tx.status === 'failed' ? 'text-red-300/90' : 'text-white/65'}`}>
+            Reason: {tx.adminReason}
+          </p>
+        )}
+        {tx.adminReceipt && (
+          <div className="pt-1">
+            {tx.adminReceipt.startsWith('data:image') ? (
+              <img
+                src={tx.adminReceipt}
+                alt="Withdrawal proof"
+                className="inline-block max-h-44 max-w-full w-auto h-auto rounded border border-white/10 bg-white/5"
+              />
+            ) : tx.adminReceipt.startsWith('data:application/pdf') ? (
+              <a
+                href={tx.adminReceipt}
+                download={`withdrawal-proof-${tx.id}.pdf`}
+                className="text-xs text-[#8fcfff] underline"
+              >
+                Download admin receipt (PDF)
+              </a>
+            ) : (
+              <a
+                href={tx.adminReceipt}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-[#8fcfff] underline break-all"
+              >
+                Open admin receipt
+              </a>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderDepositMeta = (tx: Transaction) => {
+    if (tx.type !== 'deposit') return null;
+    return (
+      <div className="mt-2 space-y-1">
+        <p className="text-xs text-emerald-300/85">
+          Deposit Amount: {formatCurrency(Math.abs(Number(tx.amount || 0)))}
+        </p>
+      </div>
+    );
+  };
+
+  const renderTransactionMeta = (tx: Transaction) => {
+    if (tx.type === 'withdrawal') return renderWithdrawalMeta(tx);
+    if (tx.type === 'deposit') return renderDepositMeta(tx);
+    return null;
   };
 
   const lockedIncomeStateByTxId = useMemo(() => {
@@ -281,7 +356,7 @@ export default function Transactions() {
       }
 
       if (tx.type === 'give_help' && desc.includes('from locked income')) {
-        const preferredLevel = level || 1;
+        const preferredLevel = Math.max(1, (level || 1) - 1);
         let remaining = Math.abs(tx.amount);
         // Mirror backend consumption order: qualification-lock first, then first-two lock.
         remaining = consumeQueueAcrossLevels(qualificationByLevel, preferredLevel, remaining);
@@ -299,14 +374,21 @@ export default function Transactions() {
   }, [transactions]);
 
   const filteredTransactions = useMemo(() => {
-    let rows = transactions.filter((tx) => !isReleaseUnlockEntry(tx));
+    let rows = transactions;
 
     if (filterType === 'help') {
       rows = rows.filter((tx) => tx.type === 'give_help' || tx.type === 'receive_help');
     } else if (filterType === 'direct_income') {
       rows = rows.filter((tx) => tx.type === 'direct_income');
     } else if (filterType === 'others') {
-      rows = rows.filter((tx) => tx.type === 'p2p_transfer' || tx.type === 'income_transfer');
+      rows = rows.filter((tx) =>
+        tx.type === 'p2p_transfer'
+        || (tx.type === 'income_transfer' && !isWithdrawalRefundEntry(tx))
+      );
+    } else if (filterType === 'deposit') {
+      rows = rows.filter((tx) => tx.type === 'deposit');
+    } else if (filterType === 'withdrawal') {
+      rows = rows.filter((tx) => tx.type === 'withdrawal' || isWithdrawalRefundEntry(tx));
     }
 
     if (levelFilter !== 'all') {
@@ -319,7 +401,7 @@ export default function Transactions() {
     return rows;
   }, [transactions, filterType, levelFilter]);
 
-  if (!user) return null;
+  if (!displayUser) return null;
 
   return (
     <div className="transactions-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
@@ -340,7 +422,14 @@ export default function Transactions() {
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#118bdd] to-[#004e9a] flex items-center justify-center">
                   <RefreshCw className="w-5 h-5 text-white" />
                 </div>
-                <span className="text-base sm:text-xl font-bold text-white">My Transactions</span>
+                <div>
+                  <span className="text-base sm:text-xl font-bold text-white">My Transactions</span>
+                  {impersonatedUser && (
+                    <p className="text-[11px] text-amber-300/90 mt-0.5">
+                      Viewing as {impersonatedUser.fullName} ({impersonatedUser.userId})
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -374,12 +463,14 @@ export default function Transactions() {
             <div className="flex w-full sm:w-auto flex-col sm:flex-row sm:items-center gap-3">
               <select
                 value={filterType}
-                onChange={(e) => setFilterType(e.target.value as 'all' | 'help' | 'direct_income' | 'others')}
+                onChange={(e) => setFilterType(e.target.value as 'all' | 'help' | 'direct_income' | 'others' | 'deposit' | 'withdrawal')}
                 className="h-9 px-3 rounded-md bg-[#1f2937] border border-white/10 text-white text-sm w-full sm:w-auto"
               >
                 <option value="all">All</option>
-                <option value="help">Help (Give + Receive)</option>
+                <option value="help">Help (Receive + Give)</option>
                 <option value="direct_income">Direct Sponsor Income</option>
+                <option value="deposit">Deposit</option>
+                <option value="withdrawal">Withdrawal</option>
                 <option value="others">Others (P2P / Transfer)</option>
               </select>
               <select
@@ -432,7 +523,8 @@ export default function Transactions() {
                         {getStatusBadge(tx.status)}
                       </div>
                     </div>
-                    <p className="text-sm text-white/65 break-words">{tx.description || '-'}</p>
+                    <p className="text-sm text-white/65 break-words">{getVisibleTransactionDescription(tx.description) || '-'}</p>
+                    {renderTransactionMeta(tx)}
                   </div>
                 );
               })}
@@ -486,8 +578,9 @@ export default function Transactions() {
                             {getDisplayAmount(tx)}
                           </span>
                         </td>
-                        <td className="py-3 px-4 text-white/60 text-sm max-w-xs truncate">
-                          {tx.description}
+                        <td className="py-3 px-4 text-white/60 text-sm max-w-sm">
+                          <p className="break-words">{getVisibleTransactionDescription(tx.description) || '-'}</p>
+                          {renderTransactionMeta(tx)}
                         </td>
                         <td className="py-3 px-4">
                           {getStatusBadge(tx.status)}

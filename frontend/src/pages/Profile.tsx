@@ -7,9 +7,17 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import MobileBottomNav from '@/components/MobileBottomNav';
-import { ArrowLeft, UserCog, Mail, Phone, Shield, Key, RefreshCw, Eye, EyeOff } from 'lucide-react';
+import { ArrowLeft, UserCog, Mail, Phone, Shield, Key, RefreshCw, Eye, EyeOff, Globe } from 'lucide-react';
 import { toast } from 'sonner';
-import { isValidPhoneNumber, normalizePhoneNumber } from '@/utils/helpers';
+import {
+  getDialCodeForCountry,
+  getPasswordRequirementsText,
+  getTransactionPasswordRequirementsText,
+  isStrongPassword,
+  isValidPhoneNumberForCountry,
+  isValidTransactionPassword,
+  normalizePhoneNumber
+} from '@/utils/helpers';
 
 export default function Profile() {
   const navigate = useNavigate();
@@ -59,6 +67,18 @@ export default function Profile() {
   const [showChangePhone, setShowChangePhone] = useState(false);
   const [showChangeUsdt, setShowChangeUsdt] = useState(false);
 
+  const applyDialCode = (value: string, countryName?: string | null) => {
+    const dial = getDialCodeForCountry(countryName);
+    if (!dial) return value;
+    const dialDigits = dial.replace(/\D/g, '');
+    const digits = value.replace(/\D/g, '');
+    let localDigits = digits;
+    if (digits.startsWith(dialDigits)) {
+      localDigits = digits.slice(dialDigits.length);
+    }
+    return dial + (localDigits ? ` ${localDigits}` : '');
+  };
+
   useEffect(() => {
     if (!isAuthenticated) {
       navigate('/login');
@@ -68,7 +88,7 @@ export default function Profile() {
     setContactData({
       email: displayUser.email,
       newEmail: '',
-      phone: displayUser.phone || '',
+      phone: applyDialCode(displayUser.phone || '', displayUser.country),
       newPhone: '',
       usdtAddress: displayUser.usdtAddress || '',
       newUsdtAddress: '',
@@ -121,8 +141,8 @@ export default function Profile() {
       toast.error('Enter a valid new email address');
       return;
     }
-    if (contactData.newPhone.trim() && !isValidPhoneNumber(contactData.newPhone)) {
-      toast.error('Enter a valid new mobile number');
+    if (contactData.newPhone.trim() && !isValidPhoneNumberForCountry(contactData.newPhone, displayUser.country)) {
+      toast.error('Enter a valid new mobile number for your country');
       return;
     }
     if (!verifyTransactionPassword(displayUser.id, contactData.transactionPassword)) {
@@ -198,8 +218,8 @@ export default function Profile() {
         return;
       }
     }
-    if (passwordData.newPassword.length < 6) {
-      toast.error('New password must be at least 6 characters');
+    if (!isStrongPassword(passwordData.newPassword)) {
+      toast.error(getPasswordRequirementsText());
       return;
     }
     if (passwordData.newPassword === displayUser.password) {
@@ -247,8 +267,8 @@ export default function Profile() {
         return;
       }
     }
-    if (txPasswordData.newTxPassword.length < 4) {
-      toast.error('New transaction password must be at least 4 characters');
+    if (!isValidTransactionPassword(txPasswordData.newTxPassword)) {
+      toast.error(getTransactionPasswordRequirementsText());
       return;
     }
     if (txPasswordData.newTxPassword === (displayUser.transactionPassword || '')) {
@@ -368,6 +388,17 @@ export default function Profile() {
                 )}
               </div>
               <div className="space-y-2">
+                <Label className="text-white/80">Country</Label>
+                <div className="relative">
+                  <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
+                  <Input
+                    value={displayUser?.country || 'Not set'}
+                    disabled
+                    className="pl-10 bg-[#1f2937]/50 border-white/5 text-white/50 cursor-not-allowed"
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <Label className="text-white/80">Mobile Number</Label>
                   <button
@@ -394,7 +425,7 @@ export default function Profile() {
                     <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-amber-400/60" />
                     <Input
                       value={contactData.newPhone}
-                      onChange={(e) => setContactData({ ...contactData, newPhone: e.target.value })}
+                      onChange={(e) => setContactData({ ...contactData, newPhone: applyDialCode(e.target.value, displayUser?.country) })}
                       placeholder="Enter new mobile number"
                       className="pl-10 bg-[#1f2937] border-amber-500/30 text-white focus:border-amber-400"
                     />
@@ -555,6 +586,7 @@ export default function Profile() {
                 </button>
               </div>
             </div>
+            <p className="text-xs text-white/40">{getPasswordRequirementsText()}</p>
             {forgotLoginPassword && (
               <div className="flex flex-col sm:flex-row gap-2">
                 <Input
@@ -646,6 +678,7 @@ export default function Profile() {
                 </button>
               </div>
             </div>
+            <p className="text-xs text-white/40">{getTransactionPasswordRequirementsText()}</p>
             {forgotTxPassword && (
               <div className="flex flex-col sm:flex-row gap-2">
                 <Input

@@ -9,11 +9,11 @@ import {
   TrendingUp, Users, ArrowUpRight, ArrowDownLeft,
   Copy, CheckCircle, RefreshCw, Bell, AlertCircle,
   DollarSign, UserPlus, BarChart3, PlusCircle, LogOut, Shield,
-  Ticket, Plane, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, Train, CarFront
+  Ticket, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, X
 } from 'lucide-react';
 import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel, calculateTimeRemainingWithDays } from '@/utils/helpers';
 import { helpDistributionTable } from '@/db';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import MobileBottomNav from '@/components/MobileBottomNav';
@@ -21,33 +21,51 @@ import BrandLogo from '@/components/BrandLogo';
 import { toast } from 'sonner';
 import Database from '@/db';
 
+const ROYALTY_MILESTONES = [
+  { qualifiedLevel: 3, percent: 5 },
+  { qualifiedLevel: 4, percent: 10 },
+  { qualifiedLevel: 5, percent: 15 },
+  { qualifiedLevel: 6, percent: 16 },
+  { qualifiedLevel: 7, percent: 17 },
+  { qualifiedLevel: 8, percent: 18 },
+  { qualifiedLevel: 9, percent: 19 }
+] as const;
+
+function getRoyaltyExplanation(milestone: (typeof ROYALTY_MILESTONES)[number]) {
+  const monthlySystemFee = 10000;
+  const eligibleUsers = 10;
+  const royaltyPool = (monthlySystemFee * milestone.percent) / 100;
+  const perUserRoyalty = royaltyPool / eligibleUsers;
+
+  return {
+    title: `Level ${milestone.qualifiedLevel} Royalty Income Logic`,
+    qualifiedLevel: milestone.qualifiedLevel,
+    percent: milestone.percent,
+    monthlySystemFee,
+    eligibleUsers,
+    royaltyPool,
+    perUserRoyalty
+  };
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const { user, isAuthenticated, logout, impersonatedUser, endImpersonation, verifyTransactionPassword } = useAuthStore();
-  const { wallet, transactions, loadWallet, transferFunds, withdraw } = useWalletStore();
+  const { wallet, transactions, loadWallet, withdraw } = useWalletStore();
   const { loadUserDownline, getDownlineStats, loadMatrix } = useMatrixStore();
   const { sendOtp, verifyOtp } = useOtpStore();
-  const { notifications, unreadCount, loadNotifications, markAsRead } = useNotificationStore();
+  const { unreadCount, loadNotifications } = useNotificationStore();
   const syncKey = useSyncRefreshKey();
 
   const [isLoading, setIsLoading] = useState(false);
-  const [showNotifications, setShowNotifications] = useState(false);
-  const notifRef = useRef<HTMLDivElement>(null);
-  const [showTransferDialog, setShowTransferDialog] = useState(false);
+  const notificationsButtonRef = useRef<HTMLButtonElement>(null);
   const [showWithdrawDialog, setShowWithdrawDialog] = useState(false);
   const [showDirectReferralsDialog, setShowDirectReferralsDialog] = useState(false);
   const [showLockedIncomeDialog, setShowLockedIncomeDialog] = useState(false);
+  const [showRoyaltyInfoDialog, setShowRoyaltyInfoDialog] = useState(false);
   const [directReferralSearch, setDirectReferralSearch] = useState('');
-  const [transferData, setTransferData] = useState<{ userId: string; amount: string; source: 'fund' | 'income' }>({
-    userId: '',
-    amount: '',
-    source: 'fund'
-  });
-  const [transferTransactionPassword, setTransferTransactionPassword] = useState('');
-  const [transferOtp, setTransferOtp] = useState('');
-  const [isSendingTransferOtp, setIsSendingTransferOtp] = useState(false);
-  const [isTransferOtpSent, setIsTransferOtpSent] = useState(false);
-  const [withdrawData, setWithdrawData] = useState({ amount: '', address: '' });
+  const [directReferralSort, setDirectReferralSort] = useState<'desc' | 'asc'>('desc');
+  const [withdrawData, setWithdrawData] = useState({ amount: '', address: '', qrCode: '' });
   const [withdrawTransactionPassword, setWithdrawTransactionPassword] = useState('');
   const [withdrawOtp, setWithdrawOtp] = useState('');
   const [isSendingWithdrawOtp, setIsSendingWithdrawOtp] = useState(false);
@@ -56,10 +74,13 @@ export default function Dashboard() {
   const settings = Database.getSettings();
   const withdrawalFeePercent = settings.withdrawalFeePercent;
 
-  // External transfer = fund wallet (always needs recipient) OR income wallet with a recipient specified
-  const isExternalTransfer = transferData.source === 'fund' || transferData.userId.trim().length > 0;
-
-  const displayUser = impersonatedUser || user;
+  const displayUser = useMemo(() => {
+    const activeUser = impersonatedUser || user;
+    if (!activeUser) return null;
+    return Database.getUserByUserId(activeUser.userId) || Database.getUserById(activeUser.id) || activeUser;
+  }, [impersonatedUser, user]);
+  const getVisibleTransactionDescription = (description: string | undefined) =>
+    String(description || '').replace(/\s*\[Redemption:[^\]]+\]\s*/g, '').trim();
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -76,84 +97,21 @@ export default function Dashboard() {
     }
   }, [isAuthenticated, displayUser, navigate, loadWallet, loadMatrix, loadUserDownline, loadNotifications, syncKey]);
 
-  // Close notification dropdown on outside click
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (notifRef.current && !notifRef.current.contains(e.target as Node)) {
-        setShowNotifications(false);
-      }
-    };
-    if (showNotifications) document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showNotifications]);
-
-  const resetTransferSecurity = () => {
-    setTransferTransactionPassword('');
-    setTransferOtp('');
-    setIsSendingTransferOtp(false);
-    setIsTransferOtpSent(false);
+  const openWithdrawDialog = () => {
+    const fallbackAddress = String(displayUser?.usdtAddress || '').trim();
+    setWithdrawData((prev) => ({
+      ...prev,
+      address: prev.address || fallbackAddress
+    }));
+    setShowWithdrawDialog(true);
   };
 
-  const handleSendTransferOtp = async () => {
-    if (!displayUser) return;
-    setIsSendingTransferOtp(true);
-    const result = await sendOtp(displayUser.id, displayUser.email, 'transaction');
-    setIsSendingTransferOtp(false);
-    if (result.success) {
-      setIsTransferOtpSent(true);
-      toast.success('OTP sent to your registered email');
-    } else {
-      toast.error(result.message);
-    }
-  };
-
-  const handleTransfer = async () => {
-    if (!displayUser) return;
-    const amount = parseFloat(transferData.amount);
-    if (isNaN(amount) || amount <= 0) {
-      toast.error('Invalid amount');
+  const handleWithdrawDialogOpenChange = (open: boolean) => {
+    if (open) {
+      openWithdrawDialog();
       return;
     }
-
-    const targetId = transferData.userId.trim();
-    if (transferData.source === 'fund') {
-      if (targetId.length !== 7) {
-        toast.error('Recipient User ID must be 7 digits');
-        return;
-      }
-    } else if (targetId.length > 0 && targetId.length !== 7) {
-      toast.error('Recipient User ID must be 7 digits');
-      return;
-    }
-
-    // For external transfers, validate security fields on the frontend too
-    if (isExternalTransfer) {
-      if (!transferTransactionPassword.trim()) {
-        toast.error('Transaction password is required for external transfers');
-        return;
-      }
-      if (!transferOtp.trim()) {
-        toast.error('OTP is required for external transfers');
-        return;
-      }
-    }
-
-    const security = isExternalTransfer
-      ? { transactionPassword: transferTransactionPassword, otp: transferOtp }
-      : undefined;
-
-    setIsLoading(true);
-    const result = await transferFunds(displayUser.id, targetId, amount, transferData.source, security);
-    setIsLoading(false);
-
-    if (result.success) {
-      toast.success(result.message);
-      setShowTransferDialog(false);
-      setTransferData({ userId: '', amount: '', source: transferData.source });
-      resetTransferSecurity();
-    } else {
-      toast.error(result.message);
-    }
+    setShowWithdrawDialog(false);
   };
 
   const handleWithdraw = async () => {
@@ -161,6 +119,20 @@ export default function Dashboard() {
     const amount = parseFloat(withdrawData.amount);
     if (isNaN(amount) || amount <= 0) {
       toast.error('Invalid amount');
+      return;
+    }
+    const amountInCents = Math.round(amount * 100);
+    if (amountInCents < 1000) {
+      toast.error('Minimum withdrawal amount is $10');
+      return;
+    }
+    if (amountInCents % 1000 !== 0) {
+      toast.error('Withdrawal amount must be in multiples of $10 (10, 20, 30...)');
+      return;
+    }
+    const payoutAddress = String(withdrawData.address || '').trim();
+    if (!payoutAddress) {
+      toast.error('USDT (BEP20) address is required');
       return;
     }
     if (!verifyTransactionPassword(displayUser.id, withdrawTransactionPassword)) {
@@ -180,18 +152,46 @@ export default function Dashboard() {
     }
 
     setIsLoading(true);
-    const result = await withdraw(displayUser.id, amount, withdrawData.address);
+    const result = await withdraw(displayUser.id, amount, payoutAddress, withdrawData.qrCode || undefined);
     setIsLoading(false);
 
     if (result.success) {
       toast.success(result.message);
       setShowWithdrawDialog(false);
-      setWithdrawData({ amount: '', address: '' });
+      setWithdrawData({ amount: '', address: payoutAddress, qrCode: '' });
       setWithdrawTransactionPassword('');
       setWithdrawOtp('');
       setIsWithdrawOtpSent(false);
     } else {
       toast.error(result.message);
+    }
+  };
+
+  const handleWithdrawQrUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please upload a valid image for QR code');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('QR image must be under 2MB');
+      return;
+    }
+
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Failed to read QR image'));
+        reader.readAsDataURL(file);
+      });
+      setWithdrawData((prev) => ({ ...prev, qrCode: dataUrl }));
+      toast.success('QR code attached');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to read QR image');
     }
   };
 
@@ -224,17 +224,23 @@ export default function Dashboard() {
 
   const getReferralShareMessage = () => {
     const link = getReferralLink();
+    const contactLines = displayUser?.phone
+      ? ['', displayUser.phone.trim(), 'Contact for ACTIVATION PIN☝️']
+      : [];
     return [
       '*New Earning Opportunity !*',
       '',
-      '*ReferNex* = Smart Shopping + Helping System + Referral Income.',
+      '_ReferNex - Next Generation Referral Program_',
+      '',
+      '*ReferNex* = Smart Shopping + Referral Income + Helping System.',
       '',
       'Simple process, Transparent system, Real growth.',
       '',
-      '*Join here :*',
+      '*Registration Link :*',
       link,
       '',
-      '*Note :* A valid *Activation Pin* is required to complete registration.'
+      '*Note :* A valid *Activation Pin* is required to complete registration.',
+      ...contactLines
     ].join('\n');
   };
 
@@ -245,15 +251,13 @@ export default function Dashboard() {
   };
 
   const shareReferral = async () => {
-    const link = getReferralLink();
     const message = getReferralShareMessage();
 
     try {
       if (navigator.share) {
         await navigator.share({
           title: 'ReferNex - New Earning Opportunity',
-          text: message,
-          url: link
+          text: message
         });
         return;
       }
@@ -283,17 +287,40 @@ export default function Dashboard() {
   const downlineStats = displayUser ? getDownlineStats(displayUser.userId) : { left: 0, right: 0, leftActive: 0, rightActive: 0 };
   const sponsorUser = displayUser?.sponsorId ? Database.getUserByUserId(displayUser.sponsorId) : null;
   const directReferralUsers = displayUser
-    ? Database.getUsers()
-      .filter(u => u.sponsorId === displayUser.userId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    ? (() => {
+        const rawUsers = Database.getUsers().filter((u) => u.sponsorId === displayUser.userId);
+        const seen = new Set<string>();
+        return rawUsers
+          .map((u) => Database.getUserByUserId(u.userId) || u)
+          .filter((u) => {
+            if (seen.has(u.userId)) return false;
+            seen.add(u.userId);
+            return true;
+          });
+      })()
     : [];
   const filteredDirectReferrals = directReferralUsers.filter((u) =>
     u.userId.includes(directReferralSearch.trim()) ||
     u.fullName.toLowerCase().includes(directReferralSearch.trim().toLowerCase())
   );
+  const sortedDirectReferrals = [...filteredDirectReferrals].sort((a, b) => {
+    const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    return directReferralSort === 'asc' ? diff : -diff;
+  });
   const currentLevelDisplay = displayUser ? Database.getCurrentMatrixLevel(displayUser.id) : 0;
+  const qualifiedLevel = displayUser ? Database.getQualifiedLevel(displayUser.id) : 0;
   const lockedIncomeBreakdown = displayUser ? Database.getLockedIncomeBreakdown(displayUser.id) : [];
   const effectiveDirectCount = displayUser ? Database.getEffectiveDirectCount(displayUser) : 0;
+  const currentRoyaltyMilestone = ROYALTY_MILESTONES
+    .filter((milestone) => qualifiedLevel >= milestone.qualifiedLevel)
+    .slice(-1)[0] || null;
+  const nextRoyaltyMilestone = ROYALTY_MILESTONES.find((milestone) => qualifiedLevel < milestone.qualifiedLevel) || null;
+  const hasUnlockedRoyalty = !!currentRoyaltyMilestone;
+  const activeRoyaltyMilestone = currentRoyaltyMilestone || ROYALTY_MILESTONES[0];
+  const royaltyExplanation = useMemo(
+    () => getRoyaltyExplanation(activeRoyaltyMilestone),
+    [activeRoyaltyMilestone]
+  );
 
   // Direct referral deadline countdown logic
   const REQUIRED_INITIAL_DIRECTS = 2;
@@ -363,40 +390,36 @@ export default function Dashboard() {
 
   if (!displayUser) return null;
 
-  const nationalTourQualified = Database.isTourQualified(displayUser.id, 4);
+  const familyNationalTourQualified = Database.isTourQualified(displayUser.id, 4);
   const internationalTourQualified = Database.isTourQualified(displayUser.id, 5);
-  const familyTourQualified = Database.isTourQualified(displayUser.id, 6);
-
-  // Check achievements
-  const achievements = [
-    {
-      key: 'nationalTour',
-      label: 'National Tour',
-      level: 4,
-      icon: Train,
-      achieved: nationalTourQualified,
-      color: 'text-blue-400',
-      bgColor: 'bg-blue-500/20'
-    },
-    {
-      key: 'internationalTour',
-      label: 'International Tour',
-      level: 5,
-      icon: Plane,
-      achieved: internationalTourQualified,
-      color: 'text-purple-400',
-      bgColor: 'bg-purple-500/20'
-    },
-    {
-      key: 'familyTour',
-      label: 'Luxurious Dream Car',
-      level: 6,
-      icon: CarFront,
-      achieved: familyTourQualified,
-      color: 'text-pink-400',
-      bgColor: 'bg-pink-500/20'
+  const dreamCarQualified = Database.isTourQualified(displayUser.id, 6);
+  const tourAchievementStatus = dreamCarQualified
+    ? {
+      currentStatus: 'Congratulations! You Have Achieved All of the Benefits.',
+      nextMilestone: 'All Benefits Achieved',
+      requirement: 'You have successfully completed all available tour achievement milestones.',
+      completed: true
     }
-  ];
+    : internationalTourQualified
+      ? {
+        currentStatus: 'International Tour Package Achieved',
+        nextMilestone: 'Your Dream Car worth $ 50000',
+        requirement: 'You must receive help from all users in Level 6 and complete direct referral qualification.',
+        completed: false
+      }
+      : familyNationalTourQualified
+        ? {
+          currentStatus: 'Family National Tour Package Achieved',
+          nextMilestone: 'International Tour Package (3N/4D)',
+          requirement: 'You must receive help from all users in Level 5 and complete direct referral qualification.',
+          completed: false
+        }
+        : {
+          currentStatus: 'N/A',
+          nextMilestone: 'Family National Tour Package (2N/3D)',
+          requirement: 'You must receive help from all users in Level 4 and complete direct referral qualification.',
+          completed: false
+        };
 
   return (
     <div className="dashboard-page min-h-screen bg-slate-50 pb-24 dark:bg-[#0a0e17] md:pb-0">
@@ -433,71 +456,20 @@ export default function Dashboard() {
               )}
 
               {/* Notification Bell */}
-              <div className="relative" ref={notifRef}>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setShowNotifications(!showNotifications)}
-                  className="relative text-slate-500 dark:text-white/60 hover:text-slate-700 dark:hover:text-white"
-                >
-                  <Bell className="w-5 h-5" />
-                  {unreadCount > 0 && (
-                    <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center px-1">
-                      {unreadCount > 99 ? '99+' : unreadCount}
-                    </span>
-                  )}
-                </Button>
-
-                {showNotifications && (
-                  <div className="fixed inset-x-3 top-auto sm:absolute sm:inset-x-auto sm:right-0 sm:top-full mt-2 sm:w-96 max-h-[400px] rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#111827] shadow-2xl z-[100] overflow-hidden">
-                    <div className="px-4 py-3 border-b border-slate-200 dark:border-white/10 flex items-center justify-between">
-                      <p className="text-sm font-semibold text-slate-900 dark:text-white">Notifications</p>
-                      {unreadCount > 0 && (
-                        <span className="text-xs text-white bg-red-500 rounded-full px-2 py-0.5">{unreadCount} new</span>
-                      )}
-                    </div>
-                    <div className="overflow-y-auto max-h-[340px]">
-                      {notifications.length === 0 ? (
-                        <div className="text-center py-10">
-                          <Bell className="w-8 h-8 text-slate-300 dark:text-white/15 mx-auto mb-2" />
-                          <p className="text-sm text-slate-400 dark:text-white/40">No notifications yet</p>
-                        </div>
-                      ) : (
-                        notifications.map((notif) => (
-                          <div
-                            key={notif.id}
-                            onClick={() => {
-                              if (!notif.isRead) markAsRead(notif.id);
-                              // Navigate to support page for support ticket notifications
-                              const ticketMatch = notif.message.match(/TKT-\d{8}-\w+/);
-                              if (ticketMatch && (notif.id.includes('support_reply') || notif.id.includes('support_status'))) {
-                                setShowNotifications(false);
-                                navigate(`/support?ticket=${ticketMatch[0]}`);
-                              }
-                            }}
-                            className={`px-4 py-3 border-b border-slate-100 dark:border-white/5 cursor-pointer transition-colors ${
-                              notif.isRead
-                                ? 'bg-transparent hover:bg-slate-50 dark:hover:bg-white/5'
-                                : 'bg-blue-50/50 dark:bg-[#118bdd]/10 hover:bg-blue-50 dark:hover:bg-[#118bdd]/15'
-                            }`}
-                          >
-                            <div className="flex items-start gap-3">
-                              <div className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${notif.isRead ? 'bg-transparent' : 'bg-[#118bdd]'}`} />
-                              <div className="min-w-0 flex-1">
-                                <p className="text-sm font-medium text-slate-900 dark:text-white">{notif.title}</p>
-                                <p className="text-xs text-slate-500 dark:text-white/50 mt-0.5 line-clamp-2">{notif.message}</p>
-                                <p className="text-[10px] text-slate-400 dark:text-white/30 mt-1">
-                                  {new Date(notif.createdAt).toLocaleString()}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
+              <Button
+                ref={notificationsButtonRef}
+                variant="ghost"
+                size="icon"
+                onClick={() => navigate('/notifications')}
+                className="relative text-slate-500 dark:text-white/60 hover:text-slate-700 dark:hover:text-white"
+              >
+                <Bell className="w-5 h-5" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center px-1">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
                 )}
-              </div>
+              </Button>
 
               <div
                 className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity"
@@ -537,8 +509,8 @@ export default function Dashboard() {
           </p>
         </div>
 
-        {/* Direct Referral Deadline Countdown */}
-        {countdown && !countdown.expired && !hasMetInitialDirectRequirement && (
+        {/* Direct Referral Status */}
+        {!hasMetInitialDirectRequirement && countdown && !countdown.expired && (
           <div className="mb-6 p-4 rounded-xl border border-red-500/30 bg-red-500/10">
             <div className="flex flex-col items-center gap-3">
               <div className="text-center">
@@ -582,6 +554,43 @@ export default function Dashboard() {
                   <span className="text-[10px] text-white/40 mt-1">Sec</span>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {hasMetInitialDirectRequirement && nextLevelDirectInfo && (
+          <div className="mb-6 p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-emerald-400 flex items-center gap-2">
+                  <CheckCircle className="w-5 h-5" />
+                  Direct Referral Progress
+                </p>
+                {nextLevelDirectInfo.currentMatrixLevel >= nextLevelDirectInfo.targetLevel && (
+                  <p className="text-xs text-amber-300/80 mt-1">
+                    You are currently at Level {nextLevelDirectInfo.currentMatrixLevel} but need <span className="font-semibold">+{nextLevelDirectInfo.remaining}</span> more direct referral(s) (total {nextLevelDirectInfo.totalRequired}) to receive Level {nextLevelDirectInfo.targetLevel} helps.
+                  </p>
+                )}
+                {nextLevelDirectInfo.currentMatrixLevel < nextLevelDirectInfo.targetLevel && (
+                  <p className="text-xs text-emerald-300/80 mt-1">
+                    You need <span className="font-semibold">+{nextLevelDirectInfo.remaining}</span> more direct referral(s) (total {nextLevelDirectInfo.totalRequired}) to start receiving Level {nextLevelDirectInfo.targetLevel} helps.
+                  </p>
+                )}
+              </div>
+              <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-lg px-3 py-1 shrink-0">
+                {effectiveDirectCount} Direct{effectiveDirectCount !== 1 ? 's' : ''}
+              </Badge>
+            </div>
+          </div>
+        )}
+
+        {hasMetInitialDirectRequirement && !nextLevelDirectInfo && (
+          <div className="mb-6 p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10">
+            <div className="flex items-center gap-3">
+              <CheckCircle className="w-5 h-5 text-emerald-400" />
+              <p className="text-sm text-emerald-400 font-semibold">
+                All direct referral requirements met! You are qualified for all levels.
+              </p>
             </div>
           </div>
         )}
@@ -642,48 +651,48 @@ export default function Dashboard() {
         </div>
 
         {/* Three Wallet System */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-          <Card className="wallet-card">
-            <CardHeader className="pb-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6 mb-8">
+          <Card className="wallet-card h-full gap-1 py-4">
+            <CardHeader className="pb-1 min-h-[52px]">
               <CardTitle className="text-sm font-medium text-white/60 flex items-center gap-2">
                 <DollarSign className="w-4 h-4 text-emerald-500" />
                 Fund Wallet
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="pt-0 flex-1 flex flex-col justify-start">
               <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.depositWallet || 0)}</p>
-              <p className="text-xs text-white/50 mt-1">Add fund for PIN requests and P2P fund transfer</p>
+              <p className="text-xs text-white/50 mt-1">Add funds for PIN Requests and P2P Transfers.</p>
             </CardContent>
           </Card>
 
-          <Card className="wallet-card">
-            <CardHeader className="pb-2">
+          <Card className="wallet-card h-full gap-1 py-4">
+            <CardHeader className="pb-1 min-h-[52px]">
               <CardTitle className="text-sm font-medium text-white/60 flex items-center gap-2">
                 <BarChart3 className="w-4 h-4 text-cyan-400" />
                 Total Earnings
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="pt-0 flex-1 flex flex-col justify-start">
               <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.totalReceived || 0)}</p>
               <p className="text-xs text-white/50 mt-1">Lifetime earnings credited to your account</p>
             </CardContent>
           </Card>
 
-          <Card className="wallet-card">
-            <CardHeader className="pb-2">
+          <Card className="wallet-card h-full gap-1 py-4">
+            <CardHeader className="pb-1 min-h-[52px]">
               <CardTitle className="text-sm font-medium text-white/60 flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-purple-500" />
                 Available Income
               </CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className="pt-0 flex-1 flex flex-col justify-start">
               <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.incomeWallet || 0)}</p>
-              <p className="text-xs text-white/50 mt-1">Available funds for transfer and withdrawals</p>
+              <p className="text-xs text-white/50 mt-1">Available amount for withdrawal and P2P Transfers.</p>
             </CardContent>
           </Card>
 
-          <Card className="wallet-card">
-            <CardHeader className="pb-2">
+          <Card className="wallet-card h-full gap-1 py-4">
+            <CardHeader className="pb-1 min-h-[52px]">
               <div className="flex items-center justify-between gap-2">
                 <CardTitle className="text-sm font-medium text-white/60 flex items-center gap-2">
                   <Shield className="w-4 h-4 text-amber-500" />
@@ -699,12 +708,78 @@ export default function Dashboard() {
                 </Button>
               </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="pt-0 flex-1 flex flex-col justify-start">
               <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.lockedIncomeWallet || 0)}</p>
               <p className="text-xs text-white/50 mt-1">Level income locked until direct referral qualification</p>
             </CardContent>
           </Card>
         </div>
+
+        <Card className="glass border-amber-500/20 bg-gradient-to-br from-amber-500/10 via-[#111827] to-[#111827] mb-8">
+          <CardHeader className="pb-2">
+            <div className="flex flex-col items-start gap-3">
+              <CardTitle className="text-slate-900 dark:text-white flex items-center gap-2">
+                <Award className="w-5 h-5 text-amber-400" />
+                Monthly Royalty Achievement
+              </CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="rounded-lg border border-white/10 bg-white/5 p-4 md:flex md:min-h-[152px] md:flex-col md:justify-center">
+                <p className="text-sm text-slate-500 dark:text-white/50">Current Status</p>
+                <p className="text-2xl font-bold text-slate-900 dark:text-white">
+                  {currentRoyaltyMilestone ? `${currentRoyaltyMilestone.percent}%` : 'N/A'}
+                </p>
+                {currentRoyaltyMilestone ? (
+                  <div className="mt-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
+                    <p className="text-sm font-medium text-emerald-300">
+                      You are qualified for Level {currentRoyaltyMilestone.qualifiedLevel} Royalty Income.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500 dark:text-white/50 mt-2">
+                    Reach qualified Level 3 to unlock royalty status.
+                  </p>
+                )}
+              </div>
+              <div className="rounded-lg border border-white/10 bg-white/5 p-4 md:flex md:min-h-[152px] md:flex-col md:justify-center">
+                <p className="text-sm text-slate-500 dark:text-white/50">Royalty Income</p>
+                <p className="text-2xl font-bold text-slate-900 dark:text-white">
+                  {formatCurrency(wallet?.royaltyWallet || 0)}
+                </p>
+              </div>
+            </div>
+            {nextRoyaltyMilestone ? (
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-4">
+                <p className="text-sm font-medium text-amber-300">
+                  {currentRoyaltyMilestone ? 'Next Milestone:' : 'Unlock Rewards:'}
+                </p>
+                <p className="text-sm text-slate-700 dark:text-white/80 mt-1">
+                  Earn {nextRoyaltyMilestone.percent}% Royalty Income after qualifying Level {nextRoyaltyMilestone.qualifiedLevel}
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4">
+                <p className="text-sm font-medium text-emerald-300">Top royalty milestone unlocked</p>
+                <p className="text-sm text-slate-700 dark:text-white/80 mt-1">
+                  You have already reached the highest royalty status available right now.
+                </p>
+              </div>
+            )}
+            <div className="flex justify-center">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setShowRoyaltyInfoDialog(true)}
+                className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200"
+              >
+                How Royalty Works
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         {(wallet?.pendingSystemFee || 0) > 0 && (
           <div className="mb-6 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
@@ -715,90 +790,39 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Direct Referral Progress (after meeting 2-direct requirement) */}
-        {hasMetInitialDirectRequirement && nextLevelDirectInfo && (
-          <div className="mb-6 p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-semibold text-emerald-400 flex items-center gap-2">
-                  <CheckCircle className="w-5 h-5" />
-                  Direct Referral Progress
-                </p>
-                {nextLevelDirectInfo.currentMatrixLevel >= nextLevelDirectInfo.targetLevel && (
-                  <p className="text-xs text-amber-300/80 mt-1">
-                    You are currently at Level {nextLevelDirectInfo.currentMatrixLevel} but need <span className="font-semibold">+{nextLevelDirectInfo.remaining}</span> more direct referral(s) (total {nextLevelDirectInfo.totalRequired}) to receive Level {nextLevelDirectInfo.targetLevel} helps.
-                  </p>
-                )}
-                {nextLevelDirectInfo.currentMatrixLevel < nextLevelDirectInfo.targetLevel && (
-                  <p className="text-xs text-emerald-300/80 mt-1">
-                    You need <span className="font-semibold">+{nextLevelDirectInfo.remaining}</span> more direct referral(s) (total {nextLevelDirectInfo.totalRequired}) to start receiving Level {nextLevelDirectInfo.targetLevel} helps.
-                  </p>
-                )}
-              </div>
-              <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-lg px-3 py-1 shrink-0">
-                {effectiveDirectCount} Direct{effectiveDirectCount !== 1 ? 's' : ''}
-              </Badge>
-            </div>
-          </div>
-        )}
-
-        {hasMetInitialDirectRequirement && !nextLevelDirectInfo && (
-          <div className="mb-6 p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10">
-            <div className="flex items-center gap-3">
-              <CheckCircle className="w-5 h-5 text-emerald-400" />
-              <p className="text-sm text-emerald-400 font-semibold">
-                All direct referral requirements met! You are qualified for all levels.
-              </p>
-            </div>
-          </div>
-        )}
-
         {/* Achievements Section */}
         <div className="mb-8">
           <h2 className="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
             <Award className="w-5 h-5 text-amber-400" />
-            Tour Achievements
+            Tour Achievement
           </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {achievements.map((achievement) => {
-              const Icon = achievement.icon;
-              return (
-                <div
-                  key={achievement.key}
-                  className={`p-4 rounded-xl border ${achievement.achieved
-                    ? `${achievement.bgColor} ${achievement.key === 'nationalTour'
-                      ? 'border-blue-500/50'
-                      : achievement.key === 'internationalTour'
-                        ? 'border-purple-500/50'
-                        : 'border-pink-500/50'
-                    }`
-                    : 'border-slate-200 bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50'
-                    }`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`w-12 h-12 rounded-lg flex items-center justify-center ${achievement.achieved ? achievement.bgColor : 'bg-white/10'
-                      }`}>
-                      <Icon className={`w-6 h-6 ${achievement.achieved ? achievement.color : 'text-slate-400 dark:text-white/40'}`} />
-                    </div>
-                    <div>
-                      <p className={`font-medium ${achievement.achieved ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-white/60'}`}>
-                        {achievement.label} — <span className="text-xs font-normal text-slate-500 dark:text-white/50">Level {achievement.level} Qualified</span>
-                      </p>
-                      <p className="text-xs text-slate-400 dark:text-white/40 mt-1">
-                        You must receive help from all users in Level {achievement.level} and complete Level {achievement.level} direct referral qualification.
-                      </p>
-                    </div>
-                  </div>
-                  {achievement.achieved && (
-                    <div className="mt-3 flex items-center gap-2">
-                      <CheckCircle className="w-4 h-4 text-emerald-400" />
-                      <span className="text-sm text-emerald-400">Achieved!</span>
-                    </div>
-                  )}
+          <Card className="glass border-white/10">
+            <CardContent className="space-y-4 py-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="rounded-lg border border-white/10 bg-white/5 p-4">
+                  <p className="text-sm text-slate-500 dark:text-white/50">Current Status</p>
+                  <p className={`mt-2 text-xl font-bold ${tourAchievementStatus.completed ? 'text-emerald-400' : 'text-slate-900 dark:text-white'}`}>
+                    {tourAchievementStatus.currentStatus}
+                  </p>
                 </div>
-              );
-            })}
-          </div>
+                <div className="rounded-lg border border-white/10 bg-white/5 p-4">
+                  <p className="text-sm text-slate-500 dark:text-white/50">Next Milestone</p>
+                  <p className="mt-2 text-xl font-bold text-slate-900 dark:text-white">
+                    {tourAchievementStatus.nextMilestone}
+                  </p>
+                </div>
+              </div>
+
+              <div className={`rounded-lg border p-4 ${tourAchievementStatus.completed ? 'border-emerald-500/20 bg-emerald-500/10' : 'border-amber-500/20 bg-amber-500/10'}`}>
+                <p className={`text-sm font-medium ${tourAchievementStatus.completed ? 'text-emerald-300' : 'text-amber-300'}`}>
+                  {tourAchievementStatus.completed ? 'Achievement Summary' : 'Qualification Requirement'}
+                </p>
+                <p className="text-sm text-slate-700 dark:text-white/80 mt-1">
+                  {tourAchievementStatus.requirement}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
         </div>
 
         {/* Quick Actions */}
@@ -814,7 +838,7 @@ export default function Dashboard() {
           <Button
             variant="outline"
             className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
-            onClick={() => setShowTransferDialog(true)}
+            onClick={() => navigate('/fund-transfer')}
           >
             <ArrowUpRight className="w-5 h-5 text-[#118bdd]" />
             <span className="text-sm">Fund Transfer</span>
@@ -822,7 +846,7 @@ export default function Dashboard() {
           <Button
             variant="outline"
             className="dashboard-action h-auto py-4 flex flex-col items-center gap-2 border-slate-200 bg-white hover:bg-slate-100 dark:border-white/10 dark:bg-[#1f2937]/50 dark:hover:bg-[#1f2937]"
-            onClick={() => setShowWithdrawDialog(true)}
+            onClick={() => navigate('/withdraw')}
           >
             <DollarSign className="w-5 h-5 text-amber-500" />
             <span className="text-sm">Withdraw</span>
@@ -880,7 +904,7 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-6">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-4">
                 <div className="p-4 rounded-lg bg-slate-100 dark:bg-[#1f2937]/50">
                   <p className="text-sm text-slate-500 dark:text-white/50 mb-1">Left Team</p>
                   <p className="text-2xl font-bold text-slate-900 dark:text-white">{formatNumber(downlineStats.left)}</p>
@@ -962,7 +986,7 @@ export default function Dashboard() {
                           <p className="text-sm font-medium text-slate-900 dark:text-white">
                             {getTransactionTypeLabel(tx.type)}
                           </p>
-                          <p className="text-xs text-slate-500 dark:text-white/50 truncate">{truncateText(tx.description, 30)}</p>
+                          <p className="text-xs text-slate-500 dark:text-white/50 truncate">{truncateText(getVisibleTransactionDescription(tx.description), 30)}</p>
                         </div>
                       </div>
                       <div className="text-right">
@@ -1059,158 +1083,28 @@ export default function Dashboard() {
         </div>
       </main>
 
-      {/* Transfer Dialog */}
-      <Dialog open={showTransferDialog} onOpenChange={(open) => { setShowTransferDialog(open); if (!open) resetTransferSecurity(); }}>
-        <DialogContent className="glass border-white/10 bg-[#111827]">
-          <DialogHeader>
-            <DialogTitle className="text-white">Wallet Transfer</DialogTitle>
-            <DialogDescription className="text-white/60">
-              Transfer from fund wallet to chain members, or from income wallet to your fund wallet / chain members.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label className="text-white/80">Transfer From</Label>
-              <select
-                value={transferData.source}
-                onChange={(e) => { setTransferData({ ...transferData, source: e.target.value as 'fund' | 'income' }); resetTransferSecurity(); }}
-                className="w-full h-10 rounded-md bg-[#1f2937] border border-white/10 text-white px-3 text-sm"
-              >
-                <option value="fund">Fund Wallet</option>
-                <option value="income">Income Wallet</option>
-              </select>
-            </div>
-            <div className="space-y-2">
-              <Label className="text-white/80">
-                Recipient User ID
-                {transferData.source === 'income' ? ' (optional)' : ' (7 digits)'}
-              </Label>
-              <Input
-                value={transferData.userId}
-                onChange={(e) => {
-                  const value = e.target.value.replace(/\D/g, '').slice(0, 7);
-                  setTransferData({ ...transferData, userId: value });
-                }}
-                maxLength={7}
-                placeholder={transferData.source === 'income'
-                  ? 'Leave blank for your own fund wallet'
-                  : 'Enter 7-digit ID'}
-                className="bg-[#1f2937] border-white/10 text-white"
-              />
-              <p className="text-xs text-white/50">
-                {transferData.source === 'income'
-                  ? 'Blank recipient transfers to your own fund wallet. For member transfer, only upline/downline IDs are allowed.'
-                  : 'Only upline/downline IDs are allowed.'}
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label className="text-white/80">Amount</Label>
-              <Input
-                type="number"
-                value={transferData.amount}
-                onChange={(e) => setTransferData({ ...transferData, amount: e.target.value })}
-                placeholder="Enter amount"
-                className="bg-[#1f2937] border-white/10 text-white"
-              />
-            </div>
-
-            {/* Security fields — shown only for external transfers */}
-            {isExternalTransfer && (
-              <>
-                <div className="border-t border-white/10 pt-4">
-                  <p className="text-sm text-amber-400 mb-3 flex items-center gap-2">
-                    <Shield className="w-4 h-4" />
-                    Security verification required for external transfers
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-white/80">Transaction Password</Label>
-                  <Input
-                    type="password"
-                    value={transferTransactionPassword}
-                    onChange={(e) => setTransferTransactionPassword(e.target.value)}
-                    placeholder="Enter transaction password"
-                    className="bg-[#1f2937] border-white/10 text-white"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-white/80">Email OTP</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      value={transferOtp}
-                      onChange={(e) => setTransferOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                      maxLength={6}
-                      placeholder="Enter OTP"
-                      className="bg-[#1f2937] border-white/10 text-white"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={handleSendTransferOtp}
-                      disabled={isSendingTransferOtp || isTransferOtpSent}
-                      className="border-white/20 text-white hover:bg-white/10 whitespace-nowrap"
-                    >
-                      {isSendingTransferOtp ? <RefreshCw className="w-4 h-4 animate-spin" /> : isTransferOtpSent ? 'OTP Sent' : 'Send OTP'}
-                    </Button>
-                  </div>
-                  {isTransferOtpSent && (
-                    <p className="text-xs text-emerald-400">OTP sent to your registered email</p>
-                  )}
-                </div>
-              </>
-            )}
-
-            <div className="p-3 rounded-lg bg-[#1f2937]">
-              <p className="text-sm text-white/60">Available Fund Wallet Balance: {formatCurrency(wallet?.depositWallet || 0)}</p>
-              <p className="text-sm text-white/60">Available Income Wallet Balance: {formatCurrency(wallet?.incomeWallet || 0)}</p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <Button
-              variant="outline"
-              onClick={() => { setShowTransferDialog(false); resetTransferSecurity(); }}
-              className="flex-1 border-white/20 text-white hover:bg-white/10"
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleTransfer}
-              disabled={
-                isLoading
-                || (
-                  transferData.source === 'fund'
-                    ? transferData.userId.length !== 7
-                    : transferData.userId.length > 0 && transferData.userId.length !== 7
-                )
-                || (isExternalTransfer && (!transferTransactionPassword.trim() || !transferOtp.trim()))
-              }
-              className="flex-1 btn-primary"
-            >
-              {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Transfer'}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
       {/* Withdraw Dialog */}
-      <Dialog open={showWithdrawDialog} onOpenChange={setShowWithdrawDialog}>
-        <DialogContent className="glass border-white/10 bg-[#111827]">
+      <Dialog open={showWithdrawDialog} onOpenChange={handleWithdrawDialogOpenChange}>
+        <DialogContent className="glass border-white/10 bg-[#111827] max-h-[92vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle className="text-white">Withdraw Funds</DialogTitle>
             <DialogDescription className="text-white/60">
               Withdraw from your Income Wallet ({withdrawalFeePercent}% fee applies)
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
+          <div className="space-y-4 py-4 overflow-y-auto pr-1">
             <div className="space-y-2">
               <Label className="text-white/80">Amount</Label>
               <Input
                 type="number"
+                min={10}
+                step={10}
                 value={withdrawData.amount}
                 onChange={(e) => setWithdrawData({ ...withdrawData, amount: e.target.value })}
                 placeholder="Enter amount"
                 className="bg-[#1f2937] border-white/10 text-white"
               />
+              <p className="text-[11px] text-white/55">Minimum $10 and only multiples of $10 (10, 20, 30...)</p>
             </div>
             <div className="space-y-2">
               <Label className="text-white/80">USDT (BEP-20) Address</Label>
@@ -1220,6 +1114,34 @@ export default function Dashboard() {
                 placeholder="Enter wallet address"
                 className="bg-[#1f2937] border-white/10 text-white"
               />
+              {displayUser?.usdtAddress && (
+                <p className="text-[11px] text-[#118bdd] break-all">
+                  USDT (BEP-20) Address Saved in Profile : {displayUser.usdtAddress}
+                </p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label className="text-white/80">Payout QR Code (Optional)</Label>
+              <Input
+                type="file"
+                accept="image/*"
+                onChange={(e) => void handleWithdrawQrUpload(e)}
+                className="bg-[#1f2937] border-white/10 text-white file:text-white"
+              />
+              {withdrawData.qrCode && (
+                <div className="rounded-lg border border-white/10 bg-[#1f2937] p-3 space-y-2 max-w-[220px]">
+                  <img src={withdrawData.qrCode} alt="Payout QR preview" className="w-full max-h-28 object-contain rounded" />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setWithdrawData((prev) => ({ ...prev, qrCode: '' }))}
+                    className="border-red-500/30 text-red-300 hover:bg-red-500/10"
+                  >
+                    Remove QR
+                  </Button>
+                </div>
+              )}
             </div>
             <div className="space-y-2">
               <Label className="text-white/80">Transaction Password</Label>
@@ -1275,11 +1197,12 @@ export default function Dashboard() {
               </div>
             )}
           </div>
-          <div className="flex gap-3">
+          <div className="flex gap-3 pt-3 border-t border-white/10 shrink-0 bg-[#111827]">
             <Button
               variant="outline"
               onClick={() => {
                 setShowWithdrawDialog(false);
+                setWithdrawData((prev) => ({ ...prev, amount: '', qrCode: '' }));
                 setWithdrawTransactionPassword('');
                 setWithdrawOtp('');
                 setIsWithdrawOtpSent(false);
@@ -1290,7 +1213,12 @@ export default function Dashboard() {
             </Button>
             <Button
               onClick={handleWithdraw}
-              disabled={isLoading || !withdrawTransactionPassword || (settings.requireOtpForTransactions && !withdrawOtp)}
+              disabled={
+                isLoading
+                || !withdrawTransactionPassword
+                || !(String(withdrawData.address || '').trim())
+                || (settings.requireOtpForTransactions && !withdrawOtp)
+              }
               className="flex-1 btn-primary"
             >
               {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Withdraw'}
@@ -1301,7 +1229,10 @@ export default function Dashboard() {
 
       {/* Direct Referrals Dialog */}
       <Dialog open={showDirectReferralsDialog} onOpenChange={setShowDirectReferralsDialog}>
-        <DialogContent className="glass border-white/10 bg-[#111827] max-w-xl">
+        <DialogContent
+          className="glass border-white/10 bg-[#111827] max-w-xl"
+          onOpenAutoFocus={(event) => event.preventDefault()}
+        >
           <DialogHeader>
             <DialogTitle className="text-white">Direct Referrals</DialogTitle>
             <DialogDescription className="text-white/60">
@@ -1310,18 +1241,28 @@ export default function Dashboard() {
           </DialogHeader>
 
           <div className="space-y-3 py-2">
-            <Input
-              value={directReferralSearch}
-              onChange={(e) => setDirectReferralSearch(e.target.value)}
-              placeholder="Search by User ID or name"
-              className="bg-[#1f2937] border-white/10 text-white"
-            />
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Input
+                value={directReferralSearch}
+                onChange={(e) => setDirectReferralSearch(e.target.value)}
+                placeholder="Search by User ID or name"
+                className="bg-[#1f2937] border-white/10 text-white flex-1"
+              />
+              <select
+                value={directReferralSort}
+                onChange={(e) => setDirectReferralSort(e.target.value as 'asc' | 'desc')}
+                className="h-10 rounded-md bg-[#1f2937] border border-white/10 text-white px-3 text-sm"
+              >
+                <option value="desc">Newest first (DESC)</option>
+                <option value="asc">Oldest first (ASC)</option>
+              </select>
+            </div>
 
             <div className="max-h-80 overflow-y-auto space-y-2 pr-1">
-              {filteredDirectReferrals.length === 0 ? (
+              {sortedDirectReferrals.length === 0 ? (
                 <p className="text-center text-white/50 py-8">No direct referrals found</p>
               ) : (
-                filteredDirectReferrals.map((refUser) => (
+                sortedDirectReferrals.map((refUser) => (
                   <div key={refUser.id} className="flex items-center justify-between rounded-md bg-[#1f2937]/60 px-3 py-2">
                     <div>
                       <p className="text-sm text-white font-medium">{refUser.fullName}</p>
@@ -1384,6 +1325,90 @@ export default function Dashboard() {
                 ))}
               </div>
             )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showRoyaltyInfoDialog} onOpenChange={setShowRoyaltyInfoDialog}>
+        <DialogContent
+          showCloseButton={false}
+          className="glass border-white/10 bg-[#111827] w-[calc(100vw-1.5rem)] max-w-2xl max-h-[88vh] overflow-hidden p-0"
+        >
+          <DialogClose
+            className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute top-4 right-4 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+          >
+            <X />
+            <span className="sr-only">Close</span>
+          </DialogClose>
+
+          <div className="px-4 pt-4 sm:px-6 sm:pt-6">
+            <DialogHeader className="pr-10 text-center sm:text-center">
+              <DialogTitle className="text-white text-center">How Royalty Works</DialogTitle>
+            </DialogHeader>
+          </div>
+
+          <div className="max-h-[calc(88vh-8rem)] overflow-y-auto px-4 pb-4 pr-3 sm:px-6 sm:pb-6 sm:pr-4">
+            <div className="mt-4 space-y-4 text-sm text-white/80">
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
+                <p className="font-semibold text-emerald-300">
+                  {hasUnlockedRoyalty
+                    ? `You are currently eligible for ${royaltyExplanation.percent}% royalty because you have qualified Level ${royaltyExplanation.qualifiedLevel}.`
+                    : `You will become eligible for ${royaltyExplanation.percent}% royalty after qualifying Level ${royaltyExplanation.qualifiedLevel}.`}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-2">
+                <p>
+                  The company first calculates the <span className="font-semibold text-white">total monthly generated system fee</span>.
+                </p>
+                <p>
+                  Then <span className="font-semibold text-white">{royaltyExplanation.percent}%</span> of that monthly total becomes the
+                  <span className="font-semibold text-white"> Level {royaltyExplanation.qualifiedLevel} Royalty Pool</span>.
+                </p>
+                <p>
+                  That pool is divided equally among all users who are qualified for
+                  <span className="font-semibold text-white"> Level {royaltyExplanation.qualifiedLevel} Royalty</span> in that month.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 space-y-2">
+                <p className="font-semibold text-amber-300">Example</p>
+                <p>
+                  If the monthly generated system fee in one month is <span className="font-semibold text-white">${royaltyExplanation.monthlySystemFee.toLocaleString()}</span>,
+                  then <span className="font-semibold text-white">{royaltyExplanation.percent}% of ${royaltyExplanation.monthlySystemFee.toLocaleString()} = ${royaltyExplanation.royaltyPool.toLocaleString()}</span>.
+                </p>
+                <p>
+                  If <span className="font-semibold text-white">{royaltyExplanation.eligibleUsers} users</span> are eligible for Level {royaltyExplanation.qualifiedLevel} Royalty,
+                  then <span className="font-semibold text-white">${royaltyExplanation.royaltyPool.toLocaleString()} / {royaltyExplanation.eligibleUsers} = ${royaltyExplanation.perUserRoyalty.toLocaleString()}</span>.
+                </p>
+                <p>
+                  So each qualified user will receive <span className="font-semibold text-white">${royaltyExplanation.perUserRoyalty.toLocaleString()}</span> as royalty income for that month.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-3">
+                <p className="font-semibold text-white">Royalty Percentage by Qualified Level</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {ROYALTY_MILESTONES.map((milestone) => (
+                    <div
+                      key={milestone.qualifiedLevel}
+                      className={`rounded-lg border px-3 py-2 ${
+                        milestone.qualifiedLevel === currentRoyaltyMilestone?.qualifiedLevel
+                          ? 'border-emerald-500/30 bg-emerald-500/10'
+                          : 'border-white/10 bg-[#1f2937]/60'
+                      }`}
+                    >
+                      <p className="text-sm text-white font-medium">
+                        Level {milestone.qualifiedLevel} Royalty
+                      </p>
+                      <p className={`text-sm ${milestone.qualifiedLevel === currentRoyaltyMilestone?.qualifiedLevel ? 'text-emerald-300' : 'text-white/70'}`}>
+                        {milestone.percent}%
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

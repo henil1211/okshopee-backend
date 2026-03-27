@@ -155,7 +155,7 @@ export default function Login() {
                       id="userId"
                       type="text"
                       maxLength={7}
-                      placeholder="Enter 7-digit ID (e.g., 1000001)"
+                      placeholder="Enter 7-digit ID"
                       value={formData.userId}
                       onChange={(e) => {
                         const value = e.target.value.replace(/\D/g, '').slice(0, 7);

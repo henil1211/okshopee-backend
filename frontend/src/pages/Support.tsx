@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Eye, LogOut, Paperclip, RefreshCw, Send } from 'lucide-react';
+import { ArrowLeft, Eye, LogOut, Paperclip, Pencil, RefreshCw, Send } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { useAuthStore, useSyncRefreshKey } from '@/store';
@@ -96,6 +96,8 @@ export default function Support() {
 
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [selectedTicketId, setSelectedTicketId] = useState('');
+  const [editingMessageId, setEditingMessageId] = useState('');
+  const [editingMessageText, setEditingMessageText] = useState('');
   const [submitAttachment, setSubmitAttachment] = useState<SupportTicketAttachment | null>(null);
   const [replyAttachment, setReplyAttachment] = useState<SupportTicketAttachment | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -136,6 +138,11 @@ export default function Support() {
     if (!displayUser) return;
     loadTickets();
   }, [isAuthenticated, displayUser, navigate, syncKey]);
+
+  useEffect(() => {
+    setEditingMessageId('');
+    setEditingMessageText('');
+  }, [selectedTicketId]);
 
   const handleLogout = () => {
     logout();
@@ -230,6 +237,29 @@ export default function Support() {
       toast.success('Reply submitted');
     } finally {
       setIsReplying(false);
+    }
+  };
+
+  const handleUserMessageEdit = async () => {
+    if (!displayUser || !selectedTicket || !editingMessageId) return;
+    try {
+      const updated = Database.updateSupportTicketMessage({
+        ticket_id: selectedTicket.ticket_id,
+        message_id: editingMessageId,
+        editor_type: 'user',
+        editor_user_id: displayUser.userId,
+        message: editingMessageText.trim()
+      });
+      if (!updated) {
+        toast.error('Failed to edit ticket message');
+        return;
+      }
+      setEditingMessageId('');
+      setEditingMessageText('');
+      loadTickets();
+      toast.success('Ticket updated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to edit ticket message');
     }
   };
 
@@ -499,8 +529,14 @@ export default function Support() {
               </div>
 
               <div className="space-y-4 max-h-[420px] overflow-y-auto pr-1 py-2">
-                {selectedTicket.messages.map((msg) => {
+                {(() => {
+                  const latestUserMessageId = [...selectedTicket.messages]
+                    .reverse()
+                    .find((item) => item.sender_type === 'user')?.id;
+                  return selectedTicket.messages.map((msg) => {
                   const isAdmin = msg.sender_type === 'admin';
+                  const isEditingThisMessage = editingMessageId === msg.id;
+                  const canEditUserMessage = !isAdmin && msg.id === latestUserMessageId;
                   return (
                     <div key={msg.id} className={`flex ${isAdmin ? 'justify-start' : 'justify-end'}`}>
                       <div className={`max-w-[85%] sm:max-w-[75%] ${isAdmin ? 'order-1' : 'order-1'}`}>
@@ -515,9 +551,28 @@ export default function Support() {
                           <span className={`text-[11px] ${isAdmin ? 'text-white/50' : 'text-white/50'}`}>
                             {isAdmin ? msg.sender_name : 'You'}
                           </span>
+                          {msg.edited_at && !isAdmin && (
+                            <span className="text-[10px] text-amber-300">
+                              edited {new Date(msg.edited_at).toLocaleString()}
+                            </span>
+                          )}
                           <span className="text-[10px] text-white/30">
                             {new Date(msg.created_at).toLocaleString()}
                           </span>
+                          {canEditUserMessage && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => {
+                                setEditingMessageId(msg.id);
+                                setEditingMessageText(msg.message || '');
+                              }}
+                              className="h-6 px-2 text-sky-300 hover:bg-sky-400/10 hover:text-sky-200"
+                            >
+                              <Pencil className="w-3 h-3 mr-1" />
+                              Edit
+                            </Button>
+                          )}
                         </div>
 
                         {/* Message bubble */}
@@ -526,7 +581,33 @@ export default function Support() {
                             ? 'bg-gradient-to-br from-emerald-500/15 to-emerald-600/10 border border-emerald-500/20 rounded-tl-sm'
                             : 'bg-[#118bdd]/15 border border-[#118bdd]/20 rounded-tr-sm'
                         }`}>
-                          <p className="text-[13px] text-white/85 whitespace-pre-wrap leading-relaxed">{msg.message || '-'}</p>
+                          {isEditingThisMessage ? (
+                            <div className="space-y-2">
+                              <Textarea
+                                rows={4}
+                                value={editingMessageText}
+                                onChange={(e) => setEditingMessageText(e.target.value)}
+                                className="bg-[#0f172a] border-white/10 text-white"
+                              />
+                              <div className="flex flex-col sm:flex-row gap-2">
+                                <Button onClick={handleUserMessageEdit} className="bg-[#118bdd] hover:bg-[#0f79be] text-white">
+                                  Save Edit
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  onClick={() => {
+                                    setEditingMessageId('');
+                                    setEditingMessageText('');
+                                  }}
+                                  className="border-white/20 text-white hover:bg-white/10"
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="text-[13px] text-white/85 whitespace-pre-wrap leading-relaxed">{msg.message || '-'}</p>
+                          )}
                           {msg.attachments.length > 0 && (
                             <div className="mt-2 space-y-2 pt-2 border-t border-white/10">
                               {msg.attachments.map((att) => (
@@ -553,7 +634,8 @@ export default function Support() {
                       </div>
                     </div>
                   );
-                })}
+                  });
+                })()}
               </div>
 
               {selectedTicket.status === 'closed' ? (
@@ -615,4 +697,3 @@ export default function Support() {
     </div>
   );
 }
-

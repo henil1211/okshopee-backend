@@ -114,6 +114,7 @@ export interface Wallet {
   depositWallet: number;    // For deposits and withdrawals
   pinWallet: number;        // Tracks current unused PIN count
   incomeWallet: number;     // For earnings and income
+  royaltyWallet: number;    // Admin-only royalty credits
   matrixWallet: number;     // Matrix-earned balance used for matrix give-help
   lockedIncomeWallet: number; // Unqualified level income locked until direct-referral requirement is met
   giveHelpLocked: number;
@@ -132,6 +133,7 @@ export interface Wallet {
 export type TransactionType =
   | 'activation'
   | 'income_transfer'
+  | 'royalty_transfer'
   | 'direct_income'
   | 'level_income'
   | 'give_help'
@@ -144,11 +146,12 @@ export type TransactionType =
   | 'pin_purchase'
   | 'pin_transfer'
   | 'pin_used'
+  | 'royalty_income'
   | 'admin_credit'
   | 'admin_debit'
   | 'system_fee';
 
-export type TransactionStatus = 'pending' | 'completed' | 'failed' | 'cancelled';
+export type TransactionStatus = 'pending' | 'completed' | 'failed' | 'cancelled' | 'reversed';
 
 export interface Transaction {
   id: string;
@@ -162,12 +165,25 @@ export interface Transaction {
   description: string;
   createdAt: string;
   completedAt?: string;
+  displayAmount?: number; // Optional UI-only amount (does not affect wallet math)
+  sourceGiveHelpTxId?: string; // Links restored receive-help to the exact sender give-help debit
+  sourceTransferTxId?: string; // Links a fund-wallet credit to the exact originating transfer debit
   // PIN related
   pinCode?: string;
   pinId?: string;
   // Security
   requiresTransactionPassword?: boolean;
   otpVerified?: boolean;
+  // Withdrawal metadata
+  walletAddress?: string;
+  payoutQrCode?: string;
+  requesterUserId?: string;
+  requesterName?: string;
+  fee?: number;
+  netAmount?: number;
+  adminReason?: string;
+  adminReceipt?: string;
+  processedByAdminUserId?: string;
 }
 
 // Matrix Types
@@ -318,9 +334,44 @@ export interface Notification {
   userId: string;
   title: string;
   message: string;
+  imageUrl?: string;
+  announcementId?: string;
   type: 'info' | 'success' | 'warning' | 'error';
   isRead: boolean;
   createdAt: string;
+}
+
+export interface AdminAnnouncement {
+  id: string;
+  title: string;
+  message: string;
+  imageUrl?: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+  totalRecipients: number;
+  createdAt: string;
+  createdById: string;
+  createdByUserId: string;
+  isRecalled: boolean;
+  isPermanent: boolean;
+  includeFutureUsers: boolean;
+  expiresAt?: string;
+  durationDays?: number;
+  includeAdmins?: boolean;
+  recalledAt?: string;
+  recalledByUserId?: string;
+  updatedAt?: string;
+  updatedByUserId?: string;
+}
+
+export interface GhostReceiveHelpRepairLog {
+  id: string;
+  createdAt: string;
+  txId: string;
+  userId: string;
+  userPublicId?: string;
+  amount: number;
+  reason: string;
+  originalDescription?: string;
 }
 
 // Admin Types
@@ -331,10 +382,13 @@ export interface AdminSettings {
   helpingAmountPercent: number;
   adminFeePercent: number;
   withdrawalFeePercent: number;
+  depositProcessingHours: number;
+  withdrawalProcessingHours: number;
   gracePeriodHours: number;
   maxLevels: number;
   reEntryEnabled: boolean;
   safetyPoolEnabled: boolean;
+  marketplaceEnabled: boolean;
   activationDeadlineDays: number;
   directReferralDeadlineDays: number;
   // Security settings
@@ -376,6 +430,7 @@ export interface WithdrawalRequest {
   fee: number;
   netAmount: number;
   walletAddress: string;
+  payoutQrCode?: string;
   status: TransactionStatus;
   createdAt: string;
   processedAt?: string;
@@ -406,7 +461,7 @@ export interface PaymentMethod {
 }
 
 // Payment Types
-export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'cancelled' | 'under_review';
+export type PaymentStatus = 'pending' | 'completed' | 'failed' | 'cancelled' | 'under_review' | 'reversed';
 
 export interface Payment {
   id: string;
@@ -525,6 +580,8 @@ export interface SupportTicketMessage {
   message: string;
   attachments: SupportTicketAttachment[];
   created_at: string;
+  edited_at?: string;
+  edited_by?: 'user' | 'admin';
 }
 
 // Ticket schema uses snake_case keys so backend collections stay consistent.
@@ -559,6 +616,7 @@ export interface MarketplaceRetailer {
   id: string;
   name: string;
   logoUrl: string; // base64 data URL or external URL
+  badgeText?: string; // top-right ribbon text, e.g. "80% OFF"
   discountPercent: number;
   discountText: string; // e.g. "Up to 30% Cashback"
   websiteUrl: string;
@@ -608,6 +666,9 @@ export interface MarketplaceInvoice {
   createdAt: string;
   processedAt: string | null;
   processedBy: string | null;
+  rpRevoked?: boolean;
+  rpRevokedAt?: string | null;
+  rpRevokedBy?: string | null;
 }
 
 export type RedemptionStatus = 'pending' | 'approved' | 'rejected';

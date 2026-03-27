@@ -22,6 +22,7 @@ export default function Referrals() {
   const displayUser = impersonatedUser || user;
 
   const [directReferralSearch, setDirectReferralSearch] = useState('');
+  const [directReferralSort, setDirectReferralSort] = useState<'desc' | 'asc'>('desc');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -58,17 +59,23 @@ export default function Referrals() {
 
   const getReferralShareMessage = () => {
     const link = getReferralLink();
+    const contactLines = displayUser?.phone
+      ? ['', displayUser.phone.trim(), 'Contact for ACTIVATION PIN☝️']
+      : [];
     return [
       '*New Earning Opportunity !*',
       '',
-      '*ReferNex* = Smart Shopping + Helping System + Referral Income.',
+      '_ReferNex - Next Generation Referral Program_',
+      '',
+      '*ReferNex* = Smart Shopping + Referral Income + Helping System.',
       '',
       'Simple process, Transparent system, Real growth.',
       '',
-      '*Join here :*',
+      '*Registration Link :*',
       link,
       '',
-      '*Note :* A valid *Activation Pin* is required to complete registration.'
+      '*Note :* A valid *Activation Pin* is required to complete registration.',
+      ...contactLines
     ].join('\n');
   };
 
@@ -79,14 +86,12 @@ export default function Referrals() {
   };
 
   const shareReferral = async () => {
-    const link = getReferralLink();
     const message = getReferralShareMessage();
     try {
       if (navigator.share) {
         await navigator.share({
           title: 'ReferNex - New Earning Opportunity',
-          text: message,
-          url: link
+          text: message
         });
         return;
       }
@@ -103,9 +108,15 @@ export default function Referrals() {
 
   const directReferralUsers = useMemo(() => {
     if (!displayUser) return [];
-    return Database.getUsers()
-      .filter(u => u.sponsorId === displayUser.userId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const rawUsers = Database.getUsers().filter((u) => u.sponsorId === displayUser.userId);
+    const seen = new Set<string>();
+    return rawUsers
+      .map((u) => Database.getUserByUserId(u.userId) || u)
+      .filter((u) => {
+        if (seen.has(u.userId)) return false;
+        seen.add(u.userId);
+        return true;
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayUser, syncKey]);
 
@@ -117,6 +128,13 @@ export default function Referrals() {
       u.fullName.toLowerCase().includes(q)
     );
   }, [directReferralUsers, directReferralSearch]);
+
+  const sortedDirectReferrals = useMemo(() => {
+    return [...filteredDirectReferrals].sort((a, b) => {
+      const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      return directReferralSort === 'asc' ? diff : -diff;
+    });
+  }, [filteredDirectReferrals, directReferralSort]);
 
   if (!displayUser) return null;
 
@@ -207,35 +225,45 @@ export default function Referrals() {
           </CardContent>
         </Card>
 
-        {/* Search */}
-        <div className="relative mb-6">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
-          <Input
-            value={directReferralSearch}
-            onChange={(e) => setDirectReferralSearch(e.target.value)}
-            placeholder="Search by ID or Name..."
-            className="pl-10 bg-white/5 border-white/10 text-white placeholder:text-white/30 text-sm"
-          />
-          {directReferralSearch && (
-            <button
-              onClick={() => setDirectReferralSearch('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
+        {/* Search + Sort */}
+        <div className="flex flex-col sm:flex-row gap-2 mb-6">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
+            <Input
+              value={directReferralSearch}
+              onChange={(e) => setDirectReferralSearch(e.target.value)}
+              placeholder="Search by ID or Name..."
+              className="pl-10 bg-white/5 border-white/10 text-white placeholder:text-white/30 text-sm"
+            />
+            {directReferralSearch && (
+              <button
+                onClick={() => setDirectReferralSearch('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+          <select
+            value={directReferralSort}
+            onChange={(e) => setDirectReferralSort(e.target.value as 'asc' | 'desc')}
+            className="h-10 rounded-md bg-white/5 border border-white/10 text-white px-3 text-sm"
+          >
+            <option value="desc">Newest first (DESC)</option>
+            <option value="asc">Oldest first (ASC)</option>
+          </select>
         </div>
 
         {/* Result count */}
         {directReferralSearch && (
           <p className="text-xs text-white/40 mb-4">
-            {filteredDirectReferrals.length} result{filteredDirectReferrals.length !== 1 ? 's' : ''} found
+            {sortedDirectReferrals.length} result{sortedDirectReferrals.length !== 1 ? 's' : ''} found
           </p>
         )}
 
         {/* Referral Cards List */}
         <div className="space-y-3">
-          {filteredDirectReferrals.length === 0 ? (
+          {sortedDirectReferrals.length === 0 ? (
             <div className="text-center py-16">
               <UserPlus className="w-12 h-12 text-white/15 mx-auto mb-3" />
               <p className="text-white/40 text-sm">
@@ -245,7 +273,7 @@ export default function Referrals() {
               </p>
             </div>
           ) : (
-            filteredDirectReferrals.map((refUser) => {
+            sortedDirectReferrals.map((refUser) => {
               const refWallet = Database.getWallet(refUser.id);
               const refStats = Database.getTeamCounts(refUser.userId);
               const refCurrentLevel = Database.getCurrentMatrixLevel(refUser.id);
@@ -277,7 +305,7 @@ export default function Referrals() {
                   </div>
 
                   {/* Stats grid */}
-                  <div className="grid grid-cols-3 sm:grid-cols-6 divide-x divide-white/[0.06]">
+                  <div className="grid grid-cols-3 divide-x divide-y divide-white/[0.06]">
                     <div className="px-3 py-2.5 text-center">
                       <p className="text-[10px] text-white/35 uppercase tracking-wider mb-0.5">Qualified</p>
                       <p className="text-sm font-bold text-white">
@@ -293,20 +321,20 @@ export default function Referrals() {
                       <p className="text-sm font-bold text-[#5eb4f0]">L{refCurrentLevel || 1}</p>
                     </div>
                     <div className="px-3 py-2.5 text-center">
-                      <p className="text-[10px] text-white/35 uppercase tracking-wider mb-0.5">Left</p>
-                      <p className="text-sm font-bold text-white">{refStats.left}</p>
-                    </div>
-                    <div className="px-3 py-2.5 text-center">
-                      <p className="text-[10px] text-white/35 uppercase tracking-wider mb-0.5">Right</p>
-                      <p className="text-sm font-bold text-white">{refStats.right}</p>
+                      <p className="text-[10px] text-white/35 uppercase tracking-wider mb-0.5">Earning</p>
+                      <p className="text-sm font-bold text-emerald-400">{formatCurrency(refWallet?.totalReceived || 0)}</p>
                     </div>
                     <div className="px-3 py-2.5 text-center">
                       <p className="text-[10px] text-white/35 uppercase tracking-wider mb-0.5">Direct</p>
                       <p className="text-sm font-bold text-white">{refDirectCount}</p>
                     </div>
                     <div className="px-3 py-2.5 text-center">
-                      <p className="text-[10px] text-white/35 uppercase tracking-wider mb-0.5">Earning</p>
-                      <p className="text-sm font-bold text-emerald-400">{formatCurrency(refWallet?.totalReceived || 0)}</p>
+                      <p className="text-[10px] text-white/35 uppercase tracking-wider mb-0.5">Left</p>
+                      <p className="text-sm font-bold text-white">{refStats.left}</p>
+                    </div>
+                    <div className="px-3 py-2.5 text-center">
+                      <p className="text-[10px] text-white/35 uppercase tracking-wider mb-0.5">Right</p>
+                      <p className="text-sm font-bold text-white">{refStats.right}</p>
                     </div>
                   </div>
                 </div>

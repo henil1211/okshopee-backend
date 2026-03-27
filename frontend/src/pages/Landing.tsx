@@ -184,7 +184,7 @@ export default function Landing() {
             <div className="animate-slide-in">
               <p className="mb-5 inline-flex items-center gap-2 rounded-full border border-[#118bdd]/30 bg-[#118bdd]/15 px-4 py-2 text-xs font-semibold uppercase tracking-[0.1em] text-[#7cc9ff]">
                 <Sparkles className="h-3.5 w-3.5" />
-                The Next-Generation Referral Network
+                ReferNex - Next Generation Referral Program
               </p>
 
               <h1 className="font-heading text-4xl font-bold leading-tight text-white sm:text-5xl lg:text-6xl">
@@ -386,7 +386,7 @@ export default function Landing() {
           <div className={`${containerClass} relative text-center`}>
             <h2 className="font-heading text-4xl font-bold leading-tight text-white sm:text-5xl">Ready to Take the Next Step?</h2>
             <p className="mx-auto mt-5 max-w-3xl text-base leading-relaxed text-white/70 sm:text-lg">
-              Join ReferNex today and become part of a next-generation referral network designed for the digital economy.
+              Join ReferNex today and become part of a next-generation referral program designed for the digital economy.
             </p>
             <Button className="btn-primary mt-8 h-12 rounded-full px-8 text-base" onClick={() => navigate('/register')}>
               Create Your Account Now

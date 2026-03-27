@@ -7,7 +7,7 @@ import type {
   MarketplaceInvoice, RewardRedemption
 } from '@/types';
 import Database from '@/db';
-import { isValidPhoneNumber, normalizePhoneNumber } from '@/utils/helpers';
+import { isValidPhoneNumberForCountry, normalizePhoneNumber } from '@/utils/helpers';
 
 type SystemEmailPurpose = 'otp' | 'welcome' | 'system';
 
@@ -209,7 +209,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return { success: false, message: backendAuth.message };
       }
       Database.setCurrentUser(backendAuth.user);
-      set({ user: backendAuth.user, isAuthenticated: true });
+      set({ user: Database.getCurrentUser() || backendAuth.user, isAuthenticated: true });
       void Database.hydrateFromServerBatches(Database.getStartupRemoteSyncBatches(), {
         strict: true,
         maxAttempts: 3,
@@ -288,7 +288,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       return { success: false, message: 'Invalid password' };
     }
     Database.setCurrentUser(user);
-    set({ user, isAuthenticated: true });
+    set({ user: Database.getCurrentUser() || user, isAuthenticated: true });
     // Load deferred data in background
     void Database.hydrateFromServerBatches(Database.getStartupDeferredRemoteSyncBatches(), {
       strict: false, maxAttempts: 3, timeoutMs: 60000, retryDelayMs: 2000,
@@ -314,19 +314,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (!targetUser) {
       return { success: false, message: 'Target user not found' };
     }
+    const canonicalTargetUser = Database.getUserByUserId(targetUser.userId) || Database.getUserById(targetUser.id) || targetUser;
 
     // Start impersonation session
     Database.startImpersonation({
       adminId: adminUser.id,
       adminUserId: adminUser.userId,
-      targetUserId: targetUser.id,
-      targetUserName: targetUser.fullName,
+      targetUserId: canonicalTargetUser.id,
+      targetUserName: canonicalTargetUser.fullName,
       startedAt: new Date().toISOString(),
       isActive: true
     });
 
-    set({ impersonatedUser: targetUser });
-    return { success: true, message: `Now logged in as ${targetUser.fullName}` };
+    set({ impersonatedUser: canonicalTargetUser });
+    return { success: true, message: `Now logged in as ${canonicalTargetUser.fullName}` };
   },
 
   endImpersonation: () => {
@@ -338,8 +339,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   register: async (userData: RegisterData) => {
+    await Database.ensureFreshData();
+
     const registrationGate = Database.getSensitiveActionSyncGate();
-    if (!registrationGate.allowed) {
+    // Allow registration if sync is just pending/slow; only block when truly offline
+    if (!registrationGate.allowed && registrationGate.status.state === 'offline') {
       return { success: false, message: registrationGate.message };
     }
 
@@ -351,8 +355,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       return { success: false, message: 'Email already exists' };
     }
 
-    if (!isValidPhoneNumber(phone)) {
-      return { success: false, message: 'Enter a valid mobile number' };
+    if (!isValidPhoneNumberForCountry(phone, country)) {
+      return { success: false, message: 'Enter a valid mobile number for the selected country' };
     }
 
     const phoneExists = Database.getUsers().some(
@@ -390,165 +394,198 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
     }
 
-    // Generate unique 7-digit ID
-    const newUserId = Database.generateUniqueUserId();
+    let newUser: User;
+    let newUserId = '';
+    try {
+      const result = await Database.runWithLocalStateTransaction(() => {
+        // Generate unique 7-digit ID
+        const generatedUserId = Database.generateUniqueUserId();
 
-    // Find placement in matrix (Top to Bottom, Left to Right)
-    let parentId: string | null = null;
-    let position: 'left' | 'right' | null = null;
+        // Find placement in matrix (Top to Bottom, Left to Right)
+        let parentId: string | null = null;
+        let position: 'left' | 'right' | null = null;
 
-    if (sponsor) {
-      const placement = Database.findNextPosition(sponsor.userId);
-      if (placement) {
-        parentId = placement.parentId;
-        position = placement.position;
-      }
-    }
-
-    // User "level" tracks plan progress (starts at 0). Matrix depth is tracked separately on matrix nodes.
-    const matrixDepthLevel = parentId ? (Database.getMatrixNode(parentId)?.level || 0) + 1 : 0;
-
-    // Create new user - ACTIVE immediately with PIN
-    const newUser: User = {
-      id: `user_${Date.now()}`,
-      userId: newUserId,
-      email,
-      password,
-      fullName,
-      phone: normalizedPhone,
-      country,
-      isActive: true, // Active immediately with PIN
-      isAdmin: false,
-      accountStatus: 'active',
-      blockedAt: null,
-      blockedUntil: null,
-      blockedReason: null,
-      deactivationReason: null,
-      reactivatedAt: null,
-      createdAt: new Date().toISOString(),
-      activatedAt: new Date().toISOString(), // Activated immediately
-      gracePeriodEnd: null,
-      sponsorId: sponsor?.userId || null,
-      parentId,
-      position,
-      level: 0,
-      directCount: 0,
-      totalEarnings: 0,
-      isCapped: false,
-      capLevel: 0,
-      reEntryCount: 0,
-      cycleCount: 0,
-      requiredDirectForNextLevel: 2,
-      completedDirectForCurrentLevel: 0,
-      transactionPassword, // Store transaction password
-      emailVerified: false, // Will be verified via OTP
-      achievements: {
-        nationalTour: false,
-        internationalTour: false,
-        familyTour: false
-      }
-    };
-
-    Database.createUser(newUser);
-
-    // Use the PIN for this registration
-    Database.consumePin(pinCode, newUser.id);
-
-    // Add to matrix
-    const matrixNode: MatrixNode = {
-      userId: newUserId,
-      username: fullName,
-      level: matrixDepthLevel,
-      position: position === 'left' ? 0 : 1,
-      parentId: parentId || undefined,
-      isActive: true
-    };
-    Database.addMatrixNode(matrixNode);
-
-    // Update parent's child reference
-    if (parentId && position) {
-      const matrix = Database.getMatrix();
-      const parentNode = matrix.find(m => m.userId === parentId);
-      if (parentNode) {
-        if (position === 'left') {
-          parentNode.leftChild = newUserId;
-        } else {
-          parentNode.rightChild = newUserId;
+        if (sponsor) {
+          const placement = Database.findNextPosition(sponsor.userId);
+          if (placement) {
+            parentId = placement.parentId;
+            position = placement.position;
+          }
         }
-        Database.saveMatrix(matrix);
-      }
-    }
 
-    // Update sponsor's direct count
-    if (sponsor) {
-      Database.updateUser(sponsor.id, {
-        directCount: sponsor.directCount + 1
-      });
-      Database.releaseLockedGiveHelp(sponsor.id);
-      Database.releaseLockedReceiveHelp(sponsor.id);
-    }
+        // User "level" tracks plan progress (starts at 0). Matrix depth is tracked separately on matrix nodes.
+        const matrixDepthLevel = parentId ? (Database.getMatrixNode(parentId)?.level || 0) + 1 : 0;
 
-    // Create PIN usage transaction
-    Database.createTransaction({
-      id: `tx_${Date.now()}_pin_used`,
-      userId: newUser.id,
-      type: 'pin_used',
-      amount: 11,
-      pinCode: pin.pinCode,
-      pinId: pin.id,
-      status: 'completed',
-      description: 'Account activation using PIN',
-      createdAt: new Date().toISOString(),
-      completedAt: new Date().toISOString()
-    });
+        // Create new user - ACTIVE immediately with PIN
+        const createdUser: User = {
+          id: `user_${Date.now()}`,
+          userId: generatedUserId,
+          email,
+          password,
+          fullName,
+          phone: normalizedPhone,
+          country,
+          isActive: true, // Active immediately with PIN
+          isAdmin: false,
+          accountStatus: 'active',
+          blockedAt: null,
+          blockedUntil: null,
+          blockedReason: null,
+          deactivationReason: null,
+          reactivatedAt: null,
+          createdAt: new Date().toISOString(),
+          activatedAt: new Date().toISOString(), // Activated immediately
+          gracePeriodEnd: null,
+          sponsorId: sponsor?.userId || null,
+          parentId,
+          position,
+          level: 0,
+          directCount: 0,
+          totalEarnings: 0,
+          isCapped: false,
+          capLevel: 0,
+          reEntryCount: 0,
+          cycleCount: 0,
+          requiredDirectForNextLevel: 2,
+          completedDirectForCurrentLevel: 0,
+          transactionPassword, // Store transaction password
+          emailVerified: false, // Will be verified via OTP
+          achievements: {
+            nationalTour: false,
+            internationalTour: false,
+            familyTour: false
+          }
+        };
 
-    // Distribute activation amount (from PIN value)
-    const directIncome = 5;
-    const adminFee = 1;
+        Database.createUser(createdUser);
+        Database.applyAnnouncementsForNewUser(createdUser.id);
 
-    // Direct sponsor income
-    if (sponsor) {
-      const sponsorWallet = Database.getWallet(sponsor.id);
-      if (sponsorWallet) {
-        Database.updateWallet(sponsor.id, {
-          incomeWallet: sponsorWallet.incomeWallet + directIncome,
-          totalReceived: sponsorWallet.totalReceived + directIncome
-        });
+        // Strict PIN guard: re-check right before consuming to prevent stale/duplicate use
+        const latestPin = Database.getPinByCode(pinCode);
+        if (!latestPin || latestPin.status !== 'unused') {
+          throw new Error('PIN has already been used');
+        }
+        const consumedPin = Database.consumePin(pinCode, createdUser.id);
+        if (!consumedPin) {
+          throw new Error('PIN has already been used');
+        }
 
+        // Add to matrix
+        const matrixNode: MatrixNode = {
+          userId: generatedUserId,
+          username: fullName,
+          level: matrixDepthLevel,
+          position: position === 'left' ? 0 : 1,
+          parentId: parentId || undefined,
+          isActive: true
+        };
+        Database.addMatrixNode(matrixNode);
+
+        // Update parent's child reference
+        if (parentId && position) {
+          const matrix = Database.getMatrix();
+          const parentNode = matrix.find(m => m.userId === parentId);
+          if (parentNode) {
+            if (position === 'left') {
+              parentNode.leftChild = generatedUserId;
+            } else {
+              parentNode.rightChild = generatedUserId;
+            }
+            Database.saveMatrix(matrix);
+          }
+        }
+
+        // Update sponsor's direct count
+        if (sponsor) {
+          Database.updateUser(sponsor.id, {
+            directCount: sponsor.directCount + 1
+          });
+          Database.releaseLockedGiveHelp(sponsor.id);
+          Database.releaseLockedReceiveHelp(sponsor.id);
+        }
+
+        // Create PIN usage transaction
         Database.createTransaction({
-          id: `tx_${Date.now()}_sponsor`,
-          userId: sponsor.id,
-          type: 'direct_income',
-          amount: directIncome,
-          fromUserId: newUser.id,
+          id: `tx_${Date.now()}_pin_used`,
+          userId: createdUser.id,
+          type: 'pin_used',
+          amount: 11,
+          pinCode: pin.pinCode,
+          pinId: pin.id,
           status: 'completed',
-          description: `Direct sponsor income from ${newUser.fullName} (${newUser.userId})`,
+          description: 'Account activation using PIN',
           createdAt: new Date().toISOString(),
           completedAt: new Date().toISOString()
         });
-        // Try to collect any pending system fee from sponsor now that income arrived
-        Database.deductPendingSystemFee(sponsor.id);
+
+        // Distribute activation amount (from PIN value)
+        const directIncome = 5;
+        const adminFee = 1;
+
+        // Direct sponsor income
+        if (sponsor) {
+          const sponsorWallet = Database.getWallet(sponsor.id);
+          if (sponsorWallet) {
+            Database.updateWallet(sponsor.id, {
+              incomeWallet: sponsorWallet.incomeWallet + directIncome,
+              totalReceived: sponsorWallet.totalReceived + directIncome
+            });
+
+            Database.createTransaction({
+              id: `tx_${Date.now()}_sponsor`,
+              userId: sponsor.id,
+              type: 'direct_income',
+              amount: directIncome,
+              fromUserId: createdUser.id,
+              status: 'completed',
+              description: `Direct sponsor income from ${createdUser.fullName} (${createdUser.userId})`,
+              createdAt: new Date().toISOString(),
+              completedAt: new Date().toISOString()
+            });
+            // Try to collect any pending system fee from sponsor now that income arrived
+            Database.deductPendingSystemFee(sponsor.id);
+          }
+        } else {
+          Database.addToSafetyPool(directIncome, createdUser.id, 'No sponsor - direct income');
+        }
+
+        // Admin fee to safety pool
+        Database.addToSafetyPool(adminFee, createdUser.id, 'Admin fee');
+
+        // Process matrix-level help payouts (binary tree event tracking, give-help/receive-help)
+        Database.processMatrixHelpForNewMember(generatedUserId, createdUser.id);
+
+        // Send welcome notification
+        Database.createNotification({
+          id: `notif_${Date.now()}`,
+          userId: createdUser.id,
+          title: 'Welcome To ReferNex',
+          message: `Welcome to ReferNex.\n\nAccount created successfully. Your User ID is ${generatedUserId}. Please check your email for your login and transaction passwords.`,
+          type: 'success',
+          isRead: false,
+          createdAt: new Date().toISOString()
+        });
+
+        return { newUser: createdUser, newUserId: generatedUserId };
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 120000,
+          maxAttempts: 3,
+          retryDelayMs: 2000
+        }
+      });
+      newUser = result.newUser;
+      newUserId = result.newUserId;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (message && /pin/i.test(message)) {
+        return { success: false, message };
       }
-    } else {
-      Database.addToSafetyPool(directIncome, newUser.id, 'No sponsor - direct income');
+      return { success: false, message: 'ID creation failed. Please try again after some time.' };
     }
-
-    // Admin fee to safety pool
-    Database.addToSafetyPool(adminFee, newUser.id, 'Admin fee');
-
-    // Process matrix-level help payouts (binary tree event tracking, give-help/receive-help)
-    Database.processMatrixHelpForNewMember(newUserId, newUser.id);
-
-    // Send welcome notification
-    Database.createNotification({
-      id: `notif_${Date.now()}`,
-      userId: newUser.id,
-      title: 'Welcome To ReferNex',
-      message: `Your account has been created successfully. Your User ID is ${newUserId}. Transaction Password: ${transactionPassword}`,
-      type: 'success',
-      isRead: false,
-      createdAt: new Date().toISOString()
-    });
 
     const welcomeSubject = 'Welcome To ReferNex';
     const welcomeBody = [
@@ -562,15 +599,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       '',
       'Keep these credentials secure.'
     ].join('\n');
-    const synced = await Database.forceRemoteSyncNowWithOptions();
-    if (!synced) {
-      try {
-        await Database.hydrateFromServer({ strict: true, maxAttempts: 1, timeoutMs: 8000, retryDelayMs: 500 });
-      } catch {
-        // If hydrate also fails, caller still gets explicit failure.
-      }
-      return { success: false, message: 'Registration could not be saved to backend. Please try again.' };
-    }
 
     void dispatchSystemEmail({
       to: newUser.email,
@@ -631,13 +659,19 @@ interface WalletState {
     fromUserId: string,
     toUserId: string,
     amount: number,
-    sourceWallet?: 'fund' | 'income',
+    sourceWallet?: 'fund' | 'income' | 'royalty',
+    destinationWallet?: 'fund' | 'income',
     security?: {
       transactionPassword?: string;
       otp?: string;
     }
   ) => Promise<{ success: boolean; message: string }>;
-  withdraw: (userId: string, amount: number, walletAddress: string) => Promise<{ success: boolean; message: string }>;
+  withdraw: (
+    userId: string,
+    amount: number,
+    walletAddress: string,
+    payoutQrCode?: string
+  ) => Promise<{ success: boolean; message: string }>;
   refreshTransactions: (userId: string) => void;
 }
 
@@ -646,24 +680,10 @@ export const useWalletStore = create<WalletState>((set, get) => ({
   transactions: [],
 
   loadWallet: (userId: string) => {
-    // Auto-settle any pending locked give-help / qualified locked receive-help in real time.
-    // Loop because each call only releases ONE item — repeat until nothing left to release.
-    const MAX_RELEASE_PASSES = 20;
-    for (let i = 0; i < MAX_RELEASE_PASSES; i++) {
-      const walletBefore = Database.getWallet(userId);
-      const lockedBefore = walletBefore?.lockedIncomeWallet || 0;
-      const giveLockedBefore = walletBefore?.giveHelpLocked || 0;
-      Database.releaseLockedGiveHelp(userId);
-      Database.releaseLockedReceiveHelp(userId);
-      const walletAfter = Database.getWallet(userId);
-      const lockedAfter = walletAfter?.lockedIncomeWallet || 0;
-      const giveLockedAfter = walletAfter?.giveHelpLocked || 0;
-      // Stop if nothing changed this pass
-      if (Math.abs(lockedBefore - lockedAfter) < 0.01 && Math.abs(giveLockedBefore - giveLockedAfter) < 0.01) break;
-    }
-    // Keep income wallet aligned with transaction ledger for legacy/updated logic transitions.
+    Database.repairLockedIncomeTrackerFromTransactions(userId);
     Database.repairIncomeWalletConsistency(userId);
-    // Keep locked income wallet aligned with tracker-level locks.
+    Database.repairFundWalletConsistency(userId);
+    Database.repairRoyaltyWalletConsistency(userId);
     Database.syncLockedIncomeWallet(userId);
     // Process monthly system fee if due
     Database.processMonthlySystemFee(userId);
@@ -678,12 +698,15 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     fromUserId: string,
     toUserId: string,
     amount: number,
-    sourceWallet: 'fund' | 'income' = 'fund',
+    sourceWallet: 'fund' | 'income' | 'royalty' = 'fund',
+    destinationWallet: 'fund' | 'income' = 'fund',
     security?: {
       transactionPassword?: string;
       otp?: string;
     }
   ) => {
+    await Database.ensureFreshData();
+
     const transferGate = Database.getSensitiveActionSyncGate();
     if (!transferGate.allowed) {
       return { success: false, message: transferGate.message };
@@ -701,6 +724,69 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     const normalizedTarget = (toUserId || '').trim();
+
+    if (sourceWallet === 'royalty') {
+      const royaltyBalance = fromWallet.royaltyWallet || 0;
+      if (royaltyBalance < amount) {
+        return { success: false, message: 'Insufficient royalty wallet balance' };
+      }
+
+      await Database.runWithLocalStateTransaction(async () => {
+        Database.updateWallet(fromUserId, {
+          royaltyWallet: royaltyBalance - amount,
+          incomeWallet: destinationWallet === 'income' ? fromWallet.incomeWallet + amount : fromWallet.incomeWallet,
+          depositWallet: destinationWallet === 'fund' ? fromWallet.depositWallet + amount : fromWallet.depositWallet
+        });
+
+        const now = new Date().toISOString();
+        const baseNow = Date.now();
+        const royaltySendTxId = `tx_${baseNow}_royalty_send`;
+
+        Database.createTransaction({
+          id: royaltySendTxId,
+          userId: fromUserId,
+          type: 'royalty_transfer',
+          amount: -amount,
+          toUserId: fromUserId,
+          status: 'completed',
+          description: `Transferred from royalty wallet to your ${destinationWallet} wallet`,
+          createdAt: now,
+          completedAt: now
+        });
+
+        Database.createTransaction({
+          id: `tx_${baseNow}_royalty_recv_${destinationWallet}`,
+          userId: fromUserId,
+          type: destinationWallet === 'income' ? 'royalty_transfer' : 'p2p_transfer',
+          amount,
+          fromUserId,
+          sourceTransferTxId: royaltySendTxId,
+          status: 'completed',
+          description: destinationWallet === 'income'
+            ? 'Income wallet credited from your royalty wallet transfer'
+            : 'Fund wallet credited from your royalty wallet transfer',
+          createdAt: now,
+          completedAt: now
+        });
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 60000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      });
+
+      get().loadWallet(fromUserId);
+      return {
+        success: true,
+        message: destinationWallet === 'income'
+          ? 'Royalty transferred to your income wallet successfully'
+          : 'Royalty transferred to your fund wallet successfully'
+      };
+    }
 
     if (sourceWallet === 'income') {
       if (fromWallet.incomeWallet < amount) {
@@ -728,42 +814,68 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         }
       }
 
-      Database.updateWallet(fromUserId, {
-        incomeWallet: fromWallet.incomeWallet - amount
-      });
+      await Database.runWithLocalStateTransaction(async () => {
+        Database.updateWallet(fromUserId, {
+          incomeWallet: fromWallet.incomeWallet - amount
+        });
 
-      Database.updateWallet(toUser.id, {
-        depositWallet: toWallet.depositWallet + amount
-      });
+        Database.updateWallet(toUser.id, {
+          depositWallet: toWallet.depositWallet + amount
+        });
 
-      const now = new Date().toISOString();
-      Database.createTransaction({
-        id: `tx_${Date.now()}_income_send`,
-        userId: fromUserId,
-        type: 'income_transfer',
-        amount: -amount,
-        toUserId: toUser.id,
-        status: 'completed',
-        description: isSelfTransfer
-          ? 'Transferred from income wallet to your fund wallet'
-          : `Transferred from income wallet to fund wallet of ${toUser.fullName} (${toUser.userId})`,
-        createdAt: now,
-        completedAt: now
-      });
-
-      if (!isSelfTransfer) {
+        const now = new Date().toISOString();
+        const baseNow = Date.now();
+        const incomeSendTxId = `tx_${baseNow}_income_send`;
         Database.createTransaction({
-          id: `tx_${Date.now()}_income_recv`,
-          userId: toUser.id,
-          type: 'p2p_transfer',
-          amount,
-          fromUserId,
+          id: incomeSendTxId,
+          userId: fromUserId,
+          type: 'income_transfer',
+          amount: -amount,
+          toUserId: toUser.id,
           status: 'completed',
-          description: `Fund wallet received from ${fromUser.fullName} (${fromUser.userId}) via income wallet transfer`,
+          description: isSelfTransfer
+            ? 'Transferred from income wallet to your fund wallet'
+            : `Transferred from income wallet to fund wallet of ${toUser.fullName} (${toUser.userId})`,
           createdAt: now,
           completedAt: now
         });
-      }
+
+        if (isSelfTransfer) {
+          Database.createTransaction({
+            id: `tx_${baseNow}_fund_recv_self`,
+            userId: fromUserId,
+            type: 'p2p_transfer',
+            amount,
+            fromUserId,
+            sourceTransferTxId: incomeSendTxId,
+            status: 'completed',
+            description: 'Fund wallet credited from your income wallet transfer',
+            createdAt: now,
+            completedAt: now
+          });
+        } else {
+          Database.createTransaction({
+            id: `tx_${baseNow}_income_recv`,
+            userId: toUser.id,
+            type: 'p2p_transfer',
+            amount,
+            fromUserId,
+            status: 'completed',
+            description: `Fund wallet received from ${fromUser.fullName} (${fromUser.userId}) via income wallet transfer`,
+            createdAt: now,
+            completedAt: now
+          });
+        }
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 60000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      });
 
       get().loadWallet(fromUserId);
       return {
@@ -798,37 +910,49 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     // Fund wallet P2P transfer (upline/downline only)
-    Database.updateWallet(fromUserId, {
-      depositWallet: fromWallet.depositWallet - amount
-    });
+    await Database.runWithLocalStateTransaction(async () => {
+      Database.updateWallet(fromUserId, {
+        depositWallet: fromWallet.depositWallet - amount
+      });
 
-    Database.updateWallet(toUser.id, {
-      depositWallet: toWallet.depositWallet + amount
-    });
+      Database.updateWallet(toUser.id, {
+        depositWallet: toWallet.depositWallet + amount
+      });
 
-    // Create transaction records
-    Database.createTransaction({
-      id: `tx_${Date.now()}_send`,
-      userId: fromUserId,
-      type: 'p2p_transfer',
-      amount: -amount,
-      toUserId: toUser.id,
-      status: 'completed',
-      description: `Fund wallet transfer to ${toUser.fullName} (${toUser.userId})`,
-      createdAt: new Date().toISOString(),
-      completedAt: new Date().toISOString()
-    });
+      const now = new Date().toISOString();
+      const baseNow = Date.now();
+      Database.createTransaction({
+        id: `tx_${baseNow}_send`,
+        userId: fromUserId,
+        type: 'p2p_transfer',
+        amount: -amount,
+        toUserId: toUser.id,
+        status: 'completed',
+        description: `Fund wallet transfer to ${toUser.fullName} (${toUser.userId})`,
+        createdAt: now,
+        completedAt: now
+      });
 
-    Database.createTransaction({
-      id: `tx_${Date.now()}_recv`,
-      userId: toUser.id,
-      type: 'p2p_transfer',
-      amount,
-      fromUserId,
-      status: 'completed',
-      description: `Fund wallet transfer from ${fromUser.fullName} (${fromUser.userId})`,
-      createdAt: new Date().toISOString(),
-      completedAt: new Date().toISOString()
+      Database.createTransaction({
+        id: `tx_${baseNow}_recv`,
+        userId: toUser.id,
+        type: 'p2p_transfer',
+        amount,
+        fromUserId,
+        status: 'completed',
+        description: `Fund wallet transfer from ${fromUser.fullName} (${fromUser.userId})`,
+        createdAt: now,
+        completedAt: now
+      });
+    }, {
+      syncOnCommit: true,
+      syncOptions: {
+        full: false,
+        force: true,
+        timeoutMs: 60000,
+        maxAttempts: 3,
+        retryDelayMs: 1500
+      }
     });
 
     get().loadWallet(fromUserId);
@@ -836,53 +960,98 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     return { success: true, message: 'Transfer successful' };
   },
 
-  withdraw: async (userId: string, amount: number, walletAddress: string) => {
-    const withdrawalGate = Database.getSensitiveActionSyncGate();
-    if (!withdrawalGate.allowed) {
-      return { success: false, message: withdrawalGate.message };
+  withdraw: async (userId: string, amount: number, walletAddress: string, payoutQrCode?: string) => {
+    try {
+      await Database.ensureFreshData();
+
+      const withdrawalGate = Database.getSensitiveActionSyncGate();
+      if (!withdrawalGate.allowed) {
+        return { success: false, message: withdrawalGate.message };
+      }
+
+      const settings = Database.getSettings();
+      const wallet = Database.getWallet(userId);
+      const user = Database.getUserById(userId);
+
+      if (!wallet || !user) {
+        return { success: false, message: 'User not found' };
+      }
+
+      if (amount <= 0) {
+        return { success: false, message: 'Invalid amount' };
+      }
+      const amountInCents = Math.round(amount * 100);
+      if (amountInCents < 1000) {
+        return { success: false, message: 'Minimum withdrawal amount is $10' };
+      }
+      if (amountInCents % 1000 !== 0) {
+        return { success: false, message: 'Withdrawal amount must be in multiples of $10 (10, 20, 30...)' };
+      }
+
+      const resolvedWalletAddress = String(walletAddress || '').trim();
+      if (!resolvedWalletAddress) {
+        return { success: false, message: 'USDT (BEP20) address is required.' };
+      }
+
+      const resolvedPayoutQrCode = String(payoutQrCode || '').trim();
+
+      // Use income wallet for withdrawals
+      const availableWithdrawableBalance = Math.max(0, wallet.incomeWallet - (wallet.giveHelpLocked || 0));
+      if (availableWithdrawableBalance < amount) {
+        return { success: false, message: 'Insufficient withdrawable balance (some amount is locked for give-help)' };
+      }
+
+      const fee = amount * (settings.withdrawalFeePercent / 100);
+      const netAmount = amount - fee;
+
+      await Database.runWithLocalStateTransaction(async () => {
+        const now = new Date().toISOString();
+        const baseNow = Date.now();
+
+        // Deduct from wallet immediately and keep request pending until admin verifies.
+        // If rejected, amount will be refunded by admin action.
+        Database.updateWallet(userId, {
+          incomeWallet: wallet.incomeWallet - amount
+        });
+
+        Database.createTransaction({
+          id: `tx_${baseNow}_withdraw`,
+          userId,
+          type: 'withdrawal',
+          amount: -amount,
+          status: 'pending',
+          description: 'Withdrawal request submitted. It will be processed within 72 hours.',
+          walletAddress: resolvedWalletAddress,
+          ...(resolvedPayoutQrCode ? { payoutQrCode: resolvedPayoutQrCode } : {}),
+          requesterUserId: user.userId,
+          requesterName: user.fullName,
+          fee,
+          netAmount,
+          createdAt: now
+        });
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 60000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      });
+
+      get().loadWallet(userId);
+      get().refreshTransactions(userId);
+
+      return { success: true, message: `Withdrawal request submitted for $${netAmount.toFixed(2)} after fee. Processing time: up to 72 hours.` };
+    } catch (error) {
+      return {
+        success: false,
+        message: error instanceof Error
+          ? `Withdrawal could not be safely submitted: ${error.message}`
+          : 'Withdrawal could not be safely submitted. Please try again.'
+      };
     }
-
-    const settings = Database.getSettings();
-    const wallet = Database.getWallet(userId);
-    const user = Database.getUserById(userId);
-
-    if (!wallet || !user) {
-      return { success: false, message: 'User not found' };
-    }
-
-    if (amount <= 0) {
-      return { success: false, message: 'Invalid amount' };
-    }
-
-    // Use income wallet for withdrawals
-    const availableWithdrawableBalance = Math.max(0, wallet.incomeWallet - (wallet.giveHelpLocked || 0));
-    if (availableWithdrawableBalance < amount) {
-      return { success: false, message: 'Insufficient withdrawable balance (some amount is locked for give-help)' };
-    }
-
-    const fee = amount * (settings.withdrawalFeePercent / 100);
-    const netAmount = amount - fee;
-
-    // Deduct from wallet
-    Database.updateWallet(userId, {
-      incomeWallet: wallet.incomeWallet - amount
-    });
-
-    // Create withdrawal transaction
-    Database.createTransaction({
-      id: `tx_${Date.now()}_withdraw`,
-      userId,
-      type: 'withdrawal',
-      amount: -amount,
-      status: 'completed',
-      description: `Withdrawal to ${walletAddress} (Fee: $${fee})`,
-      createdAt: new Date().toISOString(),
-      completedAt: new Date().toISOString()
-    });
-
-    get().loadWallet(userId);
-
-    return { success: true, message: `Withdrawal of $${netAmount} successful (Fee: $${fee})` };
   },
 
   refreshTransactions: (userId: string) => {
@@ -901,6 +1070,7 @@ interface PinState {
   purchaseRequests: PinPurchaseRequest[];
   loadPins: (userId: string) => void;
   transferPin: (pinId: string, fromUserId: string, toUserId: string) => Promise<{ success: boolean; message: string }>;
+  transferPinsBulk: (pinIds: string[], fromUserId: string, toUserId: string) => Promise<{ success: boolean; message: string }>;
   requestPinPurchase: (
     userId: string,
     quantity: number,
@@ -942,14 +1112,17 @@ export const usePinStore = create<PinState>((set, get) => ({
 
   transferPin: async (pinId: string, fromUserId: string, toUserId: string) => {
     try {
-      // Check if in same chain
-      if (!Database.isInSameChain(fromUserId, toUserId)) {
-        return { success: false, message: 'PIN can only be transferred to upline or downline members' };
-      }
+      await Database.ensureFreshData();
 
-      const toUser = Database.getUserByUserId(toUserId);
+      const normalizedTarget = (toUserId || '').replace(/\D/g, '').slice(0, 7);
+      const toUser = Database.getUserByUserId(normalizedTarget) || Database.getUserById(toUserId);
       if (!toUser) {
         return { success: false, message: 'Recipient not found' };
+      }
+
+      // Check if in same chain
+      if (!Database.isInSameChain(fromUserId, toUser.id)) {
+        return { success: false, message: 'PIN can only be transferred to upline or downline members' };
       }
 
       const result = Database.transferPin(pinId, toUser.id, fromUserId);
@@ -960,6 +1133,14 @@ export const usePinStore = create<PinState>((set, get) => ({
       // Reload pins
       get().loadPins(fromUserId);
 
+      try {
+        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+        await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+        get().loadPins(fromUserId);
+      } catch {
+        // best-effort sync
+      }
+
       return { success: true, message: `PIN transferred to ${toUser.fullName}` };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Transfer failed';
@@ -967,7 +1148,59 @@ export const usePinStore = create<PinState>((set, get) => ({
     }
   },
 
+  transferPinsBulk: async (pinIds: string[], fromUserId: string, toUserId: string) => {
+    if (pinIds.length === 0) {
+      return { success: false, message: 'No PINs selected' };
+    }
+    try {
+      await Database.ensureFreshData();
+
+      const normalizedTarget = (toUserId || '').replace(/\D/g, '').slice(0, 7);
+      const toUser = Database.getUserByUserId(normalizedTarget) || Database.getUserById(toUserId);
+      if (!toUser) {
+        return { success: false, message: 'Recipient not found' };
+      }
+      if (!Database.isInSameChain(fromUserId, toUser.id)) {
+        return { success: false, message: 'PIN can only be transferred to upline or downline members' };
+      }
+
+      let transferred = 0;
+      for (const pinId of pinIds) {
+        try {
+          const result = Database.transferPin(pinId, toUser.id, fromUserId);
+          if (result) {
+            transferred += 1;
+          }
+        } catch {
+          // ignore individual failures
+        }
+      }
+
+      if (transferred === 0) {
+        return { success: false, message: 'Failed to transfer selected PINs' };
+      }
+
+      get().loadPins(fromUserId);
+
+      try {
+        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+        await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+        get().loadPins(fromUserId);
+      } catch {
+        // best-effort sync
+      }
+
+      const suffix = transferred === pinIds.length ? '' : ` (${transferred}/${pinIds.length})`;
+      return { success: true, message: `PINs transferred to ${toUser.fullName}${suffix}` };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Bulk transfer failed';
+      return { success: false, message };
+    }
+  },
+
   requestPinPurchase: async (userId: string, quantity: number, options) => {
+    await Database.ensureFreshData();
+
     if (quantity < 1) {
       return { success: false, message: 'Quantity must be at least 1' };
     }
@@ -1019,6 +1252,17 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     Database.createPinPurchaseRequest(request);
     get().loadPurchaseRequests(userId);
+    useWalletStore.getState().loadWallet(userId);
+
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      get().loadPins(userId);
+      get().loadPurchaseRequests(userId);
+      useWalletStore.getState().loadWallet(userId);
+    } catch {
+      // best-effort sync; UI will show pending sync if offline
+    }
 
     return {
       success: true,
@@ -1029,6 +1273,8 @@ export const usePinStore = create<PinState>((set, get) => ({
   },
 
   buyPinsDirect: async (userId: string, quantity: number) => {
+    await Database.ensureFreshData();
+
     if (quantity < 1) {
       return { success: false, message: 'Quantity must be at least 1' };
     }
@@ -1091,6 +1337,17 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     get().loadPins(userId);
     get().loadPurchaseRequests(userId);
+    useWalletStore.getState().loadWallet(userId);
+
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      get().loadPins(userId);
+      get().loadPurchaseRequests(userId);
+      useWalletStore.getState().loadWallet(userId);
+    } catch {
+      // best-effort sync; UI will show pending sync if offline
+    }
 
     return { success: true, message: `${quantity} PIN(s) purchased instantly` };
   },
@@ -1165,7 +1422,12 @@ interface AdminState {
   blockUser: (targetUserId: string, type: 'temporary' | 'permanent', reason?: string, hours?: number) => Promise<{ success: boolean; message: string }>;
   unblockUser: (targetUserId: string) => Promise<{ success: boolean; message: string }>;
   reactivateAutoDeactivatedUser: (targetUserId: string) => Promise<{ success: boolean; message: string }>;
-  addFundsToUser: (userId: string, amount: number, walletType: 'deposit' | 'income') => Promise<{ success: boolean; message: string }>;
+  addFundsToUser: (
+    userId: string,
+    amount: number,
+    walletType: 'deposit' | 'income' | 'royalty',
+    note?: string
+  ) => Promise<{ success: boolean; message: string }>;
   bulkCreateUsersWithoutPin: (params: {
     sponsorUserId: string;
     quantity: number;
@@ -1269,6 +1531,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   generatePins: async (quantity: number, ownerId: string) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can generate PINs' };
@@ -1277,10 +1541,20 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const pins = Database.generatePins(quantity, ownerId, adminUser.id);
     get().loadAllPins();
 
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      get().loadAllPins();
+    } catch {
+      // best-effort sync
+    }
+
     return { success: true, message: `Generated ${quantity} PIN(s)`, pins };
   },
 
   approvePinPurchase: async (requestId: string) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can approve PIN purchases' };
@@ -1295,10 +1569,22 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     get().loadAllPinRequests();
     get().loadAllPins();
 
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      get().loadPendingPinRequests();
+      get().loadAllPinRequests();
+      get().loadAllPins();
+    } catch {
+      // best-effort sync
+    }
+
     return { success: true, message: 'PIN purchase approved and PINs generated' };
   },
 
   rejectPinPurchase: async (requestId: string, reason: string) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can reject PIN purchases' };
@@ -1344,6 +1630,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   reopenPinPurchase: async (requestId: string) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can reopen PIN purchase requests' };
@@ -1365,6 +1653,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   suspendPin: async (pinId: string, reason: string) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can suspend PINs' };
@@ -1380,6 +1670,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   unsuspendPin: async (pinId: string) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can unsuspend PINs' };
@@ -1467,7 +1759,14 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     return { success: true, message: `User ${targetUserId} reactivated. 30-day deadline restarted.` };
   },
 
-  addFundsToUser: async (userId: string, amount: number, walletType: 'deposit' | 'income' = 'deposit') => {
+  addFundsToUser: async (userId: string, amount: number, walletType: 'deposit' | 'income' | 'royalty' = 'deposit', note?: string) => {
+    await Database.ensureFreshData();
+
+    const adminUser = Database.getCurrentUser();
+    if (!adminUser?.isAdmin) {
+      return { success: false, message: 'Only admin can add funds' };
+    }
+
     const user = Database.getUserByUserId(userId);
     if (!user) {
       return { success: false, message: 'User not found' };
@@ -1476,6 +1775,47 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const wallet = Database.getWallet(user.id);
     if (!wallet) {
       return { success: false, message: 'User wallet not found' };
+    }
+
+    if (walletType === 'royalty') {
+      const pool = Database.getSafetyPool();
+      if ((pool.totalAmount || 0) < amount) {
+        return { success: false, message: 'Insufficient safety pool balance for royalty payout' };
+      }
+
+      const txMessage = String(note || '').trim() || 'Royalty credited by admin';
+      const poolReason = `Royalty Payout: ${user.fullName} (${user.userId})${txMessage ? ` - ${txMessage}` : ''}`;
+
+      await Database.runWithLocalStateTransaction(async () => {
+        Database.deductFromSafetyPool(amount, adminUser.id, poolReason);
+        Database.updateWallet(user.id, {
+          royaltyWallet: (wallet.royaltyWallet || 0) + amount,
+          totalReceived: (wallet.totalReceived || 0) + amount
+        });
+
+        Database.createTransaction({
+          id: `tx_${Date.now()}_admin`,
+          userId: user.id,
+          type: 'royalty_income',
+          amount,
+          status: 'completed',
+          description: txMessage,
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString()
+        });
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 30000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      });
+
+      get().loadStats();
+      return { success: true, message: `Sent $${amount} royalty to user from safety pool` };
     }
 
     if (walletType === 'deposit') {
@@ -1499,8 +1839,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       completedAt: new Date().toISOString()
     });
 
-    // Try to collect any pending system fee after admin credit
     Database.deductPendingSystemFee(user.id);
+    get().loadStats();
 
     return { success: true, message: `Added $${amount} to user's ${walletType} wallet` };
   },
@@ -1583,7 +1923,10 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           const newUserId = Database.generateUniqueUserId();
           const phoneSeed = `${Date.now()}${i}${Math.floor(Math.random() * 1000)}`.replace(/\D/g, '');
           const phone = phoneSeed.slice(-10).padStart(10, '9');
-          const fullName = `${params.namePrefix.trim()} ${String(i + 1).padStart(3, '0')}`;
+          const baseName = params.namePrefix.trim();
+          const fullName = quantity > 1
+            ? `${baseName} ${String(i + 1).padStart(3, '0')}`
+            : baseName;
           const email = `admin.bulk.${sponsor.userId}.${seed}.${i}@auto.local`;
 
           const newUser: User = {
@@ -1625,6 +1968,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           };
 
           Database.createUser(newUser);
+          Database.applyAnnouncementsForNewUser(newUser.id);
 
           const matrixNode: MatrixNode = {
             userId: newUserId,
@@ -2077,3 +2421,16 @@ export function useSyncRefreshKey(): number {
 
   return key;
 }
+
+let lockedIncomeAutoReleaseBound = false;
+let lockedIncomeAutoReleaseTimer: ReturnType<typeof setInterval> | null = null;
+function bindLockedIncomeAutoRelease(): void {
+  if (lockedIncomeAutoReleaseBound) return;
+  lockedIncomeAutoReleaseBound = true;
+  if (lockedIncomeAutoReleaseTimer) {
+    clearInterval(lockedIncomeAutoReleaseTimer);
+    lockedIncomeAutoReleaseTimer = null;
+  }
+}
+
+bindLockedIncomeAutoRelease();

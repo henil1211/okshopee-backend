@@ -69,11 +69,11 @@ let smtpTransporter;
 const DB_KEYS = [
   'mlm_users', 'mlm_wallets', 'mlm_transactions', 'mlm_matrix',
   'mlm_safety_pool', 'mlm_grace_periods', 'mlm_reentries',
-  'mlm_notifications', 'mlm_settings', 'mlm_payment_methods',
+  'mlm_notifications', 'mlm_announcements', 'mlm_settings', 'mlm_payment_methods',
   'mlm_payments', 'mlm_pins', 'mlm_pin_transfers',
   'mlm_pin_purchase_requests', 'mlm_support_tickets', 'mlm_otp_records',
   'mlm_email_logs', 'mlm_impersonation', 'mlm_help_trackers',
-  'mlm_matrix_pending_contributions',
+  'mlm_matrix_pending_contributions', 'mlm_ghost_help_repair_log',
   'mlm_marketplace_categories', 'mlm_marketplace_retailers',
   'mlm_marketplace_banners', 'mlm_marketplace_deals',
   'mlm_marketplace_invoices', 'mlm_marketplace_redemptions'
@@ -1099,7 +1099,7 @@ const server = createServer(async (req, res) => {
           walletsReset = wallets.length;
           const resetWallets = wallets.map((w) => ({
             ...w,
-            incomeWallet: 0, matrixWallet: 0, totalReceived: 0, totalGiven: 0,
+            incomeWallet: 0, royaltyWallet: 0, matrixWallet: 0, totalReceived: 0, totalGiven: 0,
             giveHelpLocked: 0, lockedIncomeWallet: 0
           }));
           await upsertStateKeyValue('mlm_wallets', JSON.stringify(resetWallets), now);

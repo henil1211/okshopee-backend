@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback, type ChangeEvent } from 'react';
 import { useAuthStore, useAdminStore } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -10,16 +10,27 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Users, ArrowLeft, TrendingUp, Wallet, Shield,
-  Settings, DollarSign, Search, CheckCircle, RefreshCw, Download,
+  Settings, DollarSign, Search, CheckCircle, RefreshCw, Download, Clock,
   CreditCard, XCircle, Eye, LogOut, IdCard, Ticket, UserCog,
   BarChart3, Copy, Check, Ban, UserCheck, ArrowUp, ArrowDown, MessageCircle, Share2,
-  ShoppingBag, Plus, Pencil, Trash2, FileText, Award
+  ShoppingBag, Plus, Pencil, Trash2, FileText, Award, Megaphone, ImagePlus, Maximize2, RotateCcw, EyeOff,
+  AlertTriangle, Wrench
 } from 'lucide-react';
-import { formatCurrency, formatNumber, formatDate, getInitials, generateAvatarColor, getTransactionTypeLabel } from '@/utils/helpers';
+import {
+  formatCurrency,
+  formatNumber,
+  formatDate,
+  getInitials,
+  generateAvatarColor,
+  getTransactionTypeLabel,
+  getPasswordRequirementsText,
+  getTransactionPasswordRequirementsText,
+  isStrongPassword,
+  isValidTransactionPassword
+} from '@/utils/helpers';
 import { toast } from 'sonner';
-import Database from '@/db';
-import { helpDistributionTable } from '@/db';
-import type { Payment, PaymentMethod, Pin, SupportTicket, SupportTicketAttachment, SupportTicketStatus, MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal } from '@/types';
+import Database, { DB_KEYS, helpDistributionTable } from '@/db';
+import type { Payment, PaymentMethod, PaymentMethodType, Pin, Transaction, SupportTicket, SupportTicketAttachment, SupportTicketStatus, MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal, AdminAnnouncement, MatrixNode } from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
@@ -54,6 +65,7 @@ interface GiveHelpReportRow {
   userId: string;
   userName: string;
   amount: number;
+  level: number;
   giveToId: string;
   giveToUserName: string;
 }
@@ -89,6 +101,33 @@ interface WithdrawalReportRow {
   amount: number;
   status: string;
   description: string;
+}
+
+interface WithdrawalGapScanRow {
+  otpId: string;
+  userId: string;
+  internalUserId: string;
+  fullName: string;
+  email: string;
+  otpCreatedAt: string;
+  issue: string;
+}
+
+interface PaymentMethodDraft {
+  type: PaymentMethodType;
+  name: string;
+  description: string;
+  instructions: string;
+  walletAddress: string;
+  accountNumber: string;
+  accountName: string;
+  bankName: string;
+  upiId: string;
+  qrCode: string;
+  minAmount: string;
+  maxAmount: string;
+  processingFee: string;
+  processingTime: string;
 }
 
 interface LockedIncomeReportRow {
@@ -165,11 +204,14 @@ function MarketplaceRetailerForm({ retailer, categories, onSave, onCancel }: {
 }) {
   const [name, setName] = useState(retailer?.name || '');
   const [logoUrl, setLogoUrl] = useState(retailer?.logoUrl || '');
-  const [discountPercent, setDiscountPercent] = useState(retailer?.discountPercent?.toString() || '0');
+  const [badgeText, setBadgeText] = useState(retailer?.badgeText || (retailer?.discountPercent ? `${retailer.discountPercent}% OFF` : ''));
   const [discountText, setDiscountText] = useState(retailer?.discountText || '');
   const [websiteUrl, setWebsiteUrl] = useState(retailer?.websiteUrl || '');
   const [affiliateLink, setAffiliateLink] = useState(retailer?.affiliateLink || '');
-  const [categoryId, setCategoryId] = useState(retailer?.categoryId || (categories[0]?.id || ''));
+  const initialCategoryId = retailer?.categoryId && categories.some(c => c.id === retailer.categoryId)
+    ? retailer.categoryId
+    : (categories[0]?.id || '');
+  const [categoryId, setCategoryId] = useState(initialCategoryId);
   const [isTopRetailer, setIsTopRetailer] = useState(retailer?.isTopRetailer ?? false);
   const [isActive, setIsActive] = useState(retailer?.isActive ?? true);
   const [sortOrder, setSortOrder] = useState(retailer?.sortOrder?.toString() || '0');
@@ -197,12 +239,12 @@ function MarketplaceRetailerForm({ retailer, categories, onSave, onCancel }: {
           </select>
         </div>
         <div className="space-y-1">
-          <Label className="text-white/70 text-xs">Discount %</Label>
-          <Input type="number" value={discountPercent} onChange={e => setDiscountPercent(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" />
+          <Label className="text-white/70 text-xs">Top Right Badge</Label>
+          <Input value={badgeText} onChange={e => setBadgeText(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="Special Offer" />
         </div>
         <div className="space-y-1">
-          <Label className="text-white/70 text-xs">Discount Text</Label>
-          <Input value={discountText} onChange={e => setDiscountText(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="Up to 30% Cashback" />
+          <Label className="text-white/70 text-xs">Discounted Text</Label>
+          <Input value={discountText} onChange={e => setDiscountText(e.target.value)} className="bg-[#1f2937] border-white/10 text-white h-9" placeholder="Loan Upto Rs 75 Lakhs" />
         </div>
         <div className="space-y-1">
           <Label className="text-white/70 text-xs">Website URL</Label>
@@ -233,7 +275,7 @@ function MarketplaceRetailerForm({ retailer, categories, onSave, onCancel }: {
         </label>
       </div>
       <div className="flex gap-2">
-        <Button size="sm" className="bg-[#118bdd]" disabled={!name} onClick={() => onSave({ name, logoUrl, discountPercent: Number(discountPercent), discountText, websiteUrl, affiliateLink, categoryId, isTopRetailer, isActive, sortOrder: Number(sortOrder) })}>
+        <Button size="sm" className="bg-[#118bdd]" disabled={!name} onClick={() => onSave({ name, logoUrl, badgeText: badgeText.trim(), discountPercent: retailer?.discountPercent || 0, discountText: discountText.trim(), websiteUrl, affiliateLink, categoryId, isTopRetailer, isActive, sortOrder: Number(sortOrder) })}>
           {retailer ? 'Update' : 'Create'}
         </Button>
         <Button size="sm" variant="outline" className="border-white/20 text-white/70" onClick={onCancel}>Cancel</Button>
@@ -466,15 +508,46 @@ export default function Admin() {
   const [bulkNoPinProgress, setBulkNoPinProgress] = useState<BulkCreateProgress | null>(null);
   const [selectedUser, setSelectedUser] = useState<string | null>(null);
   const [fundAmount, setFundAmount] = useState('');
-  const [fundWalletType, setFundWalletType] = useState<'deposit' | 'income'>('deposit');
+  const [fundWalletType, setFundWalletType] = useState<'deposit' | 'income' | 'royalty'>('deposit');
+  const [fundMessage, setFundMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [orphanedPinCount, setOrphanedPinCount] = useState(0);
+  const orphanedPinsNotifiedRef = useRef(false);
   const [pendingPayments, setPendingPayments] = useState<Payment[]>([]);
+  const [depositHistory, setDepositHistory] = useState<Payment[]>([]);
+  const [depositHistoryStatusFilter, setDepositHistoryStatusFilter] = useState<'all' | 'pending' | 'under_review' | 'completed' | 'failed' | 'reversed'>('all');
+  const [withdrawalRequests, setWithdrawalRequests] = useState<Transaction[]>([]);
+  const [withdrawalStatusFilter, setWithdrawalStatusFilter] = useState<'all' | 'pending' | 'completed' | 'failed'>('pending');
+  const [withdrawalReasonDrafts, setWithdrawalReasonDrafts] = useState<Record<string, string>>({});
+  const [withdrawalReceiptDrafts, setWithdrawalReceiptDrafts] = useState<Record<string, string>>({});
+  const [copiedWithdrawalAddressId, setCopiedWithdrawalAddressId] = useState<string | null>(null);
+  const [fullscreenQr, setFullscreenQr] = useState<{ src: string; userId: string } | null>(null);
+  const [fullscreenPaymentProof, setFullscreenPaymentProof] = useState<{ src: string; userId: string } | null>(null);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
+  const [editingPaymentMethodId, setEditingPaymentMethodId] = useState<string | null>(null);
+  const [paymentMethodDraft, setPaymentMethodDraft] = useState<PaymentMethodDraft | null>(null);
+  const [selectedWithdrawalRequest, setSelectedWithdrawalRequest] = useState<Transaction | null>(null);
+  const [showWithdrawalRequestDialog, setShowWithdrawalRequestDialog] = useState(false);
+  const [withdrawalGapScanResults, setWithdrawalGapScanResults] = useState<WithdrawalGapScanRow[]>([]);
+  const [showWithdrawalGapDialog, setShowWithdrawalGapDialog] = useState(false);
   const [selectedPayment, setSelectedPayment] = useState<Payment | null>(null);
   const [adminNotes, setAdminNotes] = useState('');
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
   const [userSearchId, setUserSearchId] = useState('');
   const [searchedUser, setSearchedUser] = useState<any>(null);
+  const [missingMatrixNode, setMissingMatrixNode] = useState<MatrixNode | null>(null);
+  const [missingUserRecovery, setMissingUserRecovery] = useState({
+    userId: '',
+    fullName: '',
+    email: '',
+    phone: '',
+    country: '',
+    sponsorId: '',
+    loginPassword: '',
+    transactionPassword: '',
+    restoreSponsorIncome: true
+  });
+  const [isRecoveringUser, setIsRecoveringUser] = useState(false);
 
   // PIN Management
   const [pinQuantity, setPinQuantity] = useState(1);
@@ -484,6 +557,14 @@ export default function Admin() {
   const [copiedPin, setCopiedPin] = useState<string | null>(null);
   const [pinSuspendReason, setPinSuspendReason] = useState('Admin action');
   const [pinRequestStatusFilter, setPinRequestStatusFilter] = useState<'all' | 'pending' | 'completed' | 'cancelled'>('all');
+  const [isPinRefreshing, setIsPinRefreshing] = useState(false);
+  const [pinListLimit, setPinListLimit] = useState(0);
+  const [pinSearchInput, setPinSearchInput] = useState('');
+  const [pinSearchQuery, setPinSearchQuery] = useState('');
+  const [takeBackUserId, setTakeBackUserId] = useState('');
+  const [takeBackQuantity, setTakeBackQuantity] = useState(1);
+  const [takeBackReason, setTakeBackReason] = useState('');
+  const [isTakingBack, setIsTakingBack] = useState(false);
 
   // Master Password
   const [masterPassword, setMasterPassword] = useState('');
@@ -496,8 +577,44 @@ export default function Admin() {
   const [activeMainTab, setActiveMainTab] = useState('users');
   const [reportsDataLoaded, setReportsDataLoaded] = useState(false);
   const [supportDataLoaded, setSupportDataLoaded] = useState(false);
-  const [sweepRunning, setSweepRunning] = useState(false);
-  const [sweepResult, setSweepResult] = useState<string | null>(null);
+  const [announcementData, setAnnouncementData] = useState({
+    title: 'Important Announcement',
+    message: '',
+    imageUrl: '',
+    isPermanent: true,
+    durationDays: '3',
+    includeFutureUsers: true
+  });
+  const [isSendingAnnouncement, setIsSendingAnnouncement] = useState(false);
+  const [isUpdatingAnnouncement, setIsUpdatingAnnouncement] = useState(false);
+  const [editingAnnouncement, setEditingAnnouncement] = useState<AdminAnnouncement | null>(null);
+  const [announcementHistory, setAnnouncementHistory] = useState<AdminAnnouncement[]>([]);
+  const [adminUserProfile, setAdminUserProfile] = useState({
+    fullName: '',
+    email: '',
+    phone: '',
+    usdtAddress: '',
+    loginPassword: '',
+    transactionPassword: ''
+  });
+  const [showAdminLoginPassword, setShowAdminLoginPassword] = useState(false);
+  const [showAdminTransactionPassword, setShowAdminTransactionPassword] = useState(false);
+  const [isUpdatingUserProfile, setIsUpdatingUserProfile] = useState(false);
+  const [restoreReceiveHelpFromId, setRestoreReceiveHelpFromId] = useState('');
+  const [restoreReceiveHelpLevel, setRestoreReceiveHelpLevel] = useState('');
+  const [restoreReceiveHelpHistoryOnly, setRestoreReceiveHelpHistoryOnly] = useState(true);
+  const [manualQualifiedLevelValue, setManualQualifiedLevelValue] = useState('1');
+  const [isRepairingIncomingHelp, setIsRepairingIncomingHelp] = useState(false);
+  const [isRestoringReceiveHelp, setIsRestoringReceiveHelp] = useState(false);
+  const [isManualCreditingReceiveHelp, setIsManualCreditingReceiveHelp] = useState(false);
+  const [isRepairingSelfFundCredits, setIsRepairingSelfFundCredits] = useState(false);
+  const [isRecalculatingQualifiedLevel, setIsRecalculatingQualifiedLevel] = useState(false);
+  const [isMarkingLevelHelpComplete, setIsMarkingLevelHelpComplete] = useState(false);
+  const [isReversingTemporarySelfFundCredits, setIsReversingTemporarySelfFundCredits] = useState(false);
+  const [isRemovingBrokenSelfTransferHistory, setIsRemovingBrokenSelfTransferHistory] = useState(false);
+  const [isScanningHelpMismatches, setIsScanningHelpMismatches] = useState(false);
+  const [isReversingInvalidRestoredHelp, setIsReversingInvalidRestoredHelp] = useState(false);
+  const [restoringFromGiveHelpTxId, setRestoringFromGiveHelpTxId] = useState<string | null>(null);
 
   // Marketplace admin state
   const [mktSubTab, setMktSubTab] = useState<'banners' | 'deals' | 'categories' | 'retailers' | 'invoices' | 'redemptions'>('retailers');
@@ -506,6 +623,31 @@ export default function Admin() {
   const [mktEditingCategory, setMktEditingCategory] = useState<MarketplaceCategory | null>(null);
   const [mktEditingRetailer, setMktEditingRetailer] = useState<MarketplaceRetailer | null>(null);
   const [mktShowForm, setMktShowForm] = useState(false);
+
+  const syncMarketplaceChanges = useCallback(async (successMessage: string) => {
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 });
+      await Database.hydrateFromServerBatches(
+        [[
+          'mlm_marketplace_categories',
+          'mlm_marketplace_retailers',
+          'mlm_marketplace_banners',
+          'mlm_marketplace_deals',
+        ]],
+        { strict: false, maxAttempts: 1, timeoutMs: 15000, retryDelayMs: 500, continueOnError: true, requireAnySuccess: false }
+      );
+      loadMarketplaceData();
+      toast.success(successMessage);
+    } catch (error) {
+      console.warn('Marketplace sync failed:', error);
+      loadMarketplaceData();
+      toast.error('Marketplace changes saved locally, but server sync is still pending.');
+    }
+  }, [loadMarketplaceData]);
+
+  const [helpFlowView, setHelpFlowView] = useState<'sent' | 'received'>('sent');
+  const [helpFlowDebugTick, setHelpFlowDebugTick] = useState(0);
+  const [ghostRepairLogTick, setGhostRepairLogTick] = useState(0);
 
   const [memberFilters, setMemberFilters] = useState({
     dateFrom: '',
@@ -592,7 +734,10 @@ export default function Admin() {
   const [supportStatusDraft, setSupportStatusDraft] = useState<SupportTicketStatus>('open');
   const [supportReplyMessage, setSupportReplyMessage] = useState('');
   const [supportReplyAttachment, setSupportReplyAttachment] = useState<SupportTicketAttachment | null>(null);
+  const [editingSupportMessageId, setEditingSupportMessageId] = useState('');
+  const [editingSupportMessageText, setEditingSupportMessageText] = useState('');
   const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+  const [isRepairingPins, setIsRepairingPins] = useState(false);
   const [showDeleteAllIdsDialog, setShowDeleteAllIdsDialog] = useState(false);
   const [deleteAllIdsPhrase, setDeleteAllIdsPhrase] = useState('');
   const [deleteAllIdsAdminId, setDeleteAllIdsAdminId] = useState('');
@@ -602,20 +747,77 @@ export default function Admin() {
     deleteAllIdsPhrase.trim().toUpperCase() === DELETE_ALL_IDS_PHRASE
     && deleteAllIdsAdminId.trim() === (user?.userId || '');
 
+  const helpFlowDebugEntries = searchedUser
+    ? Database.getHelpFlowDebugForUser(searchedUser.id, helpFlowView, 50 + helpFlowDebugTick * 0)
+    : [];
+
   const isReportsTabActive = activeMainTab === 'reports';
   const isSupportTabActive = activeMainTab === 'support';
+  const isPaymentsTabActive = activeMainTab === 'payments';
 
   const reloadAdminDataFromBrowserState = () => {
     loadStats();
     loadSettings();
     loadAllUsers();
+    void loadAnnouncementHistory();
     loadAllPins();
     loadAllPinRequests();
     loadPendingPinRequests();
     loadPayments();
+    loadDepositHistory();
+    loadWithdrawalRequests();
     loadPaymentMethods();
     loadMarketplaceData();
   };
+
+  const runAdminRefresh = useCallback(async () => {
+    if (import.meta.env.PROD) {
+      try {
+        await Database.hydrateFromServerBatches(Database.getAdminCriticalRemoteSyncBatches(), {
+          strict: true,
+          maxAttempts: 2,
+          timeoutMs: 45000,
+          retryDelayMs: 1500,
+          continueOnError: true,
+          requireAnySuccess: true,
+          onBatchError: (keys, error) => {
+            console.warn('Manual admin refresh hydrate failed for keys:', keys, error);
+          }
+        });
+      } catch (error) {
+        console.warn('Manual admin refresh failed to hydrate backend state:', error);
+      }
+    }
+
+    reloadAdminDataFromBrowserState();
+    void loadSupportTickets(true);
+    if (import.meta.env.PROD) {
+      void hydrateDeferredAdminState().then(() => {
+        loadAllTransactions();
+        loadAllPins();
+        loadAllPinRequests();
+        loadPendingPinRequests();
+        loadPayments();
+        loadPaymentMethods();
+        loadMarketplaceData();
+        void loadAnnouncementHistory();
+      });
+    } else {
+      loadAllTransactions();
+    }
+    toast.success('Data refreshed');
+  }, [
+    loadAllPins,
+    loadAllPinRequests,
+    loadAllTransactions,
+    loadMarketplaceData,
+    loadPaymentMethods,
+    loadPayments,
+    loadPendingPinRequests,
+    loadSupportTickets,
+    reloadAdminDataFromBrowserState,
+    loadAnnouncementHistory
+  ]);
 
   const hydrateDeferredAdminState = async () => {
     await Database.hydrateFromServerBatches(Database.getAdminDeferredRemoteSyncBatches(), {
@@ -696,6 +898,15 @@ export default function Admin() {
     };
   }, [isAuthenticated, user, navigate, loadStats, loadSettings, loadAllUsers, loadAllPins, loadAllPinRequests, loadPendingPinRequests, loadPayments, loadPaymentMethods]);
 
+  // Auto-run a refresh once when admin loads panel
+  const autoRefreshRanRef = useRef(false);
+  useEffect(() => {
+    if (!isAuthenticated || !user?.isAdmin) return;
+    if (autoRefreshRanRef.current) return;
+    autoRefreshRanRef.current = true;
+    void runAdminRefresh();
+  }, [isAuthenticated, user, runAdminRefresh]);
+
   useEffect(() => {
     if (!isReportsTabActive || reportsDataLoaded) return;
     const timer = window.setTimeout(() => {
@@ -706,17 +917,58 @@ export default function Admin() {
   }, [isReportsTabActive, reportsDataLoaded, loadAllTransactions]);
 
   useEffect(() => {
-    if (!isSupportTabActive || supportDataLoaded) return;
+    if (!isSupportTabActive) return;
     const timer = window.setTimeout(() => {
-      loadSupportTickets();
+      void loadSupportTickets(true);
       setSupportDataLoaded(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [isSupportTabActive, supportDataLoaded]);
+  }, [isSupportTabActive]);
+
+  useEffect(() => {
+    if (!isPaymentsTabActive) return;
+    const timer = window.setTimeout(() => {
+      loadAllTransactions();
+      loadPayments();
+      loadDepositHistory();
+      setWithdrawalRequests(Database.getWithdrawalTransactions());
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [isPaymentsTabActive, loadAllTransactions]);
+
+  useEffect(() => {
+    if (!user?.isAdmin) return;
+    if (allPins.length === 0) {
+      setOrphanedPinCount(0);
+      return;
+    }
+    const userIdSet = new Set(allUsers.map((member) => member.id));
+    const count = allPins.filter((pin) => {
+      if (pin.status !== 'used') return false;
+      const usedById = String(pin.usedById || '').trim();
+      return !!usedById && !userIdSet.has(usedById);
+    }).length;
+    setOrphanedPinCount(count);
+    if (count > 0 && !orphanedPinsNotifiedRef.current) {
+      orphanedPinsNotifiedRef.current = true;
+      toast.warning(`Found ${count} used PIN(s) with missing user records. Run "Repair Orphaned PIN Usage".`);
+    }
+  }, [allPins, allUsers, user]);
 
   function loadPayments() {
     const payments = Database.getPendingPayments();
     setPendingPayments(payments);
+  }
+
+  function loadDepositHistory() {
+    const rows = Database.getAllCompletedPayments()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    setDepositHistory(rows);
+  }
+
+  function loadWithdrawalRequests() {
+    const requests = Database.getWithdrawalTransactions();
+    setWithdrawalRequests(requests);
   }
 
   function loadPaymentMethods() {
@@ -724,14 +976,80 @@ export default function Admin() {
     setPaymentMethods(methods);
   }
 
-  const loadSupportTickets = () => {
+  async function loadAnnouncementHistory(syncFromServer = false) {
+    if (syncFromServer) {
+      try {
+        await Database.hydrateFromServer({
+          strict: true,
+          maxAttempts: 2,
+          timeoutMs: 15000,
+          retryDelayMs: 1500,
+          keys: [DB_KEYS.ANNOUNCEMENTS, DB_KEYS.NOTIFICATIONS]
+        });
+      } catch (error) {
+        console.warn('Announcement hydrate failed:', error);
+      }
+    }
+    const rows = Database.getAnnouncements();
+    if (rows.length > 0) {
+      setAnnouncementHistory(rows);
+      return;
+    }
+
+    const notifications = Database.getNotifications();
+    const derived = new Map<string, AdminAnnouncement>();
+    for (const notification of notifications) {
+      if (!notification.announcementId) continue;
+      const existing = derived.get(notification.announcementId);
+      if (!existing) {
+        derived.set(notification.announcementId, {
+          id: notification.announcementId,
+          title: notification.title,
+          message: notification.message,
+          imageUrl: notification.imageUrl,
+          type: notification.type,
+          totalRecipients: 1,
+          createdAt: notification.createdAt,
+          createdById: 'system',
+          createdByUserId: 'system',
+          isRecalled: false,
+          isPermanent: true,
+          includeFutureUsers: true
+        });
+      } else {
+        existing.totalRecipients += 1;
+        if (new Date(notification.createdAt).getTime() < new Date(existing.createdAt).getTime()) {
+          existing.createdAt = notification.createdAt;
+        }
+      }
+    }
+
+    const derivedRows = Array.from(derived.values())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    setAnnouncementHistory(derivedRows);
+  }
+
+  async function loadSupportTickets(syncFromServer = false) {
+    if (syncFromServer) {
+      try {
+        await Database.hydrateFromServer({
+          strict: true,
+          maxAttempts: 2,
+          timeoutMs: 15000,
+          retryDelayMs: 1200,
+          keys: [DB_KEYS.SUPPORT_TICKETS]
+        });
+      } catch (error) {
+        console.warn('Support tickets hydrate failed:', error);
+      }
+    }
     const rows = Database.getSupportTickets();
     setSupportTickets(rows);
     if (!selectedSupportTicketId && rows.length > 0) {
       setSelectedSupportTicketId(rows[0].ticket_id);
       setSupportStatusDraft(rows[0].status);
     }
-  };
+  }
 
   const readSupportAttachment = async (file: File): Promise<SupportTicketAttachment> => {
     const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -752,13 +1070,245 @@ export default function Admin() {
     };
   };
 
-  const handleApprovePayment = () => {
+  const handleAnnouncementImageUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select a valid image file');
+      return;
+    }
+
+    const maxImageBytes = 350 * 1024;
+    if (file.size > maxImageBytes) {
+      toast.error('Image is too large. Keep it under 350 KB for announcement notifications.');
+      return;
+    }
+
+    try {
+      const imageUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Failed to read image'));
+        reader.readAsDataURL(file);
+      });
+      setAnnouncementData((prev) => ({ ...prev, imageUrl }));
+      toast.success('Announcement image attached');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to read image');
+    }
+  };
+
+  const handleSendAnnouncement = async () => {
+    if (!user?.isAdmin) return;
+    if (editingAnnouncement) {
+      toast.error('Finish editing the current announcement before sending a new one.');
+      return;
+    }
+
+    const title = announcementData.title.trim() || 'Important Announcement';
+    const message = announcementData.message.trim();
+    const imageUrl = announcementData.imageUrl.trim();
+    const isPermanent = announcementData.isPermanent;
+    const durationDays = isPermanent ? undefined : Math.max(1, Number(announcementData.durationDays || 0));
+    const includeFutureUsers = isPermanent ? true : announcementData.includeFutureUsers;
+
+    if (!message) {
+      toast.error('Announcement message is required');
+      return;
+    }
+    if (!isPermanent && (!durationDays || durationDays <= 0)) {
+      toast.error('Please enter a valid duration (days).');
+      return;
+    }
+
+    setIsSendingAnnouncement(true);
+    try {
+      const announcement = Database.createAnnouncement({
+        title,
+        message,
+        type: 'info',
+        imageUrl: imageUrl || undefined,
+        includeAdmins: true,
+        createdById: user.id,
+        createdByUserId: user.userId,
+        isPermanent,
+        durationDays,
+        includeFutureUsers
+      });
+
+      if (!announcement) {
+        toast.error('No users found for announcement');
+        return;
+      }
+
+      if (import.meta.env.PROD) {
+        try {
+          await Database.forceRemoteSyncNowWithOptions({
+            full: false,
+            force: true,
+            timeoutMs: 120000,
+            maxAttempts: 3,
+            retryDelayMs: 2000
+          });
+        } catch (error) {
+          console.warn('Announcement sync failed:', error);
+        }
+      }
+
+      setAnnouncementData((prev) => ({
+        ...prev,
+        message: '',
+        imageUrl: '',
+        isPermanent: true,
+        durationDays: '3',
+        includeFutureUsers: true
+      }));
+      await loadAnnouncementHistory();
+      toast.success(`Announcement sent to ${announcement.totalRecipients} user(s)`);
+    } finally {
+      setIsSendingAnnouncement(false);
+    }
+  };
+
+  const startEditAnnouncement = (announcement: AdminAnnouncement) => {
+    if (announcement.isRecalled) {
+      toast.error('Recalled announcements cannot be edited.');
+      return;
+    }
+    setEditingAnnouncement(announcement);
+    setAnnouncementData({
+      title: announcement.title || 'Important Announcement',
+      message: announcement.message || '',
+      imageUrl: announcement.imageUrl || '',
+      isPermanent: announcement.isPermanent ?? true,
+      durationDays: announcement.durationDays ? String(announcement.durationDays) : '3',
+      includeFutureUsers: announcement.includeFutureUsers ?? (announcement.isPermanent ?? true)
+    });
+  };
+
+  const cancelEditAnnouncement = () => {
+    setEditingAnnouncement(null);
+    setAnnouncementData({
+      title: 'Important Announcement',
+      message: '',
+      imageUrl: '',
+      isPermanent: true,
+      durationDays: '3',
+      includeFutureUsers: true
+    });
+  };
+
+  const handleUpdateAnnouncement = async () => {
+    if (!user?.isAdmin || !editingAnnouncement) return;
+
+    const title = announcementData.title.trim() || 'Important Announcement';
+    const message = announcementData.message.trim();
+    const imageUrl = announcementData.imageUrl.trim();
+    const isPermanent = announcementData.isPermanent;
+    const durationDays = isPermanent ? undefined : Math.max(1, Number(announcementData.durationDays || 0));
+    const includeFutureUsers = isPermanent ? true : announcementData.includeFutureUsers;
+
+    if (!message) {
+      toast.error('Announcement message is required');
+      return;
+    }
+    if (!isPermanent && (!durationDays || durationDays <= 0)) {
+      toast.error('Please enter a valid duration (days).');
+      return;
+    }
+
+    setIsUpdatingAnnouncement(true);
+    try {
+      const result = Database.updateAnnouncement({
+        id: editingAnnouncement.id,
+        title,
+        message,
+        imageUrl,
+        updatedByUserId: user.userId,
+        isPermanent,
+        durationDays,
+        includeFutureUsers
+      });
+
+      if (!result.success) {
+        toast.error(result.message);
+        return;
+      }
+
+      if (import.meta.env.PROD) {
+        try {
+          await Database.forceRemoteSyncNowWithOptions({
+            full: false,
+            force: true,
+            timeoutMs: 120000,
+            maxAttempts: 3,
+            retryDelayMs: 2000
+          });
+        } catch (error) {
+          console.warn('Announcement update sync failed:', error);
+        }
+      }
+
+      await loadAnnouncementHistory();
+      cancelEditAnnouncement();
+      toast.success(result.message);
+    } finally {
+      setIsUpdatingAnnouncement(false);
+    }
+  };
+
+  const handleRecallAnnouncement = async (announcement: AdminAnnouncement) => {
+    if (!user?.isAdmin) return;
+    if (announcement.isRecalled) {
+      toast.error('Announcement already recalled');
+      return;
+    }
+
+    const ok = window.confirm(`Take back announcement "${announcement.title}" for all users?`);
+    if (!ok) return;
+
+    try {
+      await loadAnnouncementHistory(true);
+    } catch (error) {
+      console.warn('Announcement pre-refresh failed:', error);
+    }
+
+    const result = Database.recallAnnouncement(announcement.id, user.userId);
+    if (!result.success) {
+      toast.error(result.message);
+      return;
+    }
+
+    if (import.meta.env.PROD) {
+      try {
+        await Database.forceRemoteSyncNowWithOptions({
+          full: false,
+          force: true,
+          timeoutMs: 120000,
+          maxAttempts: 3,
+          retryDelayMs: 2000
+        });
+      } catch (error) {
+        console.warn('Announcement recall sync failed:', error);
+      }
+    }
+
+    await loadAnnouncementHistory();
+    toast.success(result.message);
+  };
+
+  const handleApprovePayment = async () => {
     if (!selectedPayment || !user) return;
+
+    await Database.ensureFreshData();
 
     const result = Database.approvePayment(selectedPayment.id, user.id);
     if (result) {
       toast.success('Payment approved and funds added to user wallet');
       loadPayments();
+      loadDepositHistory();
       loadAllUsers();
       setShowPaymentDialog(false);
       setSelectedPayment(null);
@@ -767,18 +1317,168 @@ export default function Admin() {
     }
   };
 
-  const handleRejectPayment = () => {
+  const handleRejectPayment = async () => {
     if (!selectedPayment || !user) return;
+
+    await Database.ensureFreshData();
 
     const result = Database.rejectPayment(selectedPayment.id, user.id, adminNotes);
     if (result) {
       toast.success('Payment rejected');
       loadPayments();
+      loadDepositHistory();
       setShowPaymentDialog(false);
       setSelectedPayment(null);
       setAdminNotes('');
     } else {
       toast.error('Failed to reject payment');
+    }
+  };
+
+  const handleReversePayment = async () => {
+    if (!selectedPayment || !user) return;
+    const reason = adminNotes.trim();
+    if (!reason) {
+      toast.error('Please enter a remark for reversal');
+      return;
+    }
+    const confirm = window.confirm('This will deduct the deposit from the user fund wallet. Continue?');
+    if (!confirm) return;
+    try {
+      await Database.ensureFreshData();
+      Database.reversePayment(selectedPayment.id, user.id, reason);
+      toast.success('Deposit reversed and funds deducted');
+      loadPayments();
+      loadDepositHistory();
+      loadAllUsers();
+      setShowPaymentDialog(false);
+      setSelectedPayment(null);
+      setAdminNotes('');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to reverse deposit');
+    }
+  };
+
+  const handleWithdrawalReceiptUpload = async (requestId: string, event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    if (!(file.type.startsWith('image/') || file.type === 'application/pdf')) {
+      toast.error('Only image or PDF files are allowed');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Receipt must be under 5MB');
+      return;
+    }
+
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Failed to read receipt file'));
+        reader.readAsDataURL(file);
+      });
+      setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: dataUrl }));
+      toast.success('Receipt attached');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to read receipt');
+    }
+  };
+
+  const handleApproveWithdrawalRequest = async (requestId: string) => {
+    if (!user?.isAdmin) return;
+    await Database.ensureFreshData();
+    const result = Database.processWithdrawalRequest({
+      transactionId: requestId,
+      adminUserId: user.userId,
+      action: 'approve',
+      adminReason: withdrawalReasonDrafts[requestId] || undefined,
+      adminReceipt: withdrawalReceiptDrafts[requestId] || undefined
+    });
+
+    if (!result.success) {
+      toast.error(result.message);
+      return;
+    }
+
+    if (import.meta.env.PROD) {
+      try {
+        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
+      } catch (error) {
+        console.warn('Withdrawal approval sync failed:', error);
+      }
+    }
+
+    setWithdrawalReasonDrafts((prev) => ({ ...prev, [requestId]: '' }));
+    setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: '' }));
+    loadAllTransactions();
+    loadWithdrawalRequests();
+    loadStats();
+    if (selectedWithdrawalRequest?.id === requestId) {
+      setShowWithdrawalRequestDialog(false);
+      setSelectedWithdrawalRequest(null);
+    }
+    toast.success(result.message);
+  };
+
+  const handleRejectWithdrawalRequest = async (requestId: string) => {
+    if (!user?.isAdmin) return;
+    await Database.ensureFreshData();
+    const reason = (withdrawalReasonDrafts[requestId] || '').trim();
+    const confirmText = reason
+      ? 'Reject this withdrawal request and refund amount to user income wallet?'
+      : 'Reject this withdrawal request (no reason) and refund amount to user income wallet?';
+    const confirmed = window.confirm(confirmText);
+    if (!confirmed) return;
+
+    const result = Database.processWithdrawalRequest({
+      transactionId: requestId,
+      adminUserId: user.userId,
+      action: 'reject',
+      adminReason: reason || undefined,
+      adminReceipt: withdrawalReceiptDrafts[requestId] || undefined
+    });
+
+    if (!result.success) {
+      toast.error(result.message);
+      return;
+    }
+
+    if (import.meta.env.PROD) {
+      try {
+        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
+      } catch (error) {
+        console.warn('Withdrawal rejection sync failed:', error);
+      }
+    }
+
+    setWithdrawalReasonDrafts((prev) => ({ ...prev, [requestId]: '' }));
+    setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: '' }));
+    loadAllTransactions();
+    loadWithdrawalRequests();
+    loadStats();
+    if (selectedWithdrawalRequest?.id === requestId) {
+      setShowWithdrawalRequestDialog(false);
+      setSelectedWithdrawalRequest(null);
+    }
+    toast.success(result.message);
+  };
+
+  const handleScanMissingPendingWithdrawals = async () => {
+    try {
+      await Database.ensureFreshData();
+      const findings = Database.scanSuspiciousWithdrawalSubmissions(20);
+      setWithdrawalGapScanResults(findings);
+      setShowWithdrawalGapDialog(true);
+      if (findings.length === 0) {
+        toast.success('No suspicious missing pending withdrawals found.');
+        return;
+      }
+      toast.warning(`Found ${findings.length} suspicious withdrawal submission${findings.length === 1 ? '' : 's'}.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to scan withdrawal gaps');
     }
   };
 
@@ -788,16 +1488,202 @@ export default function Admin() {
     toast.success(`Payment method ${isActive ? 'enabled' : 'disabled'}`);
   };
 
+  const openPaymentMethodEditor = (method: PaymentMethod) => {
+    setEditingPaymentMethodId(method.id);
+    setPaymentMethodDraft({
+      type: method.type,
+      name: method.name || '',
+      description: method.description || '',
+      instructions: method.instructions || '',
+      walletAddress: method.walletAddress || '',
+      accountNumber: method.accountNumber || '',
+      accountName: method.accountName || '',
+      bankName: method.bankName || '',
+      upiId: method.upiId || '',
+      qrCode: method.qrCode || '',
+      minAmount: String(method.minAmount ?? ''),
+      maxAmount: String(method.maxAmount ?? ''),
+      processingFee: String(method.processingFee ?? ''),
+      processingTime: method.processingTime || ''
+    });
+  };
+
+  const closePaymentMethodEditor = () => {
+    setEditingPaymentMethodId(null);
+    setPaymentMethodDraft(null);
+  };
+
+  const updatePaymentMethodDraft = (field: keyof PaymentMethodDraft, value: string) => {
+    setPaymentMethodDraft((prev) => (prev ? { ...prev, [field]: value } : prev));
+  };
+
+  const startNewPaymentMethod = () => {
+    setEditingPaymentMethodId('new');
+    setPaymentMethodDraft({
+      type: 'crypto',
+      name: '',
+      description: '',
+      instructions: '',
+      walletAddress: '',
+      accountNumber: '',
+      accountName: '',
+      bankName: '',
+      upiId: '',
+      qrCode: '',
+      minAmount: '0',
+      maxAmount: '0',
+      processingFee: '0',
+      processingTime: ''
+    });
+  };
+
+  const handlePaymentMethodQrUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please select a valid image for QR code');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('QR code image must be under 2MB');
+      return;
+    }
+
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(new Error('Failed to read QR image'));
+        reader.readAsDataURL(file);
+      });
+      updatePaymentMethodDraft('qrCode', dataUrl);
+      toast.success('QR code updated in editor');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to read QR image');
+    }
+  };
+
+  const savePaymentMethodDetails = async () => {
+    if (!editingPaymentMethodId || !paymentMethodDraft) return;
+
+    const minAmount = Number(paymentMethodDraft.minAmount);
+    const maxAmount = Number(paymentMethodDraft.maxAmount);
+    const processingFee = Number(paymentMethodDraft.processingFee);
+
+    if (!Number.isFinite(minAmount) || minAmount < 0) {
+      toast.error('Minimum amount must be a valid non-negative number');
+      return;
+    }
+    if (!Number.isFinite(maxAmount) || maxAmount <= 0) {
+      toast.error('Maximum amount must be a valid positive number');
+      return;
+    }
+    if (maxAmount < minAmount) {
+      toast.error('Maximum amount cannot be less than minimum amount');
+      return;
+    }
+    if (!Number.isFinite(processingFee) || processingFee < 0) {
+      toast.error('Processing fee must be a valid non-negative number');
+      return;
+    }
+
+    const baseFields: Partial<PaymentMethod> = {
+      name: paymentMethodDraft.name.trim(),
+      description: paymentMethodDraft.description.trim(),
+      instructions: paymentMethodDraft.instructions.trim(),
+      walletAddress: paymentMethodDraft.walletAddress.trim() || undefined,
+      accountNumber: paymentMethodDraft.accountNumber.trim() || undefined,
+      accountName: paymentMethodDraft.accountName.trim() || undefined,
+      bankName: paymentMethodDraft.bankName.trim() || undefined,
+      upiId: paymentMethodDraft.upiId.trim() || undefined,
+      qrCode: paymentMethodDraft.qrCode.trim() || undefined,
+      minAmount,
+      maxAmount,
+      processingFee,
+      processingTime: paymentMethodDraft.processingTime.trim()
+    };
+
+    if (editingPaymentMethodId === 'new') {
+      const newId = `pm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const newMethod: PaymentMethod = {
+        id: newId,
+        type: paymentMethodDraft.type,
+        icon: paymentMethodDraft.type,
+        isActive: true,
+        name: baseFields.name || 'New Payment Method',
+        description: baseFields.description || '',
+        instructions: baseFields.instructions || '',
+        walletAddress: baseFields.walletAddress,
+        accountNumber: baseFields.accountNumber,
+        accountName: baseFields.accountName,
+        bankName: baseFields.bankName,
+        upiId: baseFields.upiId,
+        qrCode: baseFields.qrCode,
+        minAmount: minAmount || 0,
+        maxAmount: maxAmount || minAmount || 0,
+        processingFee: processingFee || 0,
+      processingTime: baseFields.processingTime || `Within ${settings.depositProcessingHours} hours`
+      };
+      Database.addPaymentMethod(newMethod);
+    } else {
+      const currentMethod = paymentMethods.find((method) => method.id === editingPaymentMethodId);
+      if (!currentMethod) {
+        toast.error('Payment method not found');
+        return;
+      }
+      const updates: Partial<PaymentMethod> = {
+        ...baseFields,
+        name: baseFields.name || currentMethod.name,
+        description: baseFields.description || currentMethod.description,
+        instructions: baseFields.instructions || currentMethod.instructions,
+        processingTime: baseFields.processingTime || currentMethod.processingTime || `Within ${settings.depositProcessingHours} hours`
+      };
+
+      const updated = Database.updatePaymentMethod(editingPaymentMethodId, updates);
+      if (!updated) {
+        toast.error('Failed to update payment method');
+        return;
+      }
+    }
+
+    if (import.meta.env.PROD) {
+      try {
+        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
+      } catch (error) {
+        console.warn('Payment method sync failed:', error);
+      }
+    }
+
+    loadPaymentMethods();
+    closePaymentMethodEditor();
+    toast.success(editingPaymentMethodId === 'new' ? 'Payment method added' : 'Payment method details updated');
+  };
+
   const handleAddFunds = async () => {
     if (!selectedUser || !fundAmount) return;
 
+    const parsedAmount = parseFloat(fundAmount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      toast.error('Enter a valid amount');
+      return;
+    }
+
     setIsLoading(true);
-    const result = await addFundsToUser(selectedUser, parseFloat(fundAmount), fundWalletType);
+    const result = await addFundsToUser(
+      selectedUser,
+      parsedAmount,
+      fundWalletType,
+      fundWalletType === 'royalty' ? fundMessage : undefined
+    );
     setIsLoading(false);
 
     if (result.success) {
       toast.success(result.message);
       setFundAmount('');
+      setFundMessage('');
+      setFundWalletType('deposit');
       setSelectedUser(null);
       loadAllUsers();
     } else {
@@ -805,14 +1691,27 @@ export default function Admin() {
     }
   };
 
-  const searchUserById = () => {
-    if (userSearchId.length !== 7) {
+  const searchUserById = (overrideId?: string) => {
+    const targetId = (overrideId ?? userSearchId).trim();
+    if (targetId.length !== 7) {
       toast.error('Please enter a valid 7-digit User ID');
       return;
     }
 
-    const foundUser = Database.getUserByUserId(userSearchId);
+    const foundUser = Database.getUserByUserId(targetId);
     if (foundUser) {
+      setMissingMatrixNode(null);
+      setMissingUserRecovery({
+        userId: '',
+        fullName: '',
+        email: '',
+        phone: '',
+        country: '',
+        sponsorId: '',
+        loginPassword: '',
+        transactionPassword: '',
+        restoreSponsorIncome: true
+      });
       const wallet = Database.getWallet(foundUser.id);
       const teamStats = Database.getTeamCounts(foundUser.userId);
       const userPayments = Database.getUserPayments(foundUser.id);
@@ -820,6 +1719,7 @@ export default function Admin() {
       const userPins = Database.getUserPins(foundUser.id);
       const pendingMatrixDebug = Database.getPendingMatrixContributionsDebug(foundUser.id);
       const incomingPendingMatrixDebug = Database.getIncomingPendingMatrixContributionsDebug(foundUser.id);
+      const incomingGiveHelpCandidates = Database.findGiveHelpDebitsTargetingUser(foundUser.id);
 
       const receiveHelpAmount = userTransactions
         .filter(t => t.type === 'receive_help' && t.status === 'completed')
@@ -847,11 +1747,495 @@ export default function Admin() {
         qualifiedLevel,
         pins: userPins,
         pendingMatrixDebug,
-        incomingPendingMatrixDebug
+        incomingPendingMatrixDebug,
+        incomingGiveHelpCandidates
+      });
+      setAdminUserProfile({
+        fullName: foundUser.fullName || '',
+        email: foundUser.email || '',
+        phone: foundUser.phone || '',
+        usdtAddress: foundUser.usdtAddress || '',
+        loginPassword: '',
+        transactionPassword: ''
       });
     } else {
-      toast.error('User not found');
+      const matrixNode = Database.getMatrixNode(targetId);
+      if (matrixNode) {
+        setMissingMatrixNode(matrixNode);
+        setMissingUserRecovery({
+          userId: targetId,
+          fullName: matrixNode.username || '',
+          email: '',
+          phone: '',
+          country: '',
+          sponsorId: matrixNode.parentId || '',
+          loginPassword: '',
+          transactionPassword: '',
+          restoreSponsorIncome: true
+        });
+        toast.error('User not found. Matrix slot exists; you can recover below.');
+      } else {
+        setMissingMatrixNode(null);
+        setMissingUserRecovery({
+          userId: '',
+          fullName: '',
+          email: '',
+          phone: '',
+          country: '',
+          sponsorId: '',
+          loginPassword: '',
+          transactionPassword: '',
+          restoreSponsorIncome: true
+        });
+        toast.error('User not found');
+      }
       setSearchedUser(null);
+    }
+  };
+
+  const handleRecoverMissingUser = async () => {
+    if (!user?.isAdmin) return;
+    if (missingUserRecovery.userId.length !== 7) {
+      toast.error('Enter a valid 7-digit User ID to recover');
+      return;
+    }
+    if (!missingMatrixNode) {
+      toast.error('Matrix slot not found for this ID');
+      return;
+    }
+    setIsRecoveringUser(true);
+    try {
+      await Database.ensureFreshData();
+      const result = Database.recoverMissingUserFromMatrix({
+        userId: missingUserRecovery.userId,
+        fullName: missingUserRecovery.fullName,
+        email: missingUserRecovery.email,
+        phone: missingUserRecovery.phone,
+        country: missingUserRecovery.country,
+        sponsorId: missingUserRecovery.sponsorId || null,
+        loginPassword: missingUserRecovery.loginPassword,
+        transactionPassword: missingUserRecovery.transactionPassword,
+        restoreSponsorIncome: missingUserRecovery.restoreSponsorIncome
+      });
+      loadAllUsers();
+      loadAllTransactions();
+      loadStats();
+      setUserSearchId(missingUserRecovery.userId);
+      searchUserById(missingUserRecovery.userId);
+      toast.success(`Recovered user ${result.user.fullName} (${result.user.userId}).`);
+      if (result.sponsorIncomeRestored) {
+        toast.success('Restored missing direct sponsor income.');
+      }
+      if (result.generatedLoginPassword) {
+        toast.success(`Temporary login password: ${result.generatedLoginPassword}`);
+      }
+      if (result.generatedTransactionPassword) {
+        toast.success(`Temporary transaction password: ${result.generatedTransactionPassword}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to recover user');
+    } finally {
+      setIsRecoveringUser(false);
+    }
+  };
+
+  const resetAdminUserProfileForm = () => {
+    if (!searchedUser) return;
+    setAdminUserProfile({
+      fullName: searchedUser.fullName || '',
+      email: searchedUser.email || '',
+      phone: searchedUser.phone || '',
+      usdtAddress: searchedUser.usdtAddress || '',
+      loginPassword: '',
+      transactionPassword: ''
+    });
+  };
+
+  const applyAdminProfileUpdate = async (profile: typeof adminUserProfile) => {
+    if (!user?.isAdmin || !searchedUser) return;
+
+    const fullName = profile.fullName.trim();
+    const email = profile.email.trim();
+    const phone = profile.phone.trim();
+    const usdtAddress = profile.usdtAddress.trim();
+    const loginPassword = profile.loginPassword.trim();
+    const transactionPassword = profile.transactionPassword.trim();
+
+    if (!fullName || !email || !phone) {
+      toast.error('Name, email, and phone are required');
+      return;
+    }
+
+    const allUsers = Database.getUsers();
+    const emailConflict = allUsers.find(
+      (u) => u.id !== searchedUser.id && u.email?.toLowerCase() === email.toLowerCase()
+    );
+    if (emailConflict) {
+      toast.error('Email is already used by another user');
+      return;
+    }
+    const phoneConflict = allUsers.find(
+      (u) => u.id !== searchedUser.id && u.phone?.trim() === phone
+    );
+    if (phoneConflict) {
+      toast.error('Phone number is already used by another user');
+      return;
+    }
+
+    if (loginPassword && !isStrongPassword(loginPassword)) {
+      toast.error(getPasswordRequirementsText());
+      return;
+    }
+    if (transactionPassword && !isValidTransactionPassword(transactionPassword)) {
+      toast.error(getTransactionPasswordRequirementsText());
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const nextLastActions = { ...(searchedUser.lastActions || {}) };
+    if (email !== searchedUser.email) nextLastActions.email = now;
+    if (phone !== searchedUser.phone) nextLastActions.phone = now;
+    if (usdtAddress !== (searchedUser.usdtAddress || '')) nextLastActions.usdtAddress = now;
+    if (loginPassword) nextLastActions.loginPassword = now;
+    if (transactionPassword) nextLastActions.transactionPassword = now;
+
+    const updates: Record<string, unknown> = {
+      fullName,
+      email,
+      phone,
+      usdtAddress,
+      ...(Object.keys(nextLastActions).length > 0 ? { lastActions: nextLastActions } : {})
+    };
+    if (loginPassword) updates.password = loginPassword;
+    if (transactionPassword) updates.transactionPassword = transactionPassword;
+
+    setIsUpdatingUserProfile(true);
+    try {
+      const updated = Database.updateUser(searchedUser.id, updates);
+      if (!updated) {
+        toast.error('Unable to update user profile');
+        return;
+      }
+      if (import.meta.env.PROD) {
+        try {
+          await Database.forceRemoteSyncNowWithOptions({
+            full: false,
+            force: true,
+            timeoutMs: 120000,
+            maxAttempts: 3,
+            retryDelayMs: 2000
+          });
+        } catch (error) {
+          console.warn('User profile sync failed:', error);
+        }
+      }
+      loadAllUsers();
+      searchUserById();
+      toast.success('User profile updated');
+    } finally {
+      setIsUpdatingUserProfile(false);
+    }
+  };
+
+  const handleAdminProfileUpdate = async () => {
+    await applyAdminProfileUpdate(adminUserProfile);
+  };
+
+  const handleResetUserPasswords = async () => {
+    if (!searchedUser) return;
+    const tempLoginPassword = `Temp@${searchedUser.userId}`;
+    const tempTransactionPassword = String(searchedUser.userId || '').slice(-4).padStart(4, '0');
+    const nextProfile = {
+      ...adminUserProfile,
+      loginPassword: tempLoginPassword,
+      transactionPassword: tempTransactionPassword
+    };
+    setAdminUserProfile(nextProfile);
+    await applyAdminProfileUpdate(nextProfile);
+    toast.success(`New login password: ${tempLoginPassword}`);
+    toast.success(`New transaction password: ${tempTransactionPassword}`);
+  };
+
+  const handleRestoreReceiveHelp = async () => {
+    if (!searchedUser) return;
+    const fromId = restoreReceiveHelpFromId.replace(/\D/g, '').slice(0, 7);
+    if (fromId.length !== 7) {
+      toast.error('Enter a valid 7-digit sender ID');
+      return;
+    }
+    const levelInput = restoreReceiveHelpLevel.trim();
+    let parsedLevel: number | undefined;
+    if (levelInput) {
+      const numericLevel = Number(levelInput);
+      if (!Number.isFinite(numericLevel) || numericLevel < 1) {
+        toast.error('Enter a valid level number');
+        return;
+      }
+      parsedLevel = numericLevel;
+    }
+    setIsRestoringReceiveHelp(true);
+    try {
+      const result = restoreReceiveHelpHistoryOnly
+        ? Database.restoreReceiveHelpHistoryOnly({
+            recipientUserId: searchedUser.userId,
+            fromUserId: fromId,
+            level: parsedLevel
+          })
+        : Database.restoreMissingReceiveHelpFromUserId({
+            recipientUserId: searchedUser.userId,
+            fromUserId: fromId,
+            level: parsedLevel
+          });
+      if (!result.created) {
+        toast.success('Receive-help entry already exists.');
+      } else {
+        toast.success('Receive-help entry restored.');
+        if (result.description) {
+          toast.success(result.description);
+        }
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+      setRestoreReceiveHelpFromId('');
+      setRestoreReceiveHelpLevel('');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to restore receive-help');
+    } finally {
+      setIsRestoringReceiveHelp(false);
+    }
+  };
+
+  const handleRepairMissingIncomingHelp = async () => {
+    if (!searchedUser) return;
+    setIsRepairingIncomingHelp(true);
+    try {
+      const result = Database.repairMissingIncomingReceiveHelp(searchedUser.id);
+      if (result.created > 0) {
+        toast.success(`Repaired ${result.created} missing incoming help entr${result.created > 1 ? 'ies' : 'y'}.`);
+      } else if (result.existing > 0) {
+        toast.success(`Found ${result.existing} matching incoming help entr${result.existing > 1 ? 'ies' : 'y'} already on this user and refreshed wallet/lock state.`);
+      } else {
+        toast.success('No missing incoming help entries found.');
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to repair missing incoming help');
+    } finally {
+      setIsRepairingIncomingHelp(false);
+    }
+  };
+
+  const handleManualCreditReceiveHelp = async () => {
+    if (!searchedUser) return;
+    const fromId = restoreReceiveHelpFromId.trim();
+    if (fromId.length !== 7) {
+      toast.error('Enter a valid 7-digit sender ID');
+      return;
+    }
+
+    const levelInput = restoreReceiveHelpLevel.trim();
+    const parsedLevel = Number(levelInput);
+    if (!levelInput || !Number.isFinite(parsedLevel) || parsedLevel < 1) {
+      toast.error('Enter the level number for the manual credit');
+      return;
+    }
+
+    setIsManualCreditingReceiveHelp(true);
+    try {
+      const result = Database.manualAdminReceiveHelpCredit({
+        recipientUserId: searchedUser.userId,
+        fromUserId: fromId,
+        level: parsedLevel
+      });
+      toast.success('Manual receive-help credit added.');
+      if (result.description) toast.success(result.description);
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+      setRestoreReceiveHelpFromId('');
+      setRestoreReceiveHelpLevel('');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to add manual receive-help credit');
+    } finally {
+      setIsManualCreditingReceiveHelp(false);
+    }
+  };
+
+  const handleScanHelpMismatches = async () => {
+    if (!searchedUser) return;
+    setIsScanningHelpMismatches(true);
+    try {
+      const result = Database.scanHelpLedgerMismatches(searchedUser.id);
+      if (result.giveWithoutReceive === 0 && result.restoredWithoutDebit === 0) {
+        toast.success(`No help-ledger mismatches found. Scanned ${result.scannedGiveHelp} give-help entries.`);
+      } else {
+        toast.error(
+          `Found ${result.giveWithoutReceive} give-help without receive-help and ${result.restoredWithoutDebit} manual restored credits without debit.`
+        );
+        result.examples.slice(0, 3).forEach((example) => toast.message(example));
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to scan help mismatches');
+    } finally {
+      setIsScanningHelpMismatches(false);
+    }
+  };
+
+  const handleRepairSelfFundCredits = async () => {
+    if (!searchedUser) return;
+    setIsRepairingSelfFundCredits(true);
+    try {
+      const result = Database.repairMissingSelfFundCredits(searchedUser.id);
+      if (result.repaired === 0) {
+        toast.success('No missing self fund-credit entries found for this user.');
+      } else {
+        toast.success(`Repaired ${result.repaired} missing self fund-credit entr${result.repaired > 1 ? 'ies' : 'y'}.`);
+        result.examples.slice(0, 3).forEach((example) => toast.message(example));
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to repair missing self fund credits');
+    } finally {
+      setIsRepairingSelfFundCredits(false);
+    }
+  };
+
+  const handleRecalculateQualifiedLevel = async () => {
+    if (!searchedUser) return;
+    setIsRecalculatingQualifiedLevel(true);
+    try {
+      const result = Database.recalculateQualifiedLevel(searchedUser.id);
+      if (result.after !== result.before) {
+        toast.success(`Qualified Level updated from L${result.before} to L${result.after}.`);
+      } else if (result.syncedLevels > 0) {
+        toast.success(`Qualified Level rechecked. It remains at L${result.after}.`);
+      } else {
+        toast.success(`No qualified-level changes were needed. Current value is L${result.after}.`);
+      }
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to recalculate qualified level');
+    } finally {
+      setIsRecalculatingQualifiedLevel(false);
+    }
+  };
+
+  const handleMarkLevelHelpComplete = async () => {
+    if (!searchedUser) return;
+    const parsedLevel = Number(manualQualifiedLevelValue);
+    if (!Number.isFinite(parsedLevel) || parsedLevel < 1) {
+      toast.error('Enter a valid level number');
+      return;
+    }
+
+    setIsMarkingLevelHelpComplete(true);
+    try {
+      const result = Database.markLevelHelpComplete(searchedUser.id, parsedLevel);
+      toast.success(`Marked Level ${result.level} help as complete for this user.`);
+      if (result.after !== result.before) {
+        toast.success(`Qualified Level updated from L${result.before} to L${result.after}.`);
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to mark level help complete');
+    } finally {
+      setIsMarkingLevelHelpComplete(false);
+    }
+  };
+
+  const handleReverseTemporarySelfFundCredits = async () => {
+    if (!searchedUser) return;
+    setIsReversingTemporarySelfFundCredits(true);
+    try {
+      const result = Database.reverseTemporarySelfFundCredits(searchedUser.id);
+      if (result.reversed === 0) {
+        toast.success('No temporary self fund-credit entries found for this user.');
+      } else {
+        toast.success(`Reversed ${result.reversed} temporary self fund-credit entr${result.reversed > 1 ? 'ies' : 'y'}.`);
+        result.examples.slice(0, 3).forEach((example) => toast.message(example));
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to reverse temporary self fund credits');
+    } finally {
+      setIsReversingTemporarySelfFundCredits(false);
+    }
+  };
+
+  const handleRemoveBrokenSelfTransferHistory = async () => {
+    if (!searchedUser) return;
+    setIsRemovingBrokenSelfTransferHistory(true);
+    try {
+      const result = Database.removeBrokenSelfIncomeToFundTransfer(searchedUser.id);
+      if (result.removed === 0) {
+        toast.success('No broken self transfer history entries found for this user.');
+      } else {
+        toast.success(`Removed ${result.removed} broken self-transfer histor${result.removed > 1 ? 'ies' : 'y'}.`);
+        result.examples.slice(0, 3).forEach((example) => toast.message(example));
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to remove broken self transfer history');
+    } finally {
+      setIsRemovingBrokenSelfTransferHistory(false);
+    }
+  };
+
+  const handleReverseInvalidRestoredHelp = async () => {
+    if (!searchedUser) return;
+    setIsReversingInvalidRestoredHelp(true);
+    try {
+      const result = Database.reverseInvalidRestoredReceiveHelp(searchedUser.id);
+      if (result.reversed === 0) {
+        toast.success('No invalid restored credits found for this user.');
+      } else {
+        toast.success(`Reversed ${result.reversed} invalid restored credit entr${result.reversed > 1 ? 'ies' : 'y'}.`);
+        result.examples.slice(0, 3).forEach((example) => toast.message(example));
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to reverse invalid restored credits');
+    } finally {
+      setIsReversingInvalidRestoredHelp(false);
+    }
+  };
+
+  const handleRestoreFromExactGiveHelp = async (giveHelpTxId: string, historyOnly = false) => {
+    if (!searchedUser) return;
+    setRestoringFromGiveHelpTxId(giveHelpTxId);
+    try {
+      const result = Database.restoreReceiveHelpFromGiveHelpTxId({
+        recipientUserId: searchedUser.userId,
+        giveHelpTxId,
+        historyOnly
+      });
+      if (!result.created) {
+        toast.success('Matching receive-help entry already exists.');
+      } else {
+        toast.success('Receive-help restored from exact give-help transaction.');
+        if (result.description) toast.success(result.description);
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to restore from exact give-help transaction');
+    } finally {
+      setRestoringFromGiveHelpTxId(null);
     }
   };
 
@@ -866,6 +2250,9 @@ export default function Admin() {
       toast.error('Recipient not found');
       return;
     }
+
+    const confirmed = window.confirm(`Generate ${pinQuantity} PIN(s) for User ID ${pinRecipientId}?`);
+    if (!confirmed) return;
 
     setIsLoading(true);
     const result = await generatePins(pinQuantity, recipient.id);
@@ -888,6 +2275,169 @@ export default function Admin() {
     setTimeout(() => setCopiedPin(null), 2000);
     toast.success('PIN copied!');
   };
+
+  const copyWithdrawalAddress = async (requestId: string, address: string) => {
+    const value = String(address || '').trim();
+    if (!value || value === '-') {
+      toast.error('No valid USDT address to copy');
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedWithdrawalAddressId(requestId);
+      window.setTimeout(() => setCopiedWithdrawalAddressId((prev) => (prev === requestId ? null : prev)), 2000);
+      toast.success('USDT address copied');
+    } catch {
+      toast.error('Unable to copy address');
+    }
+  };
+
+  const handlePinRefresh = async () => {
+    if (isPinRefreshing) return;
+    setIsPinRefreshing(true);
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+    } catch {
+      // best-effort sync
+    } finally {
+      loadAllPins();
+      loadAllPinRequests();
+      loadPendingPinRequests();
+      setIsPinRefreshing(false);
+    }
+  };
+
+  const handleTakeBackPins = async () => {
+    if (!user?.isAdmin) return;
+    if (!takeBackUserId || takeBackQuantity < 1) {
+      toast.error('Enter user ID and quantity to take back');
+      return;
+    }
+    const confirmed = window.confirm(`Take back ${takeBackQuantity} unused PIN(s) from User ID ${takeBackUserId}?`);
+    if (!confirmed) return;
+
+    setIsTakingBack(true);
+    try {
+      await Database.ensureFreshData();
+      const taken = Database.reclaimPinsFromUser(takeBackUserId, user.id, takeBackQuantity, takeBackReason.trim());
+      if (taken.length === 0) {
+        toast.error('No unused PINs found to take back');
+      } else {
+        toast.success(`Taken back ${taken.length} PIN(s)`);
+        setTakeBackUserId('');
+        setTakeBackQuantity(1);
+        setTakeBackReason('');
+      }
+      loadAllPins();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to take back PINs');
+    } finally {
+      setIsTakingBack(false);
+    }
+  };
+
+  const handleRepairOrphanedPins = async () => {
+    if (!user?.isAdmin) return;
+    setIsRepairingPins(true);
+    try {
+      const users = Database.getUsers();
+      const userIdSet = new Set(users.map((member) => member.id));
+      const pins = Database.getPins();
+      const orphanUserIds = new Set<string>();
+      let repaired = 0;
+
+      const nextPins = pins.map((pin) => {
+        if (pin.status !== 'used') return pin;
+        const usedById = String(pin.usedById || '').trim();
+        if (!usedById || userIdSet.has(usedById)) return pin;
+        orphanUserIds.add(usedById);
+        repaired += 1;
+        return {
+          ...pin,
+          status: 'unused' as Pin['status'],
+          usedAt: undefined,
+          usedById: undefined,
+          registrationUserId: undefined
+        };
+      });
+
+      if (repaired === 0) {
+        toast.success('No orphaned PIN usage found.');
+        return;
+      }
+
+      Database.savePins(nextPins);
+
+      let removedSafetyPool = 0;
+      const safetyPool = Database.getSafetyPool();
+      if (safetyPool) {
+        const remaining = safetyPool.transactions.filter((tx) => {
+          if (!orphanUserIds.has(tx.fromUserId)) return true;
+          removedSafetyPool += Number(tx.amount) || 0;
+          return false;
+        });
+        const nextTotal = remaining.reduce((sum, tx) => sum + (Number(tx.amount) || 0), 0);
+        Database.saveSafetyPool({ totalAmount: nextTotal, transactions: remaining });
+      }
+
+      const affectedUsers = new Set<string>();
+      const transactions = Database.getTransactions();
+      let removedTransactions = 0;
+      const remainingTx = transactions.filter((tx) => {
+        const orphanUser = orphanUserIds.has(tx.userId);
+        const orphanFrom = !!tx.fromUserId && orphanUserIds.has(tx.fromUserId);
+        if (!orphanUser && !orphanFrom) return true;
+        removedTransactions += 1;
+        if (!orphanUser) {
+          affectedUsers.add(tx.userId);
+        }
+        return false;
+      });
+      if (removedTransactions > 0) {
+        Database.saveTransactions(remainingTx);
+      }
+
+      affectedUsers.forEach((id) => {
+        Database.repairIncomeWalletConsistency(id);
+        Database.repairLockedIncomeTrackerFromTransactions(id);
+        Database.syncLockedIncomeWallet(id);
+      });
+
+      loadAllPins();
+      loadAllTransactions();
+      loadStats();
+
+      toast.success(`Recovered ${repaired} PIN(s). Removed ${removedTransactions} transaction(s).`);
+      if (removedSafetyPool > 0) {
+        toast.success(`Removed $${removedSafetyPool.toFixed(2)} orphan admin fee from safety pool.`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to repair orphaned PIN usage');
+    } finally {
+      setIsRepairingPins(false);
+    }
+  };
+
+  const pinUserMap = useMemo(() => new Map(allUsers.map((u) => [u.id, u])), [allUsers]);
+  const filteredPins = useMemo(() => {
+    const sorted = [...allPins].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const q = pinSearchQuery.trim().toLowerCase();
+    if (!q) return sorted;
+    return sorted.filter((pin) => {
+      const owner = pinUserMap.get(pin.ownerId);
+      const usedBy = pin.usedById ? pinUserMap.get(pin.usedById) : null;
+      return (
+        pin.pinCode.toLowerCase().includes(q)
+        || pin.status.toLowerCase().includes(q)
+        || (owner?.userId || '').toLowerCase().includes(q)
+        || (owner?.fullName || '').toLowerCase().includes(q)
+        || (usedBy?.userId || '').toLowerCase().includes(q)
+        || (usedBy?.fullName || '').toLowerCase().includes(q)
+      );
+    });
+  }, [allPins, pinSearchQuery, pinUserMap]);
 
   const getPinShareMessage = (pinCode: string) => [
     '*Your Exclusive Activation Details:*',
@@ -1046,25 +2596,6 @@ export default function Admin() {
     }
   };
 
-  const handleSweepPending = async () => {
-    setSweepRunning(true);
-    setSweepResult(null);
-    try {
-      const result = Database.repairAndSweepPendingContributions();
-      setSweepResult(
-        `Repaired ${result.repairedUsers} user(s), processed ${result.processedItems} contribution(s). ${result.stillPending} still pending.`
-      );
-      if (result.processedItems > 0 || result.repairedUsers > 0) {
-        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 120_000, maxAttempts: 3, retryDelayMs: 2000 });
-        loadStats();
-        loadAllTransactions();
-      }
-    } catch (err) {
-      setSweepResult(`Error: ${err instanceof Error ? err.message : 'unknown'}`);
-    }
-    setSweepRunning(false);
-  };
-
   const handleBulkCreateNoPin = async () => {
     setBulkNoPinCreated([]);
     setBulkNoPinFailed([]);
@@ -1072,6 +2603,14 @@ export default function Admin() {
 
     if (!bulkNoPin.sponsorUserId || bulkNoPin.sponsorUserId.length !== 7) {
       toast.error('Enter a valid 7-digit sponsor ID');
+      return;
+    }
+    if (!isStrongPassword(bulkNoPin.password)) {
+      toast.error(getPasswordRequirementsText());
+      return;
+    }
+    if (!isValidTransactionPassword(bulkNoPin.transactionPassword)) {
+      toast.error(getTransactionPasswordRequirementsText());
       return;
     }
 
@@ -1297,7 +2836,18 @@ export default function Admin() {
 
     const rows: ReceiveHelpReportRow[] = ordered.map((tx) => {
       const user = userById.get(tx.userId);
-      const fromUser = tx.fromUserId ? userById.get(tx.fromUserId) : undefined;
+      let fromUser = tx.fromUserId ? userById.get(tx.fromUserId) : undefined;
+      let fallbackFromUserId = '';
+      let fallbackFromUserName = '';
+      if (!fromUser) {
+        const desc = tx.description || '';
+        const match = desc.match(/from\s+(.+?)\s*\((\d{7})\)/i);
+        if (match) {
+          fallbackFromUserName = match[1].trim();
+          fallbackFromUserId = match[2];
+          fromUser = userByUserId.get(fallbackFromUserId);
+        }
+      }
 
       return {
         id: tx.id,
@@ -1306,8 +2856,8 @@ export default function Admin() {
         userName: user?.fullName || '-',
         amount: Math.abs(tx.amount),
         level: tx.level || 0,
-        fromUserId: fromUser?.userId || '-',
-        fromUserName: fromUser?.fullName || '-'
+        fromUserId: fromUser?.userId || fallbackFromUserId || '-',
+        fromUserName: fromUser?.fullName || fallbackFromUserName || '-'
       };
     });
 
@@ -1333,6 +2883,9 @@ export default function Admin() {
         const sender = userById.get(tx.userId);
         const txAmount = Math.abs(tx.amount);
         let receiver = tx.toUserId ? userById.get(tx.toUserId) : undefined;
+        if (!receiver && tx.toUserId) {
+          receiver = userByUserId.get(tx.toUserId);
+        }
 
         // Fallback for legacy transactions that didn't store explicit receiver
         if (!receiver) {
@@ -1349,14 +2902,27 @@ export default function Admin() {
           receiver = best ? userById.get(best.userId) : undefined;
         }
 
+        const safetyDest = !receiver && safeLower(tx.description || '').includes('safety pool');
+        const giveToId = receiver
+          ? receiver.userId
+          : safetyDest
+            ? 'SAFETY_POOL'
+            : '-';
+        const giveToUserName = receiver
+          ? receiver.fullName
+          : safetyDest
+            ? 'Safety Pool'
+            : '-';
+
         return {
           id: tx.id,
           createdAt: tx.createdAt,
           userId: sender?.userId || '-',
           userName: sender?.fullName || '-',
           amount: txAmount,
-          giveToId: receiver?.userId || '-',
-          giveToUserName: receiver?.fullName || '-'
+          level: tx.level || 0,
+          giveToId,
+          giveToUserName
         };
       });
 
@@ -1370,7 +2936,206 @@ export default function Admin() {
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [allTransactions, userById, giveFilters, isReportsTabActive, reportTab]);
+  }, [allTransactions, userById, userByUserId, giveFilters, isReportsTabActive, reportTab]);
+
+  const ghostRepairLogs = useMemo(() => {
+    if (!isReportsTabActive) return [];
+    const logs = Database.getGhostReceiveHelpRepairLogs();
+    return [...logs].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [ghostRepairLogTick, isReportsTabActive]);
+
+  const userHelpLockDebug = useMemo(() => {
+    if (!searchedUser?.transactions) {
+      return { giveEntries: [], lockedEntries: [] };
+    }
+
+    const txs: Transaction[] = searchedUser.transactions;
+    const lockState = new Map<string, 'locked' | 'unlocked'>();
+    const lockedMeta = new Map<string, { amount: number; level: number; description: string; createdAt: string }>();
+    const firstTwoByLevel = new Map<number, Array<{ txId: string; remaining: number }>>();
+    const qualificationByLevel = new Map<number, Array<{ txId: string; remaining: number }>>();
+    const originalIndexById = new Map<string, number>();
+    txs.forEach((tx, index) => {
+      originalIndexById.set(tx.id, index);
+    });
+
+    const getTxLevel = (tx: Transaction): number | null => {
+      const numericLevel = typeof tx.level === 'number' ? tx.level : Number(tx.level);
+      if (Number.isFinite(numericLevel) && numericLevel >= 1 && numericLevel <= 10) {
+        return numericLevel;
+      }
+      const match = tx.description?.match(/level\s+(\d+)/i);
+      return match ? Number(match[1]) : null;
+    };
+
+    const getTxTimestamp = (tx: Transaction): number => {
+      const created = Date.parse(tx.createdAt || '');
+      if (!Number.isNaN(created)) return created;
+      const completed = Date.parse(tx.completedAt || '');
+      if (!Number.isNaN(completed)) return completed;
+      const idMatch = (tx.id || '').match(/_(\d{10,13})(?:_|$)/);
+      if (idMatch) {
+        const n = Number(idMatch[1]);
+        if (Number.isFinite(n)) {
+          return idMatch[1].length === 10 ? n * 1000 : n;
+        }
+      }
+      return 0;
+    };
+
+    const consumeQueueAtLevel = (
+      queueMap: Map<number, Array<{ txId: string; remaining: number }>>,
+      level: number,
+      amount: number,
+      consumed: Array<{ txId: string; amount: number; level: number; description: string }>
+    ): number => {
+      if (amount <= 0) return 0;
+      const queue = queueMap.get(level);
+      if (!queue || queue.length === 0) return amount;
+      let remaining = amount;
+
+      for (const item of queue) {
+        if (remaining <= 0) break;
+        if (item.remaining <= 0) continue;
+        const used = Math.min(item.remaining, remaining);
+        item.remaining -= used;
+        remaining -= used;
+        const meta = lockedMeta.get(item.txId);
+        consumed.push({
+          txId: item.txId,
+          amount: used,
+          level,
+          description: meta?.description || ''
+        });
+        if (item.remaining <= 0) {
+          lockState.set(item.txId, 'unlocked');
+        }
+      }
+
+      queueMap.set(level, queue.filter((item) => item.remaining > 0));
+      return remaining;
+    };
+
+    const consumeQueueAcrossLevels = (
+      queueMap: Map<number, Array<{ txId: string; remaining: number }>>,
+      preferredLevel: number,
+      amount: number,
+      consumed: Array<{ txId: string; amount: number; level: number; description: string }>
+    ): number => {
+      if (amount <= 0) return 0;
+      const levels = Array.from(queueMap.keys())
+        .filter((lvl) => Number.isFinite(lvl))
+        .sort((a, b) => a - b);
+      const ordered = levels.includes(preferredLevel)
+        ? [preferredLevel, ...levels.filter((lvl) => lvl !== preferredLevel)]
+        : levels;
+      let remaining = amount;
+      for (const level of ordered) {
+        if (remaining <= 0) break;
+        remaining = consumeQueueAtLevel(queueMap, level, remaining, consumed);
+      }
+      return remaining;
+    };
+
+    const sortedAsc = [...txs].sort((a, b) => {
+      const timeDiff = getTxTimestamp(a) - getTxTimestamp(b);
+      if (timeDiff !== 0) return timeDiff;
+
+      const getLockedFlowPriority = (tx: Transaction): number => {
+        const txDesc = (tx.description || '').toLowerCase();
+        if (
+          tx.type === 'receive_help'
+          && tx.amount > 0
+          && (
+            txDesc.startsWith('locked first-two help at level')
+            || txDesc.startsWith('locked receive help at level')
+          )
+        ) {
+          return 0;
+        }
+        if (
+          (tx.type === 'give_help' && txDesc.includes('from locked income'))
+          || (
+            tx.type === 'receive_help'
+            && tx.amount > 0
+            && txDesc.startsWith('released locked receive help at level')
+          )
+        ) {
+          return 1;
+        }
+        return 2;
+      };
+
+      const priorityDiff = getLockedFlowPriority(a) - getLockedFlowPriority(b);
+      if (priorityDiff !== 0) return priorityDiff;
+      const indexDiff = (originalIndexById.get(a.id) ?? 0) - (originalIndexById.get(b.id) ?? 0);
+      if (indexDiff !== 0) return indexDiff;
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+
+    const giveEntries: Array<{
+      txId: string;
+      createdAt: string;
+      amount: number;
+      sourceLevel: number;
+      consumed: Array<{ txId: string; amount: number; level: number; description: string }>;
+    }> = [];
+
+    for (const tx of sortedAsc) {
+      const desc = (tx.description || '').toLowerCase();
+      const level = getTxLevel(tx);
+
+      if (tx.type === 'receive_help' && tx.amount > 0 && desc.startsWith('locked first-two help at level')) {
+        if (!level) continue;
+        const list = firstTwoByLevel.get(level) || [];
+        list.push({ txId: tx.id, remaining: tx.amount });
+        firstTwoByLevel.set(level, list);
+        lockState.set(tx.id, 'locked');
+        lockedMeta.set(tx.id, { amount: tx.amount, level, description: tx.description || '', createdAt: tx.createdAt });
+        continue;
+      }
+
+      if (tx.type === 'receive_help' && tx.amount > 0 && desc.startsWith('locked receive help at level')) {
+        if (!level) continue;
+        const list = qualificationByLevel.get(level) || [];
+        list.push({ txId: tx.id, remaining: tx.amount });
+        qualificationByLevel.set(level, list);
+        lockState.set(tx.id, 'locked');
+        lockedMeta.set(tx.id, { amount: tx.amount, level, description: tx.description || '', createdAt: tx.createdAt });
+        continue;
+      }
+
+      if (tx.type === 'give_help' && desc.includes('from locked income')) {
+        const preferredLevel = Math.max(1, (level || 1) - 1);
+        const consumed: Array<{ txId: string; amount: number; level: number; description: string }> = [];
+        let remaining = Math.abs(tx.amount);
+        remaining = consumeQueueAcrossLevels(qualificationByLevel, preferredLevel, remaining, consumed);
+        consumeQueueAcrossLevels(firstTwoByLevel, preferredLevel, remaining, consumed);
+
+        giveEntries.push({
+          txId: tx.id,
+          createdAt: tx.createdAt,
+          amount: Math.abs(tx.amount),
+          sourceLevel: preferredLevel,
+          consumed
+        });
+        continue;
+      }
+
+      if (tx.type === 'receive_help' && tx.amount > 0 && desc.startsWith('released locked receive help at level')) {
+        if (!level) continue;
+        consumeQueueAtLevel(qualificationByLevel, level, tx.amount, []);
+      }
+    }
+
+    const lockedEntries = Array.from(lockedMeta.entries()).map(([txId, meta]) => ({
+      txId,
+      ...meta,
+      status: lockState.get(txId) || 'locked'
+    }));
+
+    return { giveEntries, lockedEntries };
+  }, [searchedUser]);
 
   const offerAchieverRows = useMemo(() => {
     if (!isReportsTabActive || reportTab !== 'offer-achievers') return [];
@@ -1564,16 +3329,69 @@ export default function Admin() {
     });
   }, [supportTickets, supportStatusFilter, supportSearch]);
 
+  const pendingWithdrawalCount = useMemo(
+    () => withdrawalRequests.filter((tx) => tx.status === 'pending').length,
+    [withdrawalRequests]
+  );
+
+  const openSupportCount = useMemo(
+    () => supportTickets.filter((ticket) => ticket.status === 'open' || ticket.status === 'in_progress').length,
+    [supportTickets]
+  );
+
   const selectedSupportTicket = useMemo(
     () => supportTickets.find((ticket) => ticket.ticket_id === selectedSupportTicketId) || null,
     [supportTickets, selectedSupportTicketId]
   );
+
+  const announcementSummary = useMemo(() => {
+    const total = announcementHistory.length;
+    const nowTs = Date.now();
+    const active = announcementHistory.filter((item) => {
+      if (item.isRecalled) return false;
+      if (item.expiresAt && Date.parse(item.expiresAt) <= nowTs) return false;
+      return true;
+    }).length;
+    const recalled = total - active;
+    const totalRecipients = announcementHistory.reduce((sum, item) => sum + (item.totalRecipients || 0), 0);
+    return { total, active, recalled, totalRecipients };
+  }, [announcementHistory]);
+
+  const userLookup = useMemo(() => {
+    const map = new Map<string, (typeof allUsers)[number]>();
+    for (const member of allUsers) {
+      map.set(member.id, member);
+      map.set(member.userId, member);
+    }
+    return map;
+  }, [allUsers]);
+
+  const filteredWithdrawalRequests = useMemo(() => {
+    const rows = [...withdrawalRequests].sort((a, b) => {
+      if (a.status === 'pending' && b.status !== 'pending') return -1;
+      if (a.status !== 'pending' && b.status === 'pending') return 1;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+    if (withdrawalStatusFilter === 'all') return rows;
+    return rows.filter((tx) => tx.status === withdrawalStatusFilter);
+  }, [withdrawalRequests, withdrawalStatusFilter]);
+
+  const filteredDepositHistory = useMemo(() => {
+    const rows = [...depositHistory].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    if (depositHistoryStatusFilter === 'all') return rows;
+    return rows.filter((payment) => payment.status === depositHistoryStatusFilter);
+  }, [depositHistory, depositHistoryStatusFilter]);
 
   useEffect(() => {
     if (selectedSupportTicket) {
       setSupportStatusDraft(selectedSupportTicket.status);
     }
   }, [selectedSupportTicket]);
+
+  useEffect(() => {
+    setEditingSupportMessageId('');
+    setEditingSupportMessageText('');
+  }, [selectedSupportTicketId]);
 
   const handleSupportStatusUpdate = () => {
     if (!selectedSupportTicket) return;
@@ -1614,7 +3432,7 @@ export default function Admin() {
       ticket_id: selectedSupportTicket.ticket_id,
       sender_type: 'admin',
       sender_user_id: user.userId,
-      sender_name: user.fullName,
+      sender_name: 'Admin',
       message: supportReplyMessage.trim(),
       attachments: supportReplyAttachment ? [supportReplyAttachment] : []
     });
@@ -1627,6 +3445,29 @@ export default function Admin() {
     setSupportStatusDraft(updated.status);
     loadSupportTickets();
     toast.success('Reply sent');
+  };
+
+  const handleAdminSupportMessageEdit = () => {
+    if (!selectedSupportTicket || !user || !editingSupportMessageId) return;
+    try {
+      const updated = Database.updateSupportTicketMessage({
+        ticket_id: selectedSupportTicket.ticket_id,
+        message_id: editingSupportMessageId,
+        editor_type: 'admin',
+        editor_user_id: user.userId,
+        message: editingSupportMessageText.trim()
+      });
+      if (!updated) {
+        toast.error('Failed to edit reply');
+        return;
+      }
+      setEditingSupportMessageId('');
+      setEditingSupportMessageText('');
+      loadSupportTickets();
+      toast.success('Reply updated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to edit reply');
+    }
   };
 
   const exportData = () => {
@@ -1697,42 +3538,7 @@ export default function Admin() {
               </Button>
               <Button
                 variant="outline"
-                onClick={async () => {
-                  if (import.meta.env.PROD) {
-                    try {
-                      await Database.hydrateFromServerBatches(Database.getAdminCriticalRemoteSyncBatches(), {
-                        strict: true,
-                        maxAttempts: 2,
-                        timeoutMs: 45000,
-                        retryDelayMs: 1500,
-                        continueOnError: true,
-                        requireAnySuccess: true,
-                        onBatchError: (keys, error) => {
-                          console.warn('Manual admin refresh hydrate failed for keys:', keys, error);
-                        }
-                      });
-                    } catch (error) {
-                      console.warn('Manual admin refresh failed to hydrate backend state:', error);
-                    }
-                  }
-
-                  reloadAdminDataFromBrowserState();
-                  loadSupportTickets();
-                  if (import.meta.env.PROD) {
-                    void hydrateDeferredAdminState().then(() => {
-                      loadAllTransactions();
-                      loadAllPins();
-                      loadAllPinRequests();
-                      loadPendingPinRequests();
-                      loadPayments();
-                      loadPaymentMethods();
-                      loadMarketplaceData();
-                    });
-                  } else {
-                    loadAllTransactions();
-                  }
-                  toast.success('Data refreshed');
-                }}
+                onClick={() => { void runAdminRefresh(); }}
                 className="border-white/20 text-white hover:bg-white/10"
               >
                 <RefreshCw className="w-4 h-4 mr-2" />
@@ -1928,13 +3734,37 @@ export default function Admin() {
         <Tabs value={activeMainTab} onValueChange={setActiveMainTab} className="space-y-6">
           <TabsList className="mobile-bottom-scroll bg-[#1f2937] border border-white/10 h-auto w-full justify-start gap-1 overflow-x-auto whitespace-nowrap">
             <TabsTrigger value="users" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Users</TabsTrigger>
-            <TabsTrigger value="pins" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">PIN Management</TabsTrigger>
+            <TabsTrigger value="pins" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">
+              PIN Management
+              {pendingPinRequests.length > 0 && (
+                <span className="ml-1 text-xs bg-fuchsia-500/90 text-white px-1.5 rounded-full">
+                  {pendingPinRequests.length}
+                </span>
+              )}
+              {orphanedPinCount > 0 && (
+                <span className="ml-1 text-xs bg-amber-500/90 text-white px-1.5 rounded-full">
+                  {orphanedPinCount}
+                </span>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="payments" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">
-              Payments {pendingPayments.length > 0 && <span className="ml-1 text-xs bg-red-500 text-white px-1.5 rounded-full">{pendingPayments.length}</span>}
+              Payments
+              {(pendingPayments.length > 0 || pendingWithdrawalCount > 0) && (
+                <span className="ml-1 text-xs bg-amber-500/90 text-white px-1.5 rounded-full">
+                  {pendingPayments.length + pendingWithdrawalCount}
+                </span>
+              )}
             </TabsTrigger>
             <TabsTrigger value="user-details" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">User Details</TabsTrigger>
             <TabsTrigger value="impersonate" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Login As User</TabsTrigger>
-            <TabsTrigger value="support" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Support</TabsTrigger>
+            <TabsTrigger value="support" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">
+              Support
+              {openSupportCount > 0 && (
+                <span className="ml-1 text-xs bg-teal-500/90 text-white px-1.5 rounded-full">
+                  {openSupportCount}
+                </span>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="reports" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Reports</TabsTrigger>
             <TabsTrigger value="matrix" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Matrix Table</TabsTrigger>
             <TabsTrigger value="settings" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Settings</TabsTrigger>
@@ -2070,21 +3900,283 @@ export default function Admin() {
             <Card className="glass border-white/10 mb-6">
               <CardHeader>
                 <CardTitle className="text-white flex items-center gap-2">
-                  <RefreshCw className="w-5 h-5 text-amber-400" />
-                  Reprocess Pending Help
+                  <Megaphone className="w-5 h-5 text-sky-400" />
+                  Broadcast Announcement
                 </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-3">
-                <p className="text-white/60 text-sm">
-                  Sweep all stuck pending matrix contributions and process any that are now eligible (users with locked income ready to fund higher-level help).
+              <CardContent className="space-y-4">
+                <p className="text-xs text-white/60">
+                  Send a notification announcement to existing users, with optional future-user delivery based on your selection. Optional image will appear inside the notification card.
                 </p>
-                <Button onClick={handleSweepPending} disabled={sweepRunning} className="w-full btn-primary">
-                  {sweepRunning ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
-                  {sweepRunning ? 'Processing...' : 'Reprocess Pending Help'}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <div className="rounded-md border border-white/10 bg-[#1f2937] px-3 py-2">
+                    <p className="text-[11px] text-white/55">Total Sent</p>
+                    <p className="text-sm font-semibold text-white">{announcementSummary.total}</p>
+                  </div>
+                  <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2">
+                    <p className="text-[11px] text-emerald-200/70">Active</p>
+                    <p className="text-sm font-semibold text-emerald-300">{announcementSummary.active}</p>
+                  </div>
+                  <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2">
+                    <p className="text-[11px] text-amber-200/70">Recalled</p>
+                    <p className="text-sm font-semibold text-amber-300">{announcementSummary.recalled}</p>
+                  </div>
+                  <div className="rounded-md border border-sky-500/25 bg-sky-500/10 px-3 py-2">
+                    <p className="text-[11px] text-sky-200/70">Total Delivered</p>
+                    <p className="text-sm font-semibold text-sky-300">{formatNumber(announcementSummary.totalRecipients)}</p>
+                  </div>
+                </div>
+                {editingAnnouncement && (
+                  <div className="flex flex-col gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-xs text-amber-200/80">Editing announcement</p>
+                      <p className="text-sm font-semibold text-amber-100">{editingAnnouncement.title}</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={cancelEditAnnouncement}
+                      className="border-amber-400/40 text-amber-200 hover:bg-amber-500/10"
+                    >
+                      Cancel Edit
+                    </Button>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-white/80">Title</Label>
+                    <Input
+                      value={announcementData.title}
+                      onChange={(e) => setAnnouncementData((prev) => ({ ...prev, title: e.target.value }))}
+                      placeholder="Important Announcement"
+                      className="bg-[#1f2937] border-white/10 text-white"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-white/80">Image URL (Optional)</Label>
+                    <Input
+                      value={announcementData.imageUrl}
+                      onChange={(e) => setAnnouncementData((prev) => ({ ...prev, imageUrl: e.target.value }))}
+                      placeholder="https://..."
+                      className="bg-[#1f2937] border-white/10 text-white"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-white/80">Upload Image (Optional)</Label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="inline-flex items-center gap-2 rounded-md border border-white/20 bg-[#1f2937] px-3 py-2 text-sm text-white/80 cursor-pointer hover:bg-white/10">
+                      <ImagePlus className="w-4 h-4" />
+                      Upload
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={handleAnnouncementImageUpload}
+                      />
+                    </label>
+                    {announcementData.imageUrl && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setAnnouncementData((prev) => ({ ...prev, imageUrl: '' }))}
+                        className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                      >
+                        Remove Image
+                      </Button>
+                    )}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-white/80">Message</Label>
+                  <Textarea
+                    value={announcementData.message}
+                    onChange={(e) => setAnnouncementData((prev) => ({ ...prev, message: e.target.value }))}
+                    placeholder="Write your announcement message..."
+                    className="bg-[#1f2937] border-white/10 text-white min-h-[110px]"
+                  />
+                </div>
+                <div className="rounded-lg border border-white/10 bg-[#141c2a] p-3 space-y-3">
+                  <p className="text-sm text-white/80 font-medium">Delivery Options</p>
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <label className="flex items-center gap-2 text-sm text-white/70">
+                      <input
+                        type="radio"
+                        name="announcement-duration"
+                        checked={announcementData.isPermanent}
+                        onChange={() => setAnnouncementData((prev) => ({ ...prev, isPermanent: true, includeFutureUsers: true }))}
+                      />
+                      Permanent (until you take back)
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-white/70">
+                      <input
+                        type="radio"
+                        name="announcement-duration"
+                        checked={!announcementData.isPermanent}
+                        onChange={() => setAnnouncementData((prev) => ({ ...prev, isPermanent: false, includeFutureUsers: false }))}
+                      />
+                      Time period (days)
+                    </label>
+                  </div>
+                  {!announcementData.isPermanent && (
+                    <div className="flex flex-col sm:flex-row gap-3">
+                      <Input
+                        type="number"
+                        min={1}
+                        value={announcementData.durationDays}
+                        onChange={(e) => setAnnouncementData((prev) => ({ ...prev, durationDays: e.target.value }))}
+                        className="bg-[#1f2937] border-white/10 text-white sm:max-w-[180px]"
+                        placeholder="Number of days"
+                      />
+                      <label className="flex items-center gap-2 text-sm text-white/70">
+                        <input
+                          type="checkbox"
+                          checked={announcementData.includeFutureUsers}
+                          onChange={(e) => setAnnouncementData((prev) => ({ ...prev, includeFutureUsers: e.target.checked }))}
+                        />
+                        Include future users (approval)
+                      </label>
+                    </div>
+                  )}
+                  {announcementData.isPermanent && (
+                    <p className="text-xs text-white/50">
+                      Permanent announcements are delivered to existing users and new users automatically.
+                    </p>
+                  )}
+                </div>
+                {announcementData.imageUrl && (
+                  <div className="space-y-2">
+                    <Label className="text-white/80 text-xs">Image Preview</Label>
+                    <img
+                      src={announcementData.imageUrl}
+                      alt="Announcement preview"
+                      className="max-h-52 w-full max-w-md rounded-lg border border-white/15 object-cover"
+                    />
+                  </div>
+                )}
+                {editingAnnouncement ? (
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <Button
+                      onClick={handleUpdateAnnouncement}
+                      disabled={isUpdatingAnnouncement || !announcementData.message.trim()}
+                      className="flex-1 btn-primary"
+                    >
+                      {isUpdatingAnnouncement ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Pencil className="w-4 h-4 mr-2" />}
+                      {isUpdatingAnnouncement ? 'Updating Announcement...' : 'Update Announcement'}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={cancelEditAnnouncement}
+                      className="flex-1 border-white/20 text-white hover:bg-white/10"
+                    >
+                      Cancel Edit
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    onClick={handleSendAnnouncement}
+                    disabled={isSendingAnnouncement || !announcementData.message.trim()}
+                    className="w-full btn-primary"
+                  >
+                    {isSendingAnnouncement ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Megaphone className="w-4 h-4 mr-2" />}
+                    {isSendingAnnouncement ? 'Sending Announcement...' : 'Send Announcement'}
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="glass border-white/10 mb-6">
+              <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <CardTitle className="text-white">Announcement History</CardTitle>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void loadAnnouncementHistory(true)}
+                  className="border-white/20 text-white hover:bg-white/10"
+                >
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Refresh History
                 </Button>
-                {sweepResult && (
-                  <div className="p-3 rounded-lg bg-sky-500/10 border border-sky-500/30">
-                    <p className="text-sky-300 text-sm">{sweepResult}</p>
+              </CardHeader>
+              <CardContent>
+                {announcementHistory.length === 0 ? (
+                  <p className="text-sm text-white/55">No announcements sent yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {announcementHistory.slice(0, 20).map((announcement) => (
+                      <div key={announcement.id} className="rounded-lg border border-white/10 bg-[#1f2937] p-3">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <p className="text-sm font-semibold text-white">{announcement.title}</p>
+                              {(() => {
+                                const expired = announcement.expiresAt && Date.parse(announcement.expiresAt) <= Date.now();
+                                if (announcement.isRecalled) {
+                                  return <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/30">Recalled</Badge>;
+                                }
+                                if (expired) {
+                                  return <Badge className="bg-gray-500/20 text-gray-300 border-gray-500/30">Expired</Badge>;
+                                }
+                                return <Badge className="bg-emerald-500/20 text-emerald-300 border-emerald-500/30">Active</Badge>;
+                              })()}
+                            </div>
+                            <p className="mt-1 text-xs text-white/65">
+                              {announcement.message.length > 180 ? `${announcement.message.slice(0, 180)}...` : announcement.message}
+                            </p>
+                            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-white/45">
+                              <span>Sent: {new Date(announcement.createdAt).toLocaleString()}</span>
+                              <span>By: {announcement.createdByUserId}</span>
+                              <span>Delivered: {announcement.totalRecipients}</span>
+                              <span>
+                                Duration: {(announcement.isPermanent ?? true)
+                                  ? 'Permanent'
+                                  : `${announcement.durationDays || '-'} day(s)`}
+                              </span>
+                              <span>
+                                Future Users: {((announcement.isPermanent ?? true) || announcement.includeFutureUsers) ? 'Yes' : 'No'}
+                              </span>
+                              {announcement.expiresAt && (
+                                <span>Expires: {new Date(announcement.expiresAt).toLocaleString()}</span>
+                              )}
+                              {announcement.updatedAt && (
+                                <span>Edited: {new Date(announcement.updatedAt).toLocaleString()}</span>
+                              )}
+                              {announcement.isRecalled && announcement.recalledAt && (
+                                <span>Recalled: {new Date(announcement.recalledAt).toLocaleString()}</span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={announcement.isRecalled}
+                              onClick={() => startEditAnnouncement(announcement)}
+                              className="border-sky-500/40 text-sky-200 hover:bg-sky-500/10 disabled:opacity-50"
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={announcement.isRecalled}
+                              onClick={() => handleRecallAnnouncement(announcement)}
+                              className="border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+                            >
+                              Take Back
+                            </Button>
+                          </div>
+                        </div>
+                        {announcement.imageUrl && (
+                          <img
+                            src={announcement.imageUrl}
+                            alt={announcement.title || 'Announcement'}
+                            className="mt-3 max-h-44 w-full max-w-xs rounded-lg border border-white/10 object-cover"
+                          />
+                        )}
+                      </div>
+                    ))}
                   </div>
                 )}
               </CardContent>
@@ -2275,7 +4367,12 @@ export default function Admin() {
                                 <Button
                                   size="sm"
                                   variant="outline"
-                                  onClick={() => setSelectedUser(u.userId)}
+                                  onClick={() => {
+                                    setSelectedUser(u.userId);
+                                    setFundWalletType('deposit');
+                                    setFundAmount('');
+                                    setFundMessage('');
+                                  }}
                                   className="border-white/20 text-white hover:bg-white/10"
                                 >
                                   <DollarSign className="w-4 h-4" />
@@ -2284,6 +4381,7 @@ export default function Admin() {
                                   size="sm"
                                   variant="outline"
                                   onClick={() => {
+                                    setActiveMainTab('impersonate');
                                     setImpersonateUserId(u.userId);
                                     setMasterPassword('');
                                   }}
@@ -2351,6 +4449,18 @@ export default function Admin() {
 
           {/* PIN Management Tab */}
           <TabsContent value="pins">
+            <div className="flex justify-end mb-4">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handlePinRefresh}
+                disabled={isPinRefreshing}
+                className="border-white/20 text-white hover:bg-white/10"
+              >
+                <RefreshCw className={`w-4 h-4 mr-2 ${isPinRefreshing ? 'animate-spin' : ''}`} />
+                Refresh
+              </Button>
+            </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Generate PINs */}
               <Card className="glass border-white/10">
@@ -2463,8 +4573,21 @@ export default function Admin() {
                             <p className="text-white/40 text-xs break-all">Tx Hash: {request.paymentTxHash}</p>
                           )}
                           {request.paymentProof && (
-                            <div className="mt-2">
-                              <img src={request.paymentProof} alt="PIN request proof" className="max-h-24 rounded border border-white/10" />
+                            <div className="mt-3 space-y-2">
+                              <img
+                                src={request.paymentProof}
+                                alt="PIN request proof"
+                                className="max-h-28 rounded border border-white/10"
+                              />
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="border-white/20 text-white hover:bg-white/10"
+                                onClick={() => setFullscreenPaymentProof({ src: request.paymentProof || '', userId: requestUser?.userId || '-' })}
+                              >
+                                <Maximize2 className="w-4 h-4 mr-2" />
+                                Full Screen
+                              </Button>
                             </div>
                           )}
                           <p className="text-white/40 text-xs">{formatDate(request.createdAt)}</p>
@@ -2529,10 +4652,137 @@ export default function Admin() {
                 </CardContent>
               </Card>
 
+              {/* Repair Orphaned PINs */}
+              <Card className="glass border-white/10">
+                <CardHeader>
+                  <CardTitle className="text-white flex items-center gap-2">
+                    <AlertTriangle className="w-5 h-5 text-amber-400" />
+                    Repair Orphaned PIN Usage
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <p className="text-sm text-white/60">
+                    If a PIN shows as used but the user record is missing (sync failed), recover the PIN back to the owner and
+                    remove orphan admin-fee entries.
+                  </p>
+                  <Button
+                    onClick={handleRepairOrphanedPins}
+                    disabled={isRepairingPins}
+                    className="btn-primary"
+                  >
+                    {isRepairingPins ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <AlertTriangle className="w-4 h-4 mr-2" />}
+                    Repair Now
+                  </Button>
+                </CardContent>
+              </Card>
+
+              {/* Take Back PINs */}
+              <Card className="glass border-white/10 lg:col-span-2">
+                <CardHeader>
+                  <CardTitle className="text-white flex items-center gap-2">
+                    <RotateCcw className="w-5 h-5 text-amber-400" />
+                    Take Back PINs
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-white/80">User ID (7 digits)</Label>
+                      <Input
+                        value={takeBackUserId}
+                        onChange={(e) => setTakeBackUserId(e.target.value.replace(/\D/g, '').slice(0, 7))}
+                        maxLength={7}
+                        placeholder="Enter User ID"
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-white/80">Quantity</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={takeBackQuantity}
+                        onChange={(e) => setTakeBackQuantity(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-white/80">Remarks</Label>
+                      <Input
+                        value={takeBackReason}
+                        onChange={(e) => setTakeBackReason(e.target.value)}
+                        placeholder="Reason (optional)"
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                    </div>
+                  </div>
+                  <Button
+                    onClick={handleTakeBackPins}
+                    disabled={isTakingBack || takeBackUserId.length !== 7}
+                    className="btn-primary"
+                  >
+                    {isTakingBack ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RotateCcw className="w-4 h-4 mr-2" />}
+                    Take Back PINs
+                  </Button>
+                </CardContent>
+              </Card>
+
               {/* All PINs */}
               <Card className="glass border-white/10 lg:col-span-2">
                 <CardHeader>
-                  <CardTitle className="text-white">All PINs</CardTitle>
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                    <CardTitle className="text-white">All PINs</CardTitle>
+                    <div className="flex items-center gap-2 text-sm text-white/60">
+                      <span>Show</span>
+                      <select
+                        value={pinListLimit}
+                        onChange={(e) => setPinListLimit(parseInt(e.target.value, 10))}
+                        className="px-2 h-8 bg-[#1f2937] border border-white/10 rounded-md text-white text-sm"
+                      >
+                        <option value={50}>50</option>
+                        <option value={100}>100</option>
+                        <option value={200}>200</option>
+                        <option value={0}>All</option>
+                      </select>
+                      <span className="text-white/40">
+                        ({pinListLimit === 0 ? filteredPins.length : Math.min(pinListLimit, filteredPins.length)} of {filteredPins.length}{pinSearchQuery ? ` • Total ${allPins.length}` : ''})
+                      </span>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-col sm:flex-row gap-2">
+                    <Input
+                      value={pinSearchInput}
+                      onChange={(e) => setPinSearchInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          setPinSearchQuery(pinSearchInput.trim());
+                        }
+                      }}
+                      placeholder="Search PIN / user ID / name / status"
+                      className="bg-[#1f2937] border-white/10 text-white"
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => setPinSearchQuery(pinSearchInput.trim())}
+                        className="border-white/20 text-white hover:bg-white/10"
+                      >
+                        Search
+                      </Button>
+                      {pinSearchQuery && (
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            setPinSearchQuery('');
+                            setPinSearchInput('');
+                          }}
+                          className="border-white/20 text-white hover:bg-white/10"
+                        >
+                          Clear
+                        </Button>
+                      )}
+                    </div>
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <div className="overflow-x-auto admin-table-scroll">
@@ -2548,7 +4798,9 @@ export default function Admin() {
                         </tr>
                       </thead>
                       <tbody>
-                        {allPins.slice(0, 50).map((pin) => {
+                        {filteredPins
+                          .slice(0, pinListLimit === 0 ? filteredPins.length : pinListLimit)
+                          .map((pin) => {
                           const owner = allUsers.find(u => u.id === pin.ownerId);
                           const usedBy = pin.usedById ? allUsers.find(u => u.id === pin.usedById) : null;
                           return (
@@ -2656,11 +4908,12 @@ export default function Admin() {
                       </thead>
                       <tbody>
                         {pendingPayments.map((payment) => {
-                          const paymentUser = allUsers.find(u => u.id === payment.userId);
+                          const paymentUser = userLookup.get(payment.userId) || Database.getUserById(payment.userId) || Database.getUserByUserId(payment.userId);
+                          const displayPaymentUserId = paymentUser?.userId || payment.userId || '-';
                           return (
                             <tr key={payment.id} className="border-b border-white/5 hover:bg-white/5">
                               <td className="py-3 px-4">
-                                <span className="text-[#118bdd] font-mono">{paymentUser?.userId}</span>
+                                <span className="text-[#118bdd] font-mono">{displayPaymentUserId}</span>
                               </td>
                               <td className="py-3 px-4 text-white/60">{payment.methodName}</td>
                               <td className="py-3 px-4 text-white font-medium">{formatCurrency(payment.amount)}</td>
@@ -2693,40 +4946,619 @@ export default function Admin() {
                 </CardContent>
               </Card>
 
+              {/* Deposit History */}
+              <Card className="glass border-white/10 lg:col-span-2">
+                <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <CardTitle className="text-white flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-cyan-400" />
+                    Deposit History
+                    <Badge className="bg-cyan-500/20 text-cyan-300 border-cyan-500/30">
+                      {filteredDepositHistory.length}
+                    </Badge>
+                  </CardTitle>
+                  <select
+                    value={depositHistoryStatusFilter}
+                    onChange={(e) => setDepositHistoryStatusFilter(e.target.value as 'all' | 'pending' | 'under_review' | 'completed' | 'failed' | 'reversed')}
+                    className="h-9 px-3 rounded-md bg-[#1f2937] border border-white/10 text-white text-sm"
+                  >
+                    <option value="all">All</option>
+                    <option value="pending">Pending</option>
+                    <option value="under_review">Under Review</option>
+                    <option value="completed">Completed</option>
+                    <option value="failed">Rejected</option>
+                    <option value="reversed">Reversed</option>
+                  </select>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3 max-h-[460px] overflow-y-auto pr-1">
+                    {filteredDepositHistory.map((payment) => {
+                      const paymentUser = userLookup.get(payment.userId) || Database.getUserById(payment.userId) || Database.getUserByUserId(payment.userId);
+                      const displayUserId = paymentUser?.userId || payment.userId;
+                      const displayName = paymentUser?.fullName || 'Unknown user';
+                      return (
+                        <div key={payment.id} className="p-3 rounded-lg bg-[#1f2937] border border-white/10">
+                          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[#118bdd] font-mono text-sm">{displayUserId}</span>
+                                <Badge className={`text-[10px] ${
+                                  payment.status === 'completed'
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                    : payment.status === 'pending' || payment.status === 'under_review'
+                                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                      : payment.status === 'reversed'
+                                        ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
+                                        : 'bg-red-500/15 text-red-300 border-red-500/30'
+                                }`}>
+                                  {payment.status}
+                                </Badge>
+                              </div>
+                              <p className="text-white text-sm font-medium mt-1">{displayName}</p>
+                              <p className="text-white/55 text-xs mt-1">
+                                Amount: {formatCurrency(payment.amount)} | Method: {payment.methodName}
+                              </p>
+                              <p className="text-white/40 text-xs mt-1">
+                                Requested at: {formatDate(payment.createdAt)}
+                              </p>
+                              {payment.txHash && (
+                                <p className="text-white/35 text-[11px] mt-1 break-all">Tx Hash: {payment.txHash}</p>
+                              )}
+                              {payment.adminNotes && (
+                                <p className="text-white/55 text-xs mt-1">Admin Note: {payment.adminNotes}</p>
+                              )}
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setSelectedPayment(payment);
+                                setShowPaymentDialog(true);
+                              }}
+                              className="border-white/20 text-white hover:bg-white/10 self-start"
+                            >
+                              <Eye className="w-4 h-4 mr-1" />
+                              View
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {filteredDepositHistory.length === 0 && (
+                      <div className="text-center py-10">
+                        <CheckCircle className="w-10 h-10 text-emerald-500/40 mx-auto mb-2" />
+                        <p className="text-white/50 text-sm">No deposit history in selected status</p>
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Withdrawal Requests */}
+              <Card className="glass border-white/10 lg:col-span-2">
+                <CardHeader className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <CardTitle className="text-white flex items-center gap-2">
+                    <ArrowUp className="w-5 h-5 text-amber-400" />
+                    Withdrawal Requests
+                    {withdrawalRequests.filter((tx) => tx.status === 'pending').length > 0 && (
+                      <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/30">
+                        {withdrawalRequests.filter((tx) => tx.status === 'pending').length} pending
+                      </Badge>
+                    )}
+                  </CardTitle>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleScanMissingPendingWithdrawals}
+                      className="border-amber-500/30 text-amber-300 hover:bg-amber-500/10 w-full sm:w-auto"
+                    >
+                      <AlertTriangle className="w-4 h-4 mr-1" />
+                      Scan Missing Pending Withdrawals
+                    </Button>
+                    <select
+                      value={withdrawalStatusFilter}
+                      onChange={(e) => setWithdrawalStatusFilter(e.target.value as 'all' | 'pending' | 'completed' | 'failed')}
+                      className="h-9 px-3 rounded-md bg-[#1f2937] border border-white/10 text-white text-sm w-full sm:w-auto"
+                    >
+                      <option value="pending">Pending</option>
+                      <option value="completed">Completed</option>
+                      <option value="failed">Rejected</option>
+                      <option value="all">All</option>
+                    </select>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
+                    {filteredWithdrawalRequests.map((tx) => {
+                      const txUser = userLookup.get(tx.userId) || Database.getUserById(tx.userId) || Database.getUserByUserId(tx.userId);
+                      const displayTxUserId = txUser?.userId || tx.requesterUserId || tx.userId;
+                      const displayTxUserName = txUser?.fullName || tx.requesterName || 'Unknown user';
+                      const grossAmount = Math.abs(tx.amount);
+                      const fee = Number(tx.fee || 0);
+                      const netAmount = Number(tx.netAmount || Math.max(0, grossAmount - fee));
+                      return (
+                        <div key={tx.id} className="p-3 rounded-lg bg-[#1f2937] border border-white/10">
+                          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[#118bdd] font-mono text-sm">{displayTxUserId}</span>
+                                <Badge className={`text-[10px] ${
+                                  tx.status === 'pending'
+                                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                    : tx.status === 'completed'
+                                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                      : 'bg-red-500/15 text-red-300 border-red-500/30'
+                                }`}>
+                                  {tx.status}
+                                </Badge>
+                              </div>
+                              <p className="text-white text-sm font-medium mt-1">{displayTxUserName}</p>
+                              <p className="text-white/55 text-xs mt-1">
+                                Requested: {formatCurrency(grossAmount)} | Fee: {formatCurrency(fee)} | Net: {formatCurrency(netAmount)}
+                              </p>
+                              <p className="text-white/40 text-xs mt-1">
+                                Requested at: {formatDate(tx.createdAt)}
+                              </p>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setSelectedWithdrawalRequest(tx);
+                                setShowWithdrawalRequestDialog(true);
+                              }}
+                              className="border-white/20 text-white hover:bg-white/10 self-start"
+                            >
+                              <Eye className="w-4 h-4 mr-1" />
+                              View
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {filteredWithdrawalRequests.length === 0 && (
+                      <div className="text-center py-10">
+                        <CheckCircle className="w-10 h-10 text-emerald-500/40 mx-auto mb-2" />
+                        <p className="text-white/50 text-sm">No withdrawal requests in selected status</p>
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+
               {/* Payment Methods */}
               <Card className="glass border-white/10">
                 <CardHeader>
-                  <CardTitle className="text-white flex items-center gap-2">
-                    <Settings className="w-5 h-5 text-[#118bdd]" />
-                    Payment Methods
-                  </CardTitle>
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-white flex items-center gap-2">
+                      <Settings className="w-5 h-5 text-[#118bdd]" />
+                      Payment Methods
+                    </CardTitle>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-white/20 text-white hover:bg-white/10"
+                        onClick={startNewPaymentMethod}
+                      >
+                        <Plus className="w-4 h-4 mr-1" />
+                        Add Payment Method
+                      </Button>
+                      {editingPaymentMethodId === 'new' && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-white/70 hover:text-white"
+                          onClick={closePaymentMethodEditor}
+                        >
+                          Cancel
+                        </Button>
+                      )}
+                    </div>
+                  </div>
                 </CardHeader>
                 <CardContent>
+                  {editingPaymentMethodId === 'new' && paymentMethodDraft && (
+                    <div className="p-4 mb-4 rounded-lg border border-white/10 bg-[#111827] space-y-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Method Type</Label>
+                          <select
+                            value={paymentMethodDraft.type}
+                            onChange={(e) => updatePaymentMethodDraft('type', e.target.value as PaymentMethodType)}
+                            className="bg-[#1f2937] border border-white/10 text-white h-9 rounded px-2"
+                          >
+                            <option value="crypto">Crypto</option>
+                            <option value="upi">UPI</option>
+                            <option value="bank_transfer">Bank Transfer</option>
+                            <option value="paypal">PayPal</option>
+                            <option value="stripe">Stripe</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Method Name</Label>
+                          <Input
+                            value={paymentMethodDraft.name}
+                            onChange={(e) => updatePaymentMethodDraft('name', e.target.value)}
+                            placeholder="e.g., USDT (BEP-20)"
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Processing Time</Label>
+                          <Input
+                            value={paymentMethodDraft.processingTime}
+                            onChange={(e) => updatePaymentMethodDraft('processingTime', e.target.value)}
+                            placeholder={`Within ${settings.depositProcessingHours} hours`}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                          />
+                        </div>
+                        <div className="space-y-1 md:col-span-2">
+                          <Label className="text-white/70 text-xs">Description</Label>
+                          <Input
+                            value={paymentMethodDraft.description}
+                            onChange={(e) => updatePaymentMethodDraft('description', e.target.value)}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                          />
+                        </div>
+                        <div className="space-y-1 md:col-span-2">
+                          <Label className="text-white/70 text-xs">Instructions</Label>
+                          <Textarea
+                            value={paymentMethodDraft.instructions}
+                            onChange={(e) => updatePaymentMethodDraft('instructions', e.target.value)}
+                            className="bg-[#1f2937] border-white/10 text-white min-h-[80px]"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Minimum Amount</Label>
+                          <Input
+                            type="number"
+                            value={paymentMethodDraft.minAmount}
+                            onChange={(e) => updatePaymentMethodDraft('minAmount', e.target.value)}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Maximum Amount</Label>
+                          <Input
+                            type="number"
+                            value={paymentMethodDraft.maxAmount}
+                            onChange={(e) => updatePaymentMethodDraft('maxAmount', e.target.value)}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Processing Fee (%)</Label>
+                          <Input
+                            type="number"
+                            value={paymentMethodDraft.processingFee}
+                            onChange={(e) => updatePaymentMethodDraft('processingFee', e.target.value)}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                          />
+                        </div>
+                      </div>
+
+                      {paymentMethodDraft.type === 'crypto' && (
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">USDT Wallet Address (BEP-20)</Label>
+                          <Input
+                            value={paymentMethodDraft.walletAddress}
+                            onChange={(e) => updatePaymentMethodDraft('walletAddress', e.target.value)}
+                            placeholder="0x..."
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                          />
+                        </div>
+                      )}
+
+                      {paymentMethodDraft.type === 'upi' && (
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">UPI ID</Label>
+                          <Input
+                            value={paymentMethodDraft.upiId}
+                            onChange={(e) => updatePaymentMethodDraft('upiId', e.target.value)}
+                            placeholder="name@bank"
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                          />
+                        </div>
+                      )}
+
+                      {paymentMethodDraft.type === 'bank_transfer' && (
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="space-y-1">
+                            <Label className="text-white/70 text-xs">Account Name</Label>
+                            <Input
+                              value={paymentMethodDraft.accountName}
+                              onChange={(e) => updatePaymentMethodDraft('accountName', e.target.value)}
+                              className="bg-[#1f2937] border-white/10 text-white h-9"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-white/70 text-xs">Bank Name</Label>
+                            <Input
+                              value={paymentMethodDraft.bankName}
+                              onChange={(e) => updatePaymentMethodDraft('bankName', e.target.value)}
+                              className="bg-[#1f2937] border-white/10 text-white h-9"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-white/70 text-xs">Account Number</Label>
+                            <Input
+                              value={paymentMethodDraft.accountNumber}
+                              onChange={(e) => updatePaymentMethodDraft('accountNumber', e.target.value)}
+                              className="bg-[#1f2937] border-white/10 text-white h-9"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <Label className="text-white/70 text-xs">Payment QR Code (Optional)</Label>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label className="inline-flex items-center gap-2 rounded-md border border-white/20 bg-[#1f2937] px-3 py-2 text-sm text-white/80 cursor-pointer hover:bg-white/10">
+                            <ImagePlus className="w-4 h-4" />
+                            Upload QR
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => void handlePaymentMethodQrUpload(e)}
+                            />
+                          </label>
+                          {paymentMethodDraft.qrCode && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => updatePaymentMethodDraft('qrCode', '')}
+                              className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                            >
+                              Remove QR
+                            </Button>
+                          )}
+                        </div>
+                        {paymentMethodDraft.qrCode && (
+                          <img src={paymentMethodDraft.qrCode} alt="Payment QR" className="h-28 w-28 rounded-lg border border-white/15 object-cover bg-white p-1" />
+                        )}
+                      </div>
+
+                      <div className="flex gap-2 pt-1">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={closePaymentMethodEditor}
+                          className="border-white/20 text-white hover:bg-white/10"
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => void savePaymentMethodDetails()}
+                          className="bg-[#118bdd] hover:bg-[#0f7ac7]"
+                        >
+                          Save Payment Method
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="space-y-3">
                     {paymentMethods.map((method) => (
-                      <div key={method.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-lg bg-[#1f2937]">
-                        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${method.isActive ? 'bg-[#118bdd]' : 'bg-gray-600'}`}>
-                            <CreditCard className="w-5 h-5 text-white" />
+                      <div key={method.id} className="p-4 rounded-lg bg-[#1f2937] space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${method.isActive ? 'bg-[#118bdd]' : 'bg-gray-600'}`}>
+                              <CreditCard className="w-5 h-5 text-white" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-white font-medium">{method.name}</p>
+                              <p className="text-white/50 text-sm">
+                                Fee: {method.processingFee}% | {method.processingTime}
+                              </p>
+                              <p className="text-white/45 text-xs mt-1">
+                                Min: {formatCurrency(method.minAmount)} | Max: {formatCurrency(method.maxAmount)}
+                              </p>
+                              {method.walletAddress && (
+                                <p className="text-white/45 text-xs mt-1 break-all">
+                                  Wallet: {method.walletAddress}
+                                </p>
+                              )}
+                            </div>
                           </div>
-                          <div>
-                            <p className="text-white font-medium">{method.name}</p>
-                            <p className="text-white/50 text-sm">
-                              Fee: {method.processingFee}% | {method.processingTime}
-                            </p>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                if (editingPaymentMethodId === method.id) {
+                                  closePaymentMethodEditor();
+                                } else {
+                                  openPaymentMethodEditor(method);
+                                }
+                              }}
+                              className="border-white/20 text-white hover:bg-white/10"
+                            >
+                              <Pencil className="w-4 h-4 mr-1" />
+                              {editingPaymentMethodId === method.id ? 'Close Edit' : 'Edit Details'}
+                            </Button>
+                            <button
+                              onClick={() => togglePaymentMethod(method.id, !method.isActive)}
+                              className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${method.isActive
+                                ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
+                                : 'bg-gray-600/20 text-gray-400 hover:bg-gray-600/30'
+                                }`}
+                            >
+                              {method.isActive ? 'Active' : 'Inactive'}
+                            </button>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <button
-                            onClick={() => togglePaymentMethod(method.id, !method.isActive)}
-                            className={`px-3 py-1 rounded-full text-sm font-medium transition-colors ${method.isActive
-                              ? 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30'
-                              : 'bg-gray-600/20 text-gray-400 hover:bg-gray-600/30'
-                              }`}
-                          >
-                            {method.isActive ? 'Active' : 'Inactive'}
-                          </button>
-                        </div>
+
+                        {editingPaymentMethodId === method.id && paymentMethodDraft && (
+                          <div className="rounded-lg border border-white/10 bg-[#111827] p-3 space-y-3">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                              <div className="space-y-1">
+                                <Label className="text-white/70 text-xs">Method Name</Label>
+                                <Input
+                                  value={paymentMethodDraft.name}
+                                  onChange={(e) => updatePaymentMethodDraft('name', e.target.value)}
+                                  className="bg-[#1f2937] border-white/10 text-white h-9"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-white/70 text-xs">Processing Time</Label>
+                                <Input
+                                  value={paymentMethodDraft.processingTime}
+                                  onChange={(e) => updatePaymentMethodDraft('processingTime', e.target.value)}
+                                  placeholder={`Within ${settings.depositProcessingHours} hours`}
+                                  className="bg-[#1f2937] border-white/10 text-white h-9"
+                                />
+                              </div>
+                              <div className="space-y-1 md:col-span-2">
+                                <Label className="text-white/70 text-xs">Description</Label>
+                                <Input
+                                  value={paymentMethodDraft.description}
+                                  onChange={(e) => updatePaymentMethodDraft('description', e.target.value)}
+                                  className="bg-[#1f2937] border-white/10 text-white h-9"
+                                />
+                              </div>
+                              <div className="space-y-1 md:col-span-2">
+                                <Label className="text-white/70 text-xs">Instructions</Label>
+                                <Textarea
+                                  value={paymentMethodDraft.instructions}
+                                  onChange={(e) => updatePaymentMethodDraft('instructions', e.target.value)}
+                                  className="bg-[#1f2937] border-white/10 text-white min-h-[80px]"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-white/70 text-xs">Minimum Amount</Label>
+                                <Input
+                                  type="number"
+                                  value={paymentMethodDraft.minAmount}
+                                  onChange={(e) => updatePaymentMethodDraft('minAmount', e.target.value)}
+                                  className="bg-[#1f2937] border-white/10 text-white h-9"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-white/70 text-xs">Maximum Amount</Label>
+                                <Input
+                                  type="number"
+                                  value={paymentMethodDraft.maxAmount}
+                                  onChange={(e) => updatePaymentMethodDraft('maxAmount', e.target.value)}
+                                  className="bg-[#1f2937] border-white/10 text-white h-9"
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-white/70 text-xs">Processing Fee (%)</Label>
+                                <Input
+                                  type="number"
+                                  value={paymentMethodDraft.processingFee}
+                                  onChange={(e) => updatePaymentMethodDraft('processingFee', e.target.value)}
+                                  className="bg-[#1f2937] border-white/10 text-white h-9"
+                                />
+                              </div>
+                            </div>
+
+                            {method.type === 'crypto' && (
+                              <div className="space-y-1">
+                                <Label className="text-white/70 text-xs">USDT Wallet Address (BEP-20)</Label>
+                                <Input
+                                  value={paymentMethodDraft.walletAddress}
+                                  onChange={(e) => updatePaymentMethodDraft('walletAddress', e.target.value)}
+                                  placeholder="0x..."
+                                  className="bg-[#1f2937] border-white/10 text-white h-9"
+                                />
+                              </div>
+                            )}
+
+                            {method.type === 'upi' && (
+                              <div className="space-y-1">
+                                <Label className="text-white/70 text-xs">UPI ID</Label>
+                                <Input
+                                  value={paymentMethodDraft.upiId}
+                                  onChange={(e) => updatePaymentMethodDraft('upiId', e.target.value)}
+                                  placeholder="name@bank"
+                                  className="bg-[#1f2937] border-white/10 text-white h-9"
+                                />
+                              </div>
+                            )}
+
+                            {method.type === 'bank_transfer' && (
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="space-y-1">
+                                  <Label className="text-white/70 text-xs">Account Name</Label>
+                                  <Input
+                                    value={paymentMethodDraft.accountName}
+                                    onChange={(e) => updatePaymentMethodDraft('accountName', e.target.value)}
+                                    className="bg-[#1f2937] border-white/10 text-white h-9"
+                                  />
+                                </div>
+                                <div className="space-y-1">
+                                  <Label className="text-white/70 text-xs">Bank Name</Label>
+                                  <Input
+                                    value={paymentMethodDraft.bankName}
+                                    onChange={(e) => updatePaymentMethodDraft('bankName', e.target.value)}
+                                    className="bg-[#1f2937] border-white/10 text-white h-9"
+                                  />
+                                </div>
+                                <div className="space-y-1">
+                                  <Label className="text-white/70 text-xs">Account Number</Label>
+                                  <Input
+                                    value={paymentMethodDraft.accountNumber}
+                                    onChange={(e) => updatePaymentMethodDraft('accountNumber', e.target.value)}
+                                    className="bg-[#1f2937] border-white/10 text-white h-9"
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            <div className="space-y-2">
+                              <Label className="text-white/70 text-xs">Payment QR Code (Optional)</Label>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <label className="inline-flex items-center gap-2 rounded-md border border-white/20 bg-[#1f2937] px-3 py-2 text-sm text-white/80 cursor-pointer hover:bg-white/10">
+                                  <ImagePlus className="w-4 h-4" />
+                                  Upload QR
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={(e) => void handlePaymentMethodQrUpload(e)}
+                                  />
+                                </label>
+                                {paymentMethodDraft.qrCode && (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => updatePaymentMethodDraft('qrCode', '')}
+                                    className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                                  >
+                                    Remove QR
+                                  </Button>
+                                )}
+                              </div>
+                              {paymentMethodDraft.qrCode && (
+                                <img src={paymentMethodDraft.qrCode} alt="Payment QR" className="h-28 w-28 rounded-lg border border-white/15 object-cover bg-white p-1" />
+                              )}
+                            </div>
+
+                            <div className="flex gap-2 pt-1">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={closePaymentMethodEditor}
+                                className="border-white/20 text-white hover:bg-white/10"
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                size="sm"
+                                onClick={() => void savePaymentMethodDetails()}
+                                className="bg-[#118bdd] hover:bg-[#0f7ac7]"
+                              >
+                                Save Details
+                              </Button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -2757,7 +5589,7 @@ export default function Admin() {
                     className="bg-[#1f2937] border-white/10 text-white w-full sm:max-w-xs"
                   />
                   <Button
-                    onClick={searchUserById}
+                    onClick={() => searchUserById()}
                     className="btn-primary"
                   >
                     <Search className="w-4 h-4 mr-2" />
@@ -2765,8 +5597,244 @@ export default function Admin() {
                   </Button>
                 </div>
 
+                {!searchedUser && missingMatrixNode && (
+                  <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 space-y-4">
+                    <div className="flex items-start gap-3">
+                      <AlertTriangle className="w-5 h-5 text-amber-300 mt-1" />
+                      <div>
+                        <h4 className="text-white font-semibold">Recover Missing User Record</h4>
+                        <p className="text-xs text-white/60">
+                          Matrix slot found for this ID. This recovery recreates the user record and direct sponsor income (if missing)
+                          without re-running any give-help logic.
+                        </p>
+                        <p className="text-xs text-white/50 mt-1">
+                          Matrix slot: Parent ID {missingMatrixNode.parentId || '-'} · Position {missingMatrixNode.position === 1 ? 'Right' : 'Left'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <Label className="text-xs text-white/70">Full Name</Label>
+                        <Input
+                          value={missingUserRecovery.fullName}
+                          onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, fullName: e.target.value }))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="Full name"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-white/70">Sponsor ID (optional)</Label>
+                        <Input
+                          value={missingUserRecovery.sponsorId}
+                          onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, sponsorId: e.target.value.replace(/\D/g, '').slice(0, 7) }))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="7-digit sponsor ID"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-white/70">Email (optional)</Label>
+                        <Input
+                          value={missingUserRecovery.email}
+                          onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, email: e.target.value }))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="recovered@email"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-white/70">Phone (optional)</Label>
+                        <Input
+                          value={missingUserRecovery.phone}
+                          onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, phone: e.target.value }))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="Phone number"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-white/70">Country (optional)</Label>
+                        <Input
+                          value={missingUserRecovery.country}
+                          onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, country: e.target.value }))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="Country"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-white/70">Login Password (optional)</Label>
+                        <Input
+                          value={missingUserRecovery.loginPassword}
+                          onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, loginPassword: e.target.value }))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="Leave blank for auto"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-white/70">Transaction Password (optional)</Label>
+                        <Input
+                          value={missingUserRecovery.transactionPassword}
+                          onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, transactionPassword: e.target.value }))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="Leave blank for auto"
+                        />
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-white/70">
+                      <input
+                        type="checkbox"
+                        checked={missingUserRecovery.restoreSponsorIncome}
+                        onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, restoreSponsorIncome: e.target.checked }))}
+                        className="rounded"
+                      />
+                      Restore direct sponsor income if missing
+                    </label>
+                    <Button
+                      onClick={handleRecoverMissingUser}
+                      disabled={isRecoveringUser}
+                      className="bg-amber-500/90 hover:bg-amber-500 text-slate-900"
+                    >
+                      {isRecoveringUser ? 'Recovering…' : 'Recover User (No Give-Help)'}
+                    </Button>
+                  </div>
+                )}
+
                 {searchedUser && (
                   <div className="space-y-6">
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <Button
+                        variant="outline"
+                        className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                        onClick={() => {
+                          const result = Database.repairGhostReceiveHelpTransactions(searchedUser.id);
+                          if (result.repaired > 0) {
+                            toast.success(`Repaired ${result.repaired} ghost receive-help record(s) for this user.`);
+                            loadAllTransactions();
+                            loadStats();
+                            setGhostRepairLogTick((tick) => tick + 1);
+                            searchUserById();
+                          } else {
+                            toast.success('No ghost receive-help records found for this user.');
+                          }
+                        }}
+                      >
+                        Repair Ghost Receive-Help (This User)
+                      </Button>
+                      <p className="text-xs text-white/40 self-center">
+                        Fixes invalid receive-help entries and recalculates this user’s wallet/locks.
+                      </p>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-end">
+                      <div className="flex-1 space-y-1">
+                        <Label className="text-xs text-white/70">Restore missing receive-help from sender</Label>
+                        <Input
+                          value={restoreReceiveHelpFromId}
+                          onChange={(e) => setRestoreReceiveHelpFromId(e.target.value.replace(/\D/g, '').slice(0, 7))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="Sender User ID (7 digits)"
+                        />
+                      </div>
+                      <div className="w-full sm:w-32 space-y-1">
+                        <Label className="text-xs text-white/70">Level (optional)</Label>
+                        <Input
+                          value={restoreReceiveHelpLevel}
+                          onChange={(e) => setRestoreReceiveHelpLevel(e.target.value.replace(/\D/g, '').slice(0, 2))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="Auto"
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-xs text-white/70 sm:self-center">
+                        <input
+                          type="checkbox"
+                          checked={restoreReceiveHelpHistoryOnly}
+                          onChange={(e) => setRestoreReceiveHelpHistoryOnly(e.target.checked)}
+                          className="rounded"
+                        />
+                        History only (no wallet impact)
+                      </label>
+                      <Button
+                        variant="outline"
+                        onClick={handleRestoreReceiveHelp}
+                        disabled={isRestoringReceiveHelp}
+                        className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-400/10"
+                      >
+                        {isRestoringReceiveHelp ? 'Restoring...' : 'Restore Receive Help'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={handleManualCreditReceiveHelp}
+                        disabled={isManualCreditingReceiveHelp}
+                        className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                      >
+                        {isManualCreditingReceiveHelp ? 'Crediting...' : 'Manual Credit Now'}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-white/40 self-center sm:self-end">
+                      Auto-detects level from matrix when blank. Use level if sender is not in the user's downline.
+                    </p>
+                    <p className="text-xs text-amber-200/70">
+                      `Manual Credit Now` is only for recovery when the sender debit is already visible in history but exact matching still fails.
+                    </p>
+                    <div className="flex flex-col sm:flex-row gap-2 items-start sm:items-end">
+                      <div className="w-full sm:w-32 space-y-1">
+                        <Label className="text-xs text-white/70">Legacy Qualified Level</Label>
+                        <Input
+                          value={manualQualifiedLevelValue}
+                          onChange={(e) => setManualQualifiedLevelValue(e.target.value.replace(/\D/g, '').slice(0, 2))}
+                          className="bg-[#1f2937] border-white/10 text-white h-9"
+                          placeholder="1"
+                        />
+                      </div>
+                      <Button
+                        variant="outline"
+                        onClick={handleMarkLevelHelpComplete}
+                        disabled={isMarkingLevelHelpComplete}
+                        className="border-indigo-400/40 text-indigo-300 hover:bg-indigo-400/10"
+                      >
+                        {isMarkingLevelHelpComplete ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <CheckCircle className="w-4 h-4 mr-2" />}
+                        {isMarkingLevelHelpComplete ? 'Marking Level Complete...' : 'Mark Level Help Complete'}
+                      </Button>
+                    </div>
+                    <p className="text-xs text-white/40">
+                      Use only for legacy manual-help cases where a user truly completed a level but proper receive-help history was never recorded.
+                    </p>
+                    <div className="space-y-2">
+                      <Label className="text-xs text-white/70">Unsettled Exact Give-Help Debits Targeting This User</Label>
+                      <div className="space-y-2">
+                        {searchedUser.incomingGiveHelpCandidates?.slice(0, 8).map((item: any) => (
+                          <div key={item.txId} className="rounded-lg bg-[#1f2937] p-3 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-sm text-white font-medium">
+                                {item.senderName || 'Unknown sender'} {item.senderUserId ? `(${item.senderUserId})` : ''} {'->'} Level {item.level} {'->'} {formatCurrency(item.amount)}
+                              </p>
+                              <p className="text-xs text-white/50 break-all">{item.description}</p>
+                              <p className="text-[11px] text-white/40 mt-1">
+                                Tx: {item.txId} | {formatDate(item.createdAt)}
+                              </p>
+                            </div>
+                            <div className="flex flex-col sm:flex-row gap-2">
+                              <Button
+                                variant="outline"
+                                onClick={() => handleRestoreFromExactGiveHelp(item.txId, false)}
+                                disabled={restoringFromGiveHelpTxId === item.txId}
+                                className="border-sky-400/40 text-sky-300 hover:bg-sky-400/10"
+                              >
+                                {restoringFromGiveHelpTxId === item.txId ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wrench className="w-4 h-4 mr-2" />}
+                                Restore From This Debit
+                              </Button>
+                              <Button
+                                variant="outline"
+                                onClick={() => handleRestoreFromExactGiveHelp(item.txId, true)}
+                                disabled={restoringFromGiveHelpTxId === item.txId}
+                                className="border-white/20 text-white hover:bg-white/10"
+                              >
+                                History Only
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                        {(!searchedUser.incomingGiveHelpCandidates || searchedUser.incomingGiveHelpCandidates.length === 0) && (
+                          <p className="text-xs text-white/40">No unsettled exact give-help debit candidates found for this user.</p>
+                        )}
+                      </div>
+                    </div>
                     {/* User Details Grid */}
                     <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4">
                       {/* 1. User ID */}
@@ -2818,49 +5886,54 @@ export default function Admin() {
                         <p className="text-sm text-white/50">Income Wallet</p>
                         <p className="text-xl font-bold text-emerald-400">{formatCurrency(searchedUser.wallet?.incomeWallet || 0)}</p>
                       </div>
-                      {/* 7. Total Earnings */}
+                      {/* 7. Royalty Wallet */}
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <p className="text-sm text-white/50">Royalty Wallet</p>
+                        <p className="text-xl font-bold text-amber-300">{formatCurrency(searchedUser.wallet?.royaltyWallet || 0)}</p>
+                      </div>
+                      {/* 8. Total Earnings */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Total Earnings</p>
                         <p className="text-xl font-bold text-emerald-400">{formatCurrency(searchedUser.wallet?.totalEarning || 0)}</p>
                       </div>
-                      {/* 8. Give Help */}
+                      {/* 9. Give Help */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Give Help</p>
                         <p className="text-xl font-bold text-orange-400">{formatCurrency(searchedUser.giveHelpAmount || 0)}</p>
                       </div>
-                      {/* 9. Received Help */}
+                      {/* 10. Received Help */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Received Help</p>
                         <p className="text-xl font-bold text-emerald-400">{formatCurrency(searchedUser.receiveHelpAmount || 0)}</p>
                       </div>
-                      {/* 10. Locked Help */}
+                      {/* 11. Locked Help */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Locked Help</p>
                         <p className="text-xl font-bold text-white/80">{formatCurrency((searchedUser.wallet?.lockedIncomeWallet || 0) + (searchedUser.wallet?.giveHelpLocked || 0))}</p>
                       </div>
-                      {/* 11. Direct Referral */}
+                      {/* 12. Direct Referral */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Direct Referral</p>
                         <p className="text-xl font-bold text-white">{searchedUser.directCount}</p>
                       </div>
-                      {/* 12. Direct Referral Income */}
+                      {/* 13. Direct Referral Income */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Direct Referral Income</p>
                         <p className="text-xl font-bold text-white/80">{formatCurrency(searchedUser.directReferralIncome || 0)}</p>
                       </div>
-                      {/* 13. Left Team */}
+                      {/* 14. Left Team */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50 mb-1">Left Team</p>
                         <p className="text-xl font-bold text-white">{searchedUser.teamStats?.left || 0}</p>
                         <p className="text-xs text-emerald-400">{searchedUser.teamStats?.leftActive || 0} Active</p>
                       </div>
-                      {/* 14. Right Team */}
+                      {/* 15. Right Team */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50 mb-1">Right Team</p>
                         <p className="text-xl font-bold text-white">{searchedUser.teamStats?.right || 0}</p>
                         <p className="text-xs text-emerald-400">{searchedUser.teamStats?.rightActive || 0} Active</p>
                       </div>
-                      {/* 15. Level Filled */}
+                      {/* 16. Level Filled */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Level Filled</p>
                         <p className="text-xl font-bold text-white">
@@ -2870,22 +5943,207 @@ export default function Admin() {
                           })()}
                         </p>
                       </div>
-                      {/* 16. Qualified Level */}
+                      {/* 17. Qualified Level */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Qualified Level</p>
                         <p className="text-xl font-bold text-white">
                           Level {Database.getQualifiedLevel(searchedUser.id)}
                         </p>
                       </div>
-                      {/* 17. Offer Achievement */}
+                      {/* 18. Offer Achievement */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Offer Achievement</p>
                         <p className="text-xl font-bold text-purple-400">{searchedUser.offerAchieved ? 'Achieved' : 'Not Achieved'}</p>
                       </div>
-                      {/* 18. User's Transition */}
+                      {/* 19. User's Transition */}
                       <div className="p-4 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">User's Transition</p>
                         <p className="text-xl font-bold text-white/80">{searchedUser.transactions?.length || 0} Txns</p>
+                      </div>
+                    </div>
+
+                    {/* Admin Profile Update */}
+                    <div className="rounded-lg border border-white/10 bg-[#141c2a] p-4 space-y-4">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div>
+                          <h4 className="text-white font-semibold">Admin Profile Update</h4>
+                          <p className="text-xs text-white/55">
+                            Update user profile details directly. User ID cannot be changed.
+                          </p>
+                        </div>
+                        <Badge className="bg-amber-500/15 text-amber-300 border-amber-500/30">
+                          No OTP required
+                        </Badge>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Full Name</Label>
+                          <Input
+                            value={adminUserProfile.fullName}
+                            onChange={(e) => setAdminUserProfile((prev) => ({ ...prev, fullName: e.target.value }))}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                            placeholder="Enter full name"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Email</Label>
+                          <Input
+                            value={adminUserProfile.email}
+                            onChange={(e) => setAdminUserProfile((prev) => ({ ...prev, email: e.target.value }))}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                            placeholder="Enter email"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Phone Number</Label>
+                          <Input
+                            value={adminUserProfile.phone}
+                            onChange={(e) => setAdminUserProfile((prev) => ({ ...prev, phone: e.target.value }))}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                            placeholder="Enter phone number"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">USDT Address</Label>
+                          <Input
+                            value={adminUserProfile.usdtAddress}
+                            onChange={(e) => setAdminUserProfile((prev) => ({ ...prev, usdtAddress: e.target.value }))}
+                            className="bg-[#1f2937] border-white/10 text-white h-9"
+                            placeholder="Enter USDT address"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Login Password (optional)</Label>
+                          <div className="relative">
+                            <Input
+                              type={showAdminLoginPassword ? 'text' : 'password'}
+                              value={adminUserProfile.loginPassword}
+                              onChange={(e) => setAdminUserProfile((prev) => ({ ...prev, loginPassword: e.target.value }))}
+                              className="bg-[#1f2937] border-white/10 text-white h-9 pr-10"
+                              placeholder="Enter new login password"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowAdminLoginPassword((prev) => !prev)}
+                              className="absolute inset-y-0 right-3 flex items-center text-white/60 hover:text-white"
+                              tabIndex={-1}
+                            >
+                              {showAdminLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                          <p className="text-[11px] text-white/40">{getPasswordRequirementsText()}</p>
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-white/70 text-xs">Transaction Password (optional)</Label>
+                          <div className="relative">
+                            <Input
+                              type={showAdminTransactionPassword ? 'text' : 'password'}
+                              value={adminUserProfile.transactionPassword}
+                              onChange={(e) => setAdminUserProfile((prev) => ({ ...prev, transactionPassword: e.target.value }))}
+                              className="bg-[#1f2937] border-white/10 text-white h-9 pr-10"
+                              placeholder="Enter new transaction password"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowAdminTransactionPassword((prev) => !prev)}
+                              className="absolute inset-y-0 right-3 flex items-center text-white/60 hover:text-white"
+                              tabIndex={-1}
+                            >
+                              {showAdminTransactionPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
+                          </div>
+                          <p className="text-[11px] text-white/40">{getTransactionPasswordRequirementsText()}</p>
+                        </div>
+                      </div>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <Button
+                          onClick={handleAdminProfileUpdate}
+                          disabled={isUpdatingUserProfile}
+                          className="bg-[#118bdd] hover:bg-[#0f7ac7] flex-1"
+                        >
+                          {isUpdatingUserProfile ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <UserCog className="w-4 h-4 mr-2" />}
+                          {isUpdatingUserProfile ? 'Updating...' : 'Update Profile'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleResetUserPasswords}
+                          disabled={isUpdatingUserProfile}
+                          className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10 flex-1"
+                        >
+                          Reset Passwords
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={resetAdminUserProfileForm}
+                          className="border-white/20 text-white hover:bg-white/10 flex-1"
+                        >
+                          Reset
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                        <Button
+                          variant="outline"
+                          onClick={handleRepairMissingIncomingHelp}
+                          disabled={isRepairingIncomingHelp}
+                          className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-400/10 w-full"
+                        >
+                          {isRepairingIncomingHelp ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wrench className="w-4 h-4 mr-2" />}
+                          {isRepairingIncomingHelp ? 'Repairing Incoming Help...' : 'Repair Missing Incoming Help'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleRepairSelfFundCredits}
+                          disabled={isRepairingSelfFundCredits}
+                          className="border-cyan-400/40 text-cyan-300 hover:bg-cyan-400/10 w-full"
+                        >
+                          {isRepairingSelfFundCredits ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wrench className="w-4 h-4 mr-2" />}
+                          {isRepairingSelfFundCredits ? 'Repairing Self Fund Credit...' : 'Repair Missing Self Fund Credit'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleRecalculateQualifiedLevel}
+                          disabled={isRecalculatingQualifiedLevel}
+                          className="border-sky-400/40 text-sky-300 hover:bg-sky-400/10 w-full"
+                        >
+                          {isRecalculatingQualifiedLevel ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+                          {isRecalculatingQualifiedLevel ? 'Rechecking Qualified Level...' : 'Recalculate Qualified Level'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleReverseTemporarySelfFundCredits}
+                          disabled={isReversingTemporarySelfFundCredits}
+                          className="border-fuchsia-400/40 text-fuchsia-300 hover:bg-fuchsia-400/10 w-full"
+                        >
+                          {isReversingTemporarySelfFundCredits ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RotateCcw className="w-4 h-4 mr-2" />}
+                          {isReversingTemporarySelfFundCredits ? 'Removing Temporary Self Fund Credit...' : 'Remove Temporary Self Fund Credit'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleRemoveBrokenSelfTransferHistory}
+                          disabled={isRemovingBrokenSelfTransferHistory}
+                          className="border-rose-400/40 text-rose-300 hover:bg-rose-400/10 w-full"
+                        >
+                          {isRemovingBrokenSelfTransferHistory ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Trash2 className="w-4 h-4 mr-2" />}
+                          {isRemovingBrokenSelfTransferHistory ? 'Removing Broken Self Transfer...' : 'Remove Broken Self Transfer'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleScanHelpMismatches}
+                          disabled={isScanningHelpMismatches}
+                          className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10 w-full"
+                        >
+                          {isScanningHelpMismatches ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <AlertTriangle className="w-4 h-4 mr-2" />}
+                          {isScanningHelpMismatches ? 'Scanning Help Mismatches...' : 'Scan Help Mismatches'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleReverseInvalidRestoredHelp}
+                          disabled={isReversingInvalidRestoredHelp}
+                          className="border-red-400/40 text-red-300 hover:bg-red-400/10 w-full"
+                        >
+                          {isReversingInvalidRestoredHelp ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RotateCcw className="w-4 h-4 mr-2" />}
+                          {isReversingInvalidRestoredHelp ? 'Reversing Invalid Credits...' : 'Reverse Invalid Restored Credit'}
+                        </Button>
                       </div>
                     </div>
 
@@ -3047,6 +6305,170 @@ export default function Admin() {
                       </div>
                     </div>
 
+                    {/* Auto Give-Help Debug */}
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h4 className="text-white font-medium">Auto Give-Help Debug (Source → Target)</h4>
+                          <span className="text-xs text-white/50">Local browser log</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className={helpFlowView === 'sent' ? 'bg-[#118bdd] text-white border-transparent' : 'border-white/20 text-white/70'}
+                            onClick={() => setHelpFlowView('sent')}
+                          >
+                            Sent
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className={helpFlowView === 'received' ? 'bg-[#118bdd] text-white border-transparent' : 'border-white/20 text-white/70'}
+                            onClick={() => setHelpFlowView('received')}
+                          >
+                            Received
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="border-white/20 text-white/70"
+                            onClick={() => {
+                              if (!searchedUser) return;
+                              Database.clearHelpFlowDebugForUser(searchedUser.id);
+                              setHelpFlowDebugTick((t) => t + 1);
+                            }}
+                          >
+                            Clear Log
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-lg bg-[#1f2937]">
+                        <div className="overflow-x-auto admin-table-scroll">
+                          <table className="w-full admin-table">
+                            <thead>
+                              <tr className="border-b border-white/10">
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Time</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Source → Target</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Amount</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">
+                                  {helpFlowView === 'sent' ? 'To' : 'From'}
+                                </th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Outcome</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {helpFlowDebugEntries.map((entry) => (
+                                <tr key={entry.id} className="border-b border-white/5">
+                                  <td className="py-2 px-3 text-white/60 text-sm">{formatDate(entry.createdAt)}</td>
+                                  <td className="py-2 px-3 text-white text-sm">
+                                    L{entry.sourceLevel} → L{entry.targetLevel}
+                                  </td>
+                                  <td className="py-2 px-3 text-white font-medium">
+                                    {formatCurrency(entry.amount)}
+                                  </td>
+                                  <td className="py-2 px-3 text-white/70 text-sm">
+                                    {entry.outcome === 'safety_pool'
+                                      ? 'Safety Pool'
+                                      : (() => {
+                                          const name = helpFlowView === 'sent' ? entry.toUserName : entry.fromUserName;
+                                          const publicId = helpFlowView === 'sent' ? entry.toUserPublicId : entry.fromUserPublicId;
+                                          return `${name || 'User'}${publicId ? ` (${publicId})` : ''}`;
+                                        })()}
+                                  </td>
+                                  <td className="py-2 px-3">
+                                    <Badge className={entry.outcome === 'safety_pool' ? 'bg-amber-500/20 text-amber-400' : 'bg-emerald-500/20 text-emerald-400'}>
+                                      {entry.outcome === 'safety_pool' ? 'Safety Pool' : 'Sent'}
+                                    </Badge>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {helpFlowDebugEntries.length === 0 && (
+                          <p className="text-white/50 text-sm py-3">No auto give-help logs yet for this user.</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Locked/Unlock Debug */}
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h4 className="text-white font-medium">Locked/Unlock Debug (Give-Help Consumption)</h4>
+                          <span className="text-xs text-white/50">Shows which locked entries were consumed by each give-help.</span>
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-lg bg-[#1f2937] space-y-4">
+                        <div className="overflow-x-auto admin-table-scroll">
+                          <table className="w-full admin-table">
+                            <thead>
+                              <tr className="border-b border-white/10">
+                                <th className="text-left py-2 px-3 text-white/60 text-sm min-w-[160px]">Give Time</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Give Amount</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Source Level</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Unlocked Entries</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {userHelpLockDebug.giveEntries.map((entry) => (
+                                <tr key={entry.txId} className="border-b border-white/5">
+                                  <td className="py-2 px-3 text-white/60 text-sm whitespace-nowrap">{formatDate(entry.createdAt)}</td>
+                                  <td className="py-2 px-3 text-orange-300">{formatCurrency(entry.amount)}</td>
+                                  <td className="py-2 px-3 text-white/70">L{entry.sourceLevel}</td>
+                                  <td className="py-2 px-3 text-white/70 text-xs">
+                                    {entry.consumed.length === 0
+                                      ? 'No locked entries matched'
+                                      : entry.consumed.map((c) => (
+                                          <div key={`${entry.txId}_${c.txId}`} className="py-0.5">
+                                            {formatCurrency(c.amount)} · L{c.level} · {c.description || c.txId}
+                                          </div>
+                                        ))}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {userHelpLockDebug.giveEntries.length === 0 && (
+                          <p className="text-white/50 text-sm">No give-help consumption found for this user yet.</p>
+                        )}
+
+                        <div className="overflow-x-auto admin-table-scroll">
+                          <table className="w-full admin-table">
+                            <thead>
+                              <tr className="border-b border-white/10">
+                                <th className="text-left py-2 px-3 text-white/60 text-sm min-w-[160px]">Locked Tx Time</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Amount</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Level</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Status</th>
+                                <th className="text-left py-2 px-3 text-white/60 text-sm">Description</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {userHelpLockDebug.lockedEntries.map((entry) => (
+                                <tr key={entry.txId} className="border-b border-white/5">
+                                  <td className="py-2 px-3 text-white/60 text-sm whitespace-nowrap">{formatDate(entry.createdAt)}</td>
+                                  <td className="py-2 px-3 text-emerald-300">{formatCurrency(entry.amount)}</td>
+                                  <td className="py-2 px-3 text-white/70">L{entry.level}</td>
+                                  <td className="py-2 px-3">
+                                    <Badge className={entry.status === 'locked' ? 'bg-amber-500/20 text-amber-400' : 'bg-emerald-500/20 text-emerald-400'}>
+                                      {entry.status === 'locked' ? 'Locked' : 'Unlocked'}
+                                    </Badge>
+                                  </td>
+                                  <td className="py-2 px-3 text-white/60 text-xs">{entry.description}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {userHelpLockDebug.lockedEntries.length === 0 && (
+                          <p className="text-white/50 text-sm">No locked income entries found for this user.</p>
+                        )}
+                      </div>
+                    </div>
+
                     {/* User's Transactions */}
                     <div>
                       <h4 className="text-white font-medium mb-3">User's Transactions</h4>
@@ -3187,7 +6609,7 @@ export default function Admin() {
                     <div className="flex items-end">
                       <Button
                         variant="outline"
-                        onClick={loadSupportTickets}
+                        onClick={() => void loadSupportTickets(true)}
                         className="w-full border-white/20 text-white hover:bg-white/10"
                       >
                         <RefreshCw className="w-4 h-4 mr-2" />
@@ -3268,15 +6690,70 @@ export default function Admin() {
                           <div className="rounded-lg border border-white/10 bg-[#1f2937] p-4">
                             <p className="text-white/80 font-medium mb-3">Ticket History</p>
                             <div className="space-y-3 max-h-[320px] overflow-y-auto pr-1">
-                              {selectedSupportTicket.messages.map((msg) => (
+                              {(() => {
+                                const latestAdminMessageId = [...selectedSupportTicket.messages]
+                                  .reverse()
+                                  .find((item) => item.sender_type === 'admin')?.id;
+                                return selectedSupportTicket.messages.map((msg) => {
+                                  const canEditAdminMessage = msg.sender_type === 'admin' && msg.id === latestAdminMessageId;
+                                  return (
                                 <div key={msg.id} className="rounded-lg border border-white/10 bg-[#111827] p-3">
                                   <div className="flex items-center justify-between gap-3 mb-2">
-                                    <p className="text-sm text-white">
-                                      {msg.sender_type === 'admin' ? 'Admin' : 'User'} - {msg.sender_name}
-                                    </p>
-                                    <p className="text-xs text-white/50">{new Date(msg.created_at).toLocaleString()}</p>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <p className="text-sm text-white">
+                                        {msg.sender_type === 'admin' ? 'Admin' : 'User'} - {msg.sender_name}
+                                      </p>
+                                      {msg.edited_at && (
+                                        <span className="text-[11px] text-amber-300">
+                                          edited {new Date(msg.edited_at).toLocaleString()}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <p className="text-xs text-white/50">{new Date(msg.created_at).toLocaleString()}</p>
+                                      {canEditAdminMessage && (
+                                        <Button
+                                          size="sm"
+                                          variant="ghost"
+                                          onClick={() => {
+                                            setEditingSupportMessageId(msg.id);
+                                            setEditingSupportMessageText(msg.message || '');
+                                          }}
+                                          className="h-7 px-2 text-sky-300 hover:bg-sky-400/10 hover:text-sky-200"
+                                        >
+                                          <Pencil className="w-3.5 h-3.5 mr-1" />
+                                          Edit
+                                        </Button>
+                                      )}
+                                    </div>
                                   </div>
-                                  <p className="text-white/75 text-sm whitespace-pre-wrap">{msg.message || '-'}</p>
+                                  {editingSupportMessageId === msg.id ? (
+                                    <div className="space-y-2">
+                                      <Textarea
+                                        rows={4}
+                                        value={editingSupportMessageText}
+                                        onChange={(e) => setEditingSupportMessageText(e.target.value)}
+                                        className="bg-[#0f172a] border-white/10 text-white"
+                                      />
+                                      <div className="flex flex-col sm:flex-row gap-2">
+                                        <Button onClick={handleAdminSupportMessageEdit} className="bg-[#118bdd] hover:bg-[#0f79be] text-white">
+                                          Save Edit
+                                        </Button>
+                                        <Button
+                                          variant="outline"
+                                          onClick={() => {
+                                            setEditingSupportMessageId('');
+                                            setEditingSupportMessageText('');
+                                          }}
+                                          className="border-white/20 text-white hover:bg-white/10"
+                                        >
+                                          Cancel
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <p className="text-white/75 text-sm whitespace-pre-wrap">{msg.message || '-'}</p>
+                                  )}
                                   {msg.attachments.length > 0 && (
                                     <div className="mt-2 space-y-2">
                                       {msg.attachments.map((att) => (
@@ -3300,7 +6777,9 @@ export default function Admin() {
                                     </div>
                                   )}
                                 </div>
-                              ))}
+                                  );
+                                });
+                              })()}
                             </div>
                           </div>
 
@@ -3369,11 +6848,90 @@ export default function Admin() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
+                <div className="mb-4 flex flex-col sm:flex-row sm:items-center gap-2">
+                  <Button
+                    variant="outline"
+                    className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                    onClick={() => {
+                      const result = Database.repairGhostReceiveHelpTransactions();
+                      if (result.repaired > 0) {
+                        toast.success(`Repaired ${result.repaired} ghost receive-help record(s) across ${result.affectedUsers} user(s).`);
+                        loadAllTransactions();
+                        loadStats();
+                        setGhostRepairLogTick((tick) => tick + 1);
+                      } else {
+                        toast.success('No ghost receive-help records found.');
+                      }
+                    }}
+                  >
+                    Repair Ghost Receive-Help
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="border-cyan-400/40 text-cyan-300 hover:bg-cyan-400/10"
+                    onClick={() => {
+                      const result = Database.backfillReceiveHelpSenderIds();
+                      if (result.updated > 0) {
+                        toast.success(`Updated ${result.updated} receive-help record(s) with missing sender IDs.`);
+                        loadAllTransactions();
+                      } else {
+                        toast.success('No receive-help records needed sender backfill.');
+                      }
+                    }}
+                  >
+                    Backfill Sender IDs
+                  </Button>
+                  <p className="text-xs text-white/40">
+                    Removes receive-help entries missing a valid sender and recalculates affected wallets/locks.
+                  </p>
+                </div>
                 {!reportsDataLoaded && (
                   <div className="mb-4 rounded-lg border border-[#118bdd]/30 bg-[#118bdd]/10 px-3 py-2 text-sm text-[#a7dcff]">
                     Loading transaction data for reports...
                   </div>
                 )}
+                <div className="mb-6 rounded-lg border border-white/10 bg-[#141c2a] p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-white font-semibold">Ghost Receive-Help Repair Log</h4>
+                    <span className="text-xs text-white/40">{ghostRepairLogs.length} record(s)</span>
+                  </div>
+                  {ghostRepairLogs.length === 0 ? (
+                    <p className="text-sm text-white/50">No repairs recorded yet.</p>
+                  ) : (
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">User Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Amount</th>
+                            <th className="text-left py-2 px-3 text-white/60">Reason</th>
+                            <th className="text-left py-2 px-3 text-white/60">Tx ID</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ghostRepairLogs.slice(0, 50).map((log) => {
+                            const user = userById.get(log.userId);
+                            return (
+                              <tr key={log.id} className="border-b border-white/5">
+                                <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(log.createdAt)}</td>
+                                <td className="py-2 px-3 text-[#118bdd] font-mono">{log.userPublicId || user?.userId || '-'}</td>
+                                <td className="py-2 px-3 text-white">{user?.fullName || '-'}</td>
+                                <td className="py-2 px-3 text-amber-400">{formatCurrency(log.amount)}</td>
+                                <td className="py-2 px-3 text-white/60">{log.reason}</td>
+                                <td className="py-2 px-3 text-white/40 font-mono text-xs" title={log.txId}>{log.txId}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                      {ghostRepairLogs.length > 50 && (
+                        <p className="text-xs text-white/40 mt-2">Showing latest 50 repairs.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <Tabs value={reportTab} onValueChange={setReportTab} className="space-y-4">
                   <TabsList className="bg-[#1f2937] border border-white/10 flex-wrap h-auto">
                     <TabsTrigger value="member-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Member Report</TabsTrigger>
@@ -3503,6 +7061,7 @@ export default function Admin() {
                             <th className="text-left py-2 px-3 text-white/60">ID</th>
                             <th className="text-left py-2 px-3 text-white/60">User Name</th>
                             <th className="text-left py-2 px-3 text-white/60">Give Help</th>
+                            <th className="text-left py-2 px-3 text-white/60">Level</th>
                             <th className="text-left py-2 px-3 text-white/60">Give to ID</th>
                             <th className="text-left py-2 px-3 text-white/60">Give to User Name</th>
                           </tr>
@@ -3514,6 +7073,7 @@ export default function Admin() {
                               <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
                               <td className="py-2 px-3 text-white">{r.userName}</td>
                               <td className="py-2 px-3 text-orange-400">{formatCurrency(r.amount)}</td>
+                              <td className="py-2 px-3 text-white/60">{r.level || '-'}</td>
                               <td className="py-2 px-3 text-white/60">{r.giveToId}</td>
                               <td className="py-2 px-3 text-white/60">{r.giveToUserName}</td>
                             </tr>
@@ -3534,7 +7094,8 @@ export default function Admin() {
                         <option value="">All Status</option>
                         <option value="completed">Completed</option>
                         <option value="pending">Pending</option>
-                        <option value="rejected">Rejected</option>
+                        <option value="failed">Rejected</option>
+                        <option value="reversed">Reversed</option>
                       </select>
                     </div>
                     <div className="overflow-x-auto admin-table-scroll">
@@ -3561,7 +7122,8 @@ export default function Admin() {
                                 <Badge className={
                                   r.status === 'completed' ? 'bg-emerald-500/20 text-emerald-400' :
                                     r.status === 'pending' ? 'bg-amber-500/20 text-amber-400' :
-                                      'bg-red-500/20 text-red-400'
+                                      r.status === 'reversed' ? 'bg-purple-500/20 text-purple-300' :
+                                        'bg-red-500/20 text-red-400'
                                 }>
                                   {r.status}
                                 </Badge>
@@ -3793,7 +7355,7 @@ export default function Admin() {
                               <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(r.createdAt)}</td>
                               <td className="py-2 px-3 text-[#118bdd] font-mono">{r.userId}</td>
                               <td className="py-2 px-3 text-white">{r.userName}</td>
-                              <td className="py-2 px-3 text-amber-400">{formatCurrency(r.amount)}</td>
+                              <td className={`py-2 px-3 ${r.amount < 0 ? 'text-red-400' : 'text-amber-400'}`}>{formatCurrency(r.amount)}</td>
                               <td className="py-2 px-3 text-white/60">{r.reason}</td>
                             </tr>
                           ))}
@@ -3882,6 +7444,26 @@ export default function Admin() {
                   </div>
 
                   <div className="space-y-2">
+                    <Label className="text-white/80">Deposit Processing (Hours)</Label>
+                    <Input
+                      type="number"
+                      value={settings.depositProcessingHours}
+                      onChange={(e) => handleUpdateSettings('depositProcessingHours', parseFloat(e.target.value))}
+                      className="bg-[#1f2937] border-white/10 text-white"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-white/80">Withdrawal Processing (Hours)</Label>
+                    <Input
+                      type="number"
+                      value={settings.withdrawalProcessingHours}
+                      onChange={(e) => handleUpdateSettings('withdrawalProcessingHours', parseFloat(e.target.value))}
+                      className="bg-[#1f2937] border-white/10 text-white"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
                     <Label className="text-white/80">Grace Period (Hours)</Label>
                     <Input
                       type="number"
@@ -3944,6 +7526,30 @@ export default function Admin() {
                       className="w-4 h-4 rounded border-white/20"
                     />
                     <Label className="text-white/80 mb-0">Enable Safety Pool</Label>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 rounded-lg bg-[#1f2937]">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input
+                      type="checkbox"
+                      checked={settings.marketplaceEnabled}
+                      onChange={(e) => handleUpdateSettings('marketplaceEnabled', e.target.checked)}
+                      className="w-4 h-4 rounded border-white/20"
+                    />
+                    <Label className="text-white/80 mb-0">Enable Marketplace (show to users)</Label>
+                  </div>
+                  <div className="flex flex-1 flex-col sm:flex-row sm:items-center gap-3 text-xs text-white/50">
+                    <p className="sm:flex-1">
+                      Toggle off to show a "Coming Soon" banner on the marketplace page.
+                    </p>
+                    <Button
+                      type="button"
+                      className="px-3 py-2 bg-white/5 border border-white/15 text-white hover:bg-white/10"
+                      onClick={() => navigate('/e-commerce?preview=admin')}
+                    >
+                      Open user preview
+                    </Button>
                   </div>
                 </div>
 
@@ -4020,16 +7626,16 @@ export default function Admin() {
                       <MarketplaceRetailerForm
                         retailer={mktEditingRetailer}
                         categories={marketplaceCategories}
-                        onSave={(data) => {
+                        onSave={async (data) => {
+                          const successMessage = mktEditingRetailer ? 'Retailer updated' : 'Retailer added';
                           if (mktEditingRetailer) {
                             Database.updateMarketplaceRetailer(mktEditingRetailer.id, data);
                           } else {
                             Database.createMarketplaceRetailer(data as Omit<MarketplaceRetailer, 'id'>);
                           }
-                          loadMarketplaceData();
                           setMktShowForm(false);
                           setMktEditingRetailer(null);
-                          toast.success(mktEditingRetailer ? 'Retailer updated' : 'Retailer added');
+                          await syncMarketplaceChanges(successMessage);
                         }}
                         onCancel={() => { setMktShowForm(false); setMktEditingRetailer(null); }}
                       />
@@ -4056,7 +7662,7 @@ export default function Admin() {
                             <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingRetailer(r); setMktShowForm(true); }}>
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={() => { Database.deleteMarketplaceRetailer(r.id); loadMarketplaceData(); toast.success('Retailer deleted'); }}>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { Database.deleteMarketplaceRetailer(r.id); await syncMarketplaceChanges('Retailer deleted'); }}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </div>
@@ -4079,16 +7685,16 @@ export default function Admin() {
                     {mktShowForm && (
                       <MarketplaceCategoryForm
                         category={mktEditingCategory}
-                        onSave={(data) => {
+                        onSave={async (data) => {
+                          const successMessage = mktEditingCategory ? 'Category updated' : 'Category added';
                           if (mktEditingCategory) {
                             Database.updateMarketplaceCategory(mktEditingCategory.id, data);
                           } else {
                             Database.createMarketplaceCategory(data as Omit<MarketplaceCategory, 'id'>);
                           }
-                          loadMarketplaceData();
                           setMktShowForm(false);
                           setMktEditingCategory(null);
-                          toast.success(mktEditingCategory ? 'Category updated' : 'Category added');
+                          await syncMarketplaceChanges(successMessage);
                         }}
                         onCancel={() => { setMktShowForm(false); setMktEditingCategory(null); }}
                       />
@@ -4110,7 +7716,7 @@ export default function Admin() {
                             <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingCategory(c); setMktShowForm(true); }}>
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={() => { Database.deleteMarketplaceCategory(c.id); loadMarketplaceData(); toast.success('Category deleted'); }}>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { Database.deleteMarketplaceCategory(c.id); await syncMarketplaceChanges('Category deleted'); }}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </div>
@@ -4132,16 +7738,16 @@ export default function Admin() {
                     {mktShowForm && (
                       <MarketplaceBannerForm
                         banner={mktEditingBanner}
-                        onSave={(data) => {
+                        onSave={async (data) => {
+                          const successMessage = mktEditingBanner ? 'Banner updated' : 'Banner added';
                           if (mktEditingBanner) {
                             Database.updateMarketplaceBanner(mktEditingBanner.id, data);
                           } else {
                             Database.createMarketplaceBanner(data as Omit<MarketplaceBanner, 'id'>);
                           }
-                          loadMarketplaceData();
                           setMktShowForm(false);
                           setMktEditingBanner(null);
-                          toast.success(mktEditingBanner ? 'Banner updated' : 'Banner added');
+                          await syncMarketplaceChanges(successMessage);
                         }}
                         onCancel={() => { setMktShowForm(false); setMktEditingBanner(null); }}
                       />
@@ -4167,7 +7773,7 @@ export default function Admin() {
                             <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingBanner(b); setMktShowForm(true); }}>
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={() => { Database.deleteMarketplaceBanner(b.id); loadMarketplaceData(); toast.success('Banner deleted'); }}>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { Database.deleteMarketplaceBanner(b.id); await syncMarketplaceChanges('Banner deleted'); }}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </div>
@@ -4191,16 +7797,16 @@ export default function Admin() {
                       <MarketplaceDealForm
                         deal={mktEditingDeal}
                         retailers={marketplaceRetailers}
-                        onSave={(data) => {
+                        onSave={async (data) => {
+                          const successMessage = mktEditingDeal ? 'Deal updated' : 'Deal added';
                           if (mktEditingDeal) {
                             Database.updateMarketplaceDeal(mktEditingDeal.id, data);
                           } else {
                             Database.createMarketplaceDeal(data as Omit<MarketplaceDeal, 'id'>);
                           }
-                          loadMarketplaceData();
                           setMktShowForm(false);
                           setMktEditingDeal(null);
-                          toast.success(mktEditingDeal ? 'Deal updated' : 'Deal added');
+                          await syncMarketplaceChanges(successMessage);
                         }}
                         onCancel={() => { setMktShowForm(false); setMktEditingDeal(null); }}
                       />
@@ -4226,7 +7832,7 @@ export default function Admin() {
                             <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingDeal(d); setMktShowForm(true); }}>
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={() => { Database.deleteMarketplaceDeal(d.id); loadMarketplaceData(); toast.success('Deal deleted'); }}>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { Database.deleteMarketplaceDeal(d.id); await syncMarketplaceChanges('Deal deleted'); }}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </div>
@@ -4269,6 +7875,11 @@ export default function Admin() {
                                 User: {inv.userId} • Amount: ${inv.amount.toFixed(2)} • {new Date(inv.createdAt).toLocaleDateString()}
                               </p>
                               {inv.status === 'approved' && <p className="text-emerald-400/60 text-xs mt-0.5">Awarded: {inv.rewardPoints} RP</p>}
+                              {inv.status === 'approved' && inv.rpRevoked && (
+                                <p className="text-rose-300/70 text-xs mt-0.5">
+                                  RP taken back by admin{inv.rpRevokedAt ? ` on ${new Date(inv.rpRevokedAt).toLocaleString()}` : ''}
+                                </p>
+                              )}
                               {inv.status === 'rejected' && inv.adminNotes && <p className="text-red-400/60 text-xs mt-0.5">Reason: {inv.adminNotes}</p>}
                             </div>
                           </div>
@@ -4324,6 +7935,30 @@ export default function Admin() {
                               </Button>
                             </div>
                           )}
+                          {inv.status === 'approved' && !inv.rpRevoked && inv.rewardPoints > 0 && (
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="border-rose-500/40 text-rose-300 hover:bg-rose-500/10 h-9"
+                                onClick={() => {
+                                  const confirmed = window.confirm(
+                                    `Take back ${inv.rewardPoints} RP from user ${inv.userId}? This will silently move the invoice back to pending so you can approve again with correct RP.`
+                                  );
+                                  if (!confirmed) return;
+                                  const result = Database.revokeMarketplaceInvoiceRewardPoints(inv.id, user?.userId || '');
+                                  if (!result.success) {
+                                    toast.error(result.message);
+                                    return;
+                                  }
+                                  loadMarketplaceData();
+                                  toast.success(result.message);
+                                }}
+                              >
+                                <ArrowDown className="w-3.5 h-3.5 mr-1" /> Take Back & Reopen
+                              </Button>
+                            </div>
+                          )}
                         </div>
                       ))}
                       {marketplaceInvoices.length === 0 && <p className="text-white/40 text-sm text-center py-4">No invoices submitted yet</p>}
@@ -4361,7 +7996,7 @@ export default function Admin() {
                               </div>
                               <p className="text-white/40 text-xs mt-0.5">
                                 User: {red.userId} • {new Date(red.createdAt).toLocaleDateString()}
-                                {red.status === 'approved' && ' • Credited to Fund Wallet'}
+                                {red.status === 'approved' && ' • Credited to Income Wallet'}
                               </p>
                               {red.status === 'rejected' && red.adminNotes && <p className="text-red-400/60 text-xs mt-0.5">Reason: {red.adminNotes}</p>}
                             </div>
@@ -4373,7 +8008,7 @@ export default function Admin() {
                                   onClick={() => {
                                     Database.approveRedemption(red.id, user?.userId || '');
                                     loadMarketplaceData();
-                                    toast.success(`Approved. $${red.usdtAmount.toFixed(2)} credited to user's Fund Wallet`);
+                                    toast.success(`Approved. $${red.usdtAmount.toFixed(2)} credited to user's Income Wallet`);
                                   }}
                                 >
                                   <CheckCircle className="w-3.5 h-3.5 mr-1" /> Approve
@@ -4405,6 +8040,56 @@ export default function Admin() {
           </TabsContent>
         </Tabs>
       </main>
+
+      <Dialog
+        open={!!fullscreenQr}
+        onOpenChange={(open) => {
+          if (!open) setFullscreenQr(null);
+        }}
+      >
+        <DialogContent className="glass border-white/10 bg-[#0b1220] max-w-4xl w-[calc(100vw-1rem)] sm:w-[calc(100vw-2rem)] p-4">
+          <DialogHeader>
+            <DialogTitle className="text-white">Withdrawal QR Code</DialogTitle>
+            <DialogDescription className="text-white/65">
+              {fullscreenQr ? `User: ${fullscreenQr.userId}` : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {fullscreenQr && (
+            <div className="w-full h-[72vh] rounded-lg border border-white/10 bg-black/40 p-2 flex items-center justify-center">
+              <img
+                src={fullscreenQr.src}
+                alt={`Withdrawal QR ${fullscreenQr.userId}`}
+                className="max-h-full max-w-full object-contain rounded"
+              />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!fullscreenPaymentProof}
+        onOpenChange={(open) => {
+          if (!open) setFullscreenPaymentProof(null);
+        }}
+      >
+        <DialogContent className="glass border-white/10 bg-[#0b1220] max-w-5xl w-[calc(100vw-1rem)] sm:w-[calc(100vw-2rem)] p-4">
+          <DialogHeader>
+            <DialogTitle className="text-white">Payment Proof Receipt</DialogTitle>
+            <DialogDescription className="text-white/65">
+              {fullscreenPaymentProof ? `User: ${fullscreenPaymentProof.userId}` : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {fullscreenPaymentProof && (
+            <div className="w-full h-[80vh] rounded-lg border border-white/10 bg-black/40 p-2 flex items-center justify-center">
+              <img
+                src={fullscreenPaymentProof.src}
+                alt={`Payment proof ${fullscreenPaymentProof.userId}`}
+                className="w-full h-full object-contain rounded"
+              />
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={showDeleteAllIdsDialog}
@@ -4476,25 +8161,31 @@ export default function Admin() {
         selectedUser && (
           <div
             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-            onClick={() => setSelectedUser(null)}
+            onClick={() => {
+              setSelectedUser(null);
+              setFundAmount('');
+              setFundMessage('');
+              setFundWalletType('deposit');
+            }}
           >
             <Card
               className="glass border-white/10 bg-[#111827] max-w-md w-full"
               onClick={(e) => e.stopPropagation()}
             >
               <CardHeader>
-                <CardTitle className="text-white">Add Funds</CardTitle>
+                <CardTitle className="text-white">{fundWalletType === 'royalty' ? 'Send Royalty to User' : 'Add Funds'}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
                   <Label className="text-white/80">Wallet Type</Label>
                   <select
                     value={fundWalletType}
-                    onChange={(e) => setFundWalletType(e.target.value as 'deposit' | 'income')}
+                    onChange={(e) => setFundWalletType(e.target.value as 'deposit' | 'income' | 'royalty')}
                     className="w-full px-4 py-2 bg-[#1f2937] border border-white/10 rounded-lg text-white"
                   >
                     <option value="deposit">Deposit Wallet</option>
                     <option value="income">Income Wallet</option>
+                    <option value="royalty">Royalty Wallet</option>
                   </select>
                 </div>
                 <div className="space-y-2">
@@ -4507,10 +8198,35 @@ export default function Admin() {
                     className="bg-[#1f2937] border-white/10 text-white"
                   />
                 </div>
+                {fundWalletType === 'royalty' && (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+                      <p className="text-xs text-white/60">Current Safety Pool Balance</p>
+                      <p className="text-lg font-bold text-amber-300">{formatCurrency(safetyPoolAmount)}</p>
+                      <p className="text-[11px] text-white/50 mt-1">
+                        Royalty payout will be deducted from safety pool balance.
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-white/80">Transaction Message</Label>
+                      <Textarea
+                        value={fundMessage}
+                        onChange={(e) => setFundMessage(e.target.value)}
+                        placeholder="Shown in the user's transaction history"
+                        className="bg-[#1f2937] border-white/10 text-white min-h-[96px]"
+                      />
+                    </div>
+                  </div>
+                )}
                 <div className="flex flex-col sm:flex-row gap-3">
                   <Button
                     variant="outline"
-                    onClick={() => setSelectedUser(null)}
+                    onClick={() => {
+                      setSelectedUser(null);
+                      setFundAmount('');
+                      setFundMessage('');
+                      setFundWalletType('deposit');
+                    }}
                     className="flex-1 border-white/20 text-white hover:bg-white/10"
                   >
                     Cancel
@@ -4520,7 +8236,7 @@ export default function Admin() {
                     disabled={isLoading}
                     className="flex-1 btn-primary"
                   >
-                    {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Add Funds'}
+                    {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : (fundWalletType === 'royalty' ? 'Send Royalty' : 'Add Funds')}
                   </Button>
                 </div>
               </CardContent>
@@ -4581,6 +8297,227 @@ export default function Admin() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={showWithdrawalGapDialog} onOpenChange={setShowWithdrawalGapDialog}>
+        <DialogContent className="glass border-white/10 bg-[#111827] max-w-3xl w-[calc(100vw-2rem)] sm:w-full max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-white">Missing Pending Withdrawal Scan</DialogTitle>
+            <DialogDescription className="text-white/60">
+              Flags used withdrawal OTPs that do not have a recorded withdrawal request in the expected time window.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {withdrawalGapScanResults.length === 0 ? (
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4">
+                <p className="text-emerald-200 text-sm">No suspicious missing pending withdrawals found.</p>
+              </div>
+            ) : (
+              withdrawalGapScanResults.map((item) => (
+                <div key={item.otpId} className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-4 space-y-1">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div>
+                      <p className="text-white font-medium">{item.fullName}</p>
+                      <p className="text-[#8fcfff] text-xs font-mono">{item.userId}</p>
+                    </div>
+                    <Badge className="bg-amber-500/15 text-amber-300 border-amber-500/30">
+                      Suspicious
+                    </Badge>
+                  </div>
+                  <p className="text-white/70 text-sm">{item.issue}</p>
+                  <p className="text-white/45 text-xs">OTP used at: {formatDate(item.otpCreatedAt)}</p>
+                  <p className="text-white/45 text-xs break-all">Email: {item.email}</p>
+                  <p className="text-white/30 text-[11px] break-all">Internal Ref: {item.internalUserId} | OTP: {item.otpId}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Withdrawal Request Detail Dialog */}
+      <Dialog
+        open={showWithdrawalRequestDialog}
+        onOpenChange={(open) => {
+          setShowWithdrawalRequestDialog(open);
+          if (!open) setSelectedWithdrawalRequest(null);
+        }}
+      >
+        <DialogContent className="glass border-white/10 bg-[#111827] max-w-3xl w-[calc(100vw-2rem)] sm:w-full max-h-[88vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="text-white">Withdrawal Request Details</DialogTitle>
+            <DialogDescription className="text-white/60">
+              Review payout details and process this request.
+            </DialogDescription>
+          </DialogHeader>
+          {selectedWithdrawalRequest && (() => {
+            const tx = selectedWithdrawalRequest;
+            const txUser = userLookup.get(tx.userId) || Database.getUserById(tx.userId) || Database.getUserByUserId(tx.userId);
+            const displayTxUserId = txUser?.userId || tx.requesterUserId || tx.userId;
+            const displayTxUserName = txUser?.fullName || tx.requesterName || 'Unknown user';
+            const requestedAddress = String(tx.walletAddress || '').trim();
+            const profileAddress = String(txUser?.usdtAddress || '').trim();
+            const payoutAddress = requestedAddress || profileAddress || '-';
+            const payoutQrCode = String(tx.payoutQrCode || '').trim();
+            const receiptDraft = withdrawalReceiptDrafts[tx.id] || '';
+            const reasonDraft = withdrawalReasonDrafts[tx.id] || '';
+            const grossAmount = Math.abs(tx.amount);
+            const fee = Number(tx.fee || 0);
+            const netAmount = Number(tx.netAmount || Math.max(0, grossAmount - fee));
+
+            return (
+              <div className="space-y-3 py-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[#118bdd] font-mono">{displayTxUserId}</span>
+                    <Badge className={`text-[10px] ${
+                      tx.status === 'pending'
+                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                        : tx.status === 'completed'
+                          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                          : 'bg-red-500/15 text-red-300 border-red-500/30'
+                    }`}>
+                      {tx.status}
+                    </Badge>
+                  </div>
+                  <p className="text-white text-sm font-medium mt-1">{displayTxUserName}</p>
+                  <p className="text-white/55 text-xs mt-1">
+                    Requested: {formatCurrency(grossAmount)} | Fee: {formatCurrency(fee)} | Net: {formatCurrency(netAmount)}
+                  </p>
+                  <div className="mt-2 rounded-lg border border-emerald-400/35 bg-emerald-500/10 px-3 py-2 max-w-xl">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] font-medium text-emerald-200/90">USDT (BEP20) Payout Address</p>
+                      <Button
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                        disabled={payoutAddress === '-'}
+                        onClick={() => void copyWithdrawalAddress(tx.id, payoutAddress)}
+                        className="h-7 px-2 border-emerald-400/35 text-emerald-200 hover:bg-emerald-500/15 disabled:opacity-45"
+                      >
+                        {copiedWithdrawalAddressId === tx.id ? (
+                          <><Check className="w-3.5 h-3.5 mr-1" /> Copied</>
+                        ) : (
+                          <><Copy className="w-3.5 h-3.5 mr-1" /> Copy</>
+                        )}
+                      </Button>
+                    </div>
+                    <p className="text-[13px] text-emerald-100 font-mono break-all mt-1">
+                      {payoutAddress}
+                    </p>
+                  </div>
+                  {requestedAddress && profileAddress && requestedAddress !== profileAddress && (
+                    <p className="text-white/35 text-[11px] mt-0.5 break-all">
+                      Profile USDT: {profileAddress}
+                    </p>
+                  )}
+                  <p className="text-white/40 text-xs mt-1">
+                    Requested at: {formatDate(tx.createdAt)}
+                  </p>
+                  {tx.completedAt && (
+                    <p className="text-white/40 text-xs mt-0.5">
+                      Processed at: {formatDate(tx.completedAt)}
+                    </p>
+                  )}
+                  {tx.adminReason && (
+                    <p className={`text-xs mt-1 ${tx.status === 'failed' ? 'text-red-300/90' : 'text-white/70'}`}>
+                      Reason: {tx.adminReason}
+                    </p>
+                  )}
+                </div>
+
+                {payoutQrCode && (
+                  <div className="rounded-lg border border-white/10 p-3 bg-white/5 max-w-sm">
+                    <p className="text-white/60 text-xs mb-2">User payout QR code</p>
+                    {payoutQrCode.startsWith('data:image') ? (
+                      <button
+                        type="button"
+                        onClick={() => setFullscreenQr({ src: payoutQrCode, userId: displayTxUserId })}
+                        className="w-full text-left"
+                      >
+                        <img src={payoutQrCode} alt="User payout QR" className="w-full max-h-48 object-contain rounded border border-white/15" />
+                        <p className="text-[11px] text-[#8fcfff] mt-2">Tap to open full screen</p>
+                      </button>
+                    ) : (
+                      <a href={payoutQrCode} target="_blank" rel="noreferrer" className="text-[#118bdd] text-xs underline break-all">
+                        Open QR code
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                {(tx.status === 'completed' || tx.status === 'failed') && tx.adminReceipt && (
+                  <div className="rounded-lg border border-white/10 p-3 bg-white/5 max-w-sm">
+                    <p className="text-white/60 text-xs mb-2">Admin receipt/proof</p>
+                    {tx.adminReceipt.startsWith('data:image') ? (
+                      <img src={tx.adminReceipt} alt="Withdrawal proof" className="w-full max-h-48 object-contain rounded" />
+                    ) : tx.adminReceipt.startsWith('data:application/pdf') ? (
+                      <a href={tx.adminReceipt} download={`withdrawal-proof-${tx.id}.pdf`} className="text-[#118bdd] text-xs underline">
+                        Download PDF proof
+                      </a>
+                    ) : (
+                      <a href={tx.adminReceipt} target="_blank" rel="noreferrer" className="text-[#118bdd] text-xs underline break-all">
+                        Open receipt link
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                {tx.status === 'pending' && (
+                  <div className="space-y-2">
+                    <div>
+                      <Label className="text-white/70 text-xs">Admin note / rejection reason (optional)</Label>
+                      <Textarea
+                        value={reasonDraft}
+                        onChange={(e) => setWithdrawalReasonDrafts((prev) => ({ ...prev, [tx.id]: e.target.value }))}
+                        className="mt-1 min-h-[76px] bg-[#111827] border-white/10 text-white text-sm"
+                        placeholder="Add reason (user can see this if provided)..."
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-white/70 text-xs">Payment receipt (optional)</Label>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <Input
+                          type="file"
+                          accept="image/*,application/pdf"
+                          onChange={(e) => void handleWithdrawalReceiptUpload(tx.id, e)}
+                          className="max-w-xs bg-[#111827] border-white/10 text-white file:text-white"
+                        />
+                        {receiptDraft && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setWithdrawalReceiptDrafts((prev) => ({ ...prev, [tx.id]: '' }))}
+                            className="border-red-500/30 text-red-300 hover:bg-red-500/10"
+                          >
+                            Remove Receipt
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void handleRejectWithdrawalRequest(tx.id)}
+                        className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                      >
+                        <XCircle className="w-4 h-4 mr-1" /> Reject & Refund
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => void handleApproveWithdrawalRequest(tx.id)}
+                        className="bg-emerald-600 hover:bg-emerald-700"
+                      >
+                        <CheckCircle className="w-4 h-4 mr-1" /> Mark Completed
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
+
       {/* Payment Review Dialog */}
       <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
         <DialogContent className="glass border-white/10 bg-[#111827] max-w-lg w-[calc(100vw-2rem)] sm:w-full">
@@ -4593,13 +8530,16 @@ export default function Admin() {
           {selectedPayment && (
             <div className="space-y-4 py-4">
               {(() => {
-                const paymentUser = allUsers.find(u => u.id === selectedPayment.userId);
+                const paymentUser = userLookup.get(selectedPayment.userId) || Database.getUserById(selectedPayment.userId) || Database.getUserByUserId(selectedPayment.userId);
+                const displayPaymentUserId = paymentUser?.userId || selectedPayment.userId || '-';
+                const canApprove = selectedPayment.status === 'pending' || selectedPayment.status === 'under_review';
+                const canReverse = selectedPayment.status === 'completed';
                 return (
                   <>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="p-3 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">User ID</p>
-                        <p className="text-white font-medium font-mono">{paymentUser?.userId}</p>
+                        <p className="text-white font-medium font-mono">{displayPaymentUserId}</p>
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Amount</p>
@@ -4613,6 +8553,10 @@ export default function Admin() {
                         <p className="text-sm text-white/50">Date</p>
                         <p className="text-white font-medium">{formatDate(selectedPayment.createdAt)}</p>
                       </div>
+                      <div className="p-3 rounded-lg bg-[#1f2937] col-span-2">
+                        <p className="text-sm text-white/50">Status</p>
+                        <p className="text-white font-medium">{selectedPayment.status}</p>
+                      </div>
                     </div>
 
                     {selectedPayment.txHash && (
@@ -4624,7 +8568,19 @@ export default function Admin() {
 
                     {selectedPayment.screenshot && (
                       <div className="p-3 rounded-lg bg-[#1f2937]">
-                        <p className="text-sm text-white/50 mb-2">Payment Screenshot</p>
+                        <div className="mb-2 flex items-center justify-between gap-2">
+                          <p className="text-sm text-white/50">Payment Screenshot</p>
+                          <Button
+                            size="sm"
+                            type="button"
+                            variant="outline"
+                            onClick={() => setFullscreenPaymentProof({ src: selectedPayment.screenshot!, userId: displayPaymentUserId })}
+                            className="h-7 px-2 border-white/20 text-white/80 hover:bg-white/10"
+                          >
+                            <Maximize2 className="w-3.5 h-3.5 mr-1" />
+                            Full Screen
+                          </Button>
+                        </div>
                         <img
                           src={selectedPayment.screenshot}
                           alt="Payment Proof"
@@ -4634,11 +8590,11 @@ export default function Admin() {
                     )}
 
                     <div className="space-y-2">
-                      <Label className="text-white/80">Admin Notes (for rejection)</Label>
+                      <Label className="text-white/80">Admin Notes (for rejection / reversal)</Label>
                       <textarea
                         value={adminNotes}
                         onChange={(e) => setAdminNotes(e.target.value)}
-                        placeholder="Enter reason for rejection..."
+                        placeholder="Enter reason..."
                         className="w-full p-3 bg-[#1f2937] border border-white/10 rounded-lg text-white text-sm resize-none"
                         rows={3}
                       />
@@ -4652,21 +8608,35 @@ export default function Admin() {
                       >
                         Cancel
                       </Button>
-                      <Button
-                        onClick={handleRejectPayment}
-                        variant="destructive"
-                        className="flex-1 bg-red-500 hover:bg-red-600"
-                      >
-                        <XCircle className="w-4 h-4 mr-2" />
-                        Reject
-                      </Button>
-                      <Button
-                        onClick={handleApprovePayment}
-                        className="flex-1 bg-emerald-500 hover:bg-emerald-600"
-                      >
-                        <CheckCircle className="w-4 h-4 mr-2" />
-                        Approve
-                      </Button>
+                      {canApprove && (
+                        <>
+                          <Button
+                            onClick={handleRejectPayment}
+                            variant="destructive"
+                            className="flex-1 bg-red-500 hover:bg-red-600"
+                          >
+                            <XCircle className="w-4 h-4 mr-2" />
+                            Reject
+                          </Button>
+                          <Button
+                            onClick={handleApprovePayment}
+                            className="flex-1 bg-emerald-500 hover:bg-emerald-600"
+                          >
+                            <CheckCircle className="w-4 h-4 mr-2" />
+                            Approve
+                          </Button>
+                        </>
+                      )}
+                      {canReverse && (
+                        <Button
+                          onClick={handleReversePayment}
+                          variant="destructive"
+                          className="flex-1 bg-purple-600 hover:bg-purple-700"
+                        >
+                          <XCircle className="w-4 h-4 mr-2" />
+                          Reverse Deposit
+                        </Button>
+                      )}
                     </div>
                   </>
                 );

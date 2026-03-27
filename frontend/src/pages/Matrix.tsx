@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from 'react';
+import { memo, useEffect, useMemo, useState, useRef } from 'react';
 import { useAuthStore, useMatrixStore, useSyncRefreshKey } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -21,17 +21,30 @@ interface TreeNodeProps {
   node: MatrixNode | null;
   displayName?: string;
   realIsActive?: boolean;
+  slotNumber?: number;
   onNodeClick: (node: MatrixNode) => void;
 }
 
-const TreeNode = ({ node, displayName, realIsActive, onNodeClick }: TreeNodeProps) => {
+const TreeNode = memo(({ node, displayName, realIsActive, slotNumber, onNodeClick }: TreeNodeProps) => {
+  const shellSizeClass = 'w-14 h-14';
+  const placeholderSizeClass = 'w-16 h-16 rounded-2xl';
+  const nameWidthClass = 'max-w-[80px]';
+  const nameTextClass = 'text-xs';
+  const idTextClass = 'text-xs';
+
   if (!node) {
     return (
       <div className="flex flex-col items-center">
-        <div className="w-12 h-12 rounded-full border-2 border-dashed border-white/20 flex items-center justify-center">
-          <Circle className="w-5 h-5 text-white/20" />
+        {typeof slotNumber === 'number' && (
+          <span className="mb-2 inline-flex items-center rounded-full border border-[#118bdd]/40 bg-[#118bdd]/10 px-2 py-0.5 text-[10px] font-semibold text-[#8fcfff] shadow-sm shadow-[#118bdd]/10">
+            Slot #{slotNumber}
+          </span>
+        )}
+        <div className={`${placeholderSizeClass} border border-dashed border-white/15 bg-white/[0.03] flex items-center justify-center`}>
+          <Circle className="w-5 h-5 text-white/15" />
         </div>
-        <span className="text-xs text-white/30 mt-1">Empty</span>
+        <span className="text-xs text-white/30 mt-2">Empty</span>
+        <span className="text-xs text-white/15">Slot</span>
       </div>
     );
   }
@@ -40,9 +53,14 @@ const TreeNode = ({ node, displayName, realIsActive, onNodeClick }: TreeNodeProp
 
   return (
     <div className="flex flex-col items-center">
+      {typeof slotNumber === 'number' && (
+        <span className="mb-2 inline-flex items-center rounded-full border border-[#118bdd]/40 bg-[#118bdd]/10 px-2 py-0.5 text-[10px] font-semibold text-[#8fcfff] shadow-sm shadow-[#118bdd]/10">
+          Slot #{slotNumber}
+        </span>
+      )}
       <button
         onClick={() => onNodeClick(node)}
-        className={`relative w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 ${active
+        className={`relative ${shellSizeClass} rounded-full flex items-center justify-center transition-all duration-300 ${active
             ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 shadow-lg shadow-emerald-500/30'
             : 'bg-gradient-to-br from-amber-500 to-amber-600 shadow-lg shadow-amber-500/30'
           } hover:scale-110`}
@@ -54,23 +72,23 @@ const TreeNode = ({ node, displayName, realIsActive, onNodeClick }: TreeNodeProp
           <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-400 rounded-full border-2 border-[#0a0e17]" />
         )}
       </button>
-      <span className="text-xs text-white/70 mt-2 max-w-[80px] truncate">{displayName || node.username}</span>
-      <span className="text-xs text-white/40">ID: {node.userId}</span>
+      <span className={`${nameTextClass} text-white/70 mt-2 ${nameWidthClass} truncate text-center`}>{displayName || node.username}</span>
+      <span className={`${idTextClass} text-white/40`}>ID: {node.userId}</span>
     </div>
   );
-};
+});
 
 export default function Matrix() {
-  const TREE_CHUNK_SIZE = 32;
   const DOWNLINE_CHUNK_SIZE = 20;
+  const FULL_SLOT_RENDER_LIMIT = 2048;
   const navigate = useNavigate();
-  const { user, isAuthenticated, logout } = useAuthStore();
+  const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
   const { matrix, loadMatrix } = useMatrixStore();
   const syncKey = useSyncRefreshKey();
+  const displayUser = impersonatedUser || user;
   const [selectedNode, setSelectedNode] = useState<MatrixNode | null>(null);
   const [zoom, setZoom] = useState(1);
   const [downlineVisibleCount, setDownlineVisibleCount] = useState(DOWNLINE_CHUNK_SIZE);
-  const [levelVisibleCounts, setLevelVisibleCounts] = useState<Record<number, number>>({});
   const treeContainerRef = useRef<HTMLDivElement>(null);
   const matrixCardRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -86,6 +104,11 @@ export default function Matrix() {
   const [customDateTo, setCustomDateTo] = useState('');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [showFilters, setShowFilters] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth < 640;
+  });
+  const levelScrollRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -116,6 +139,13 @@ export default function Matrix() {
     observer.observe(el);
     return () => observer.disconnect();
   }, [zoom]);
+
+  useEffect(() => {
+    const updateViewport = () => setIsMobileViewport(window.innerWidth < 640);
+    updateViewport();
+    window.addEventListener('resize', updateViewport);
+    return () => window.removeEventListener('resize', updateViewport);
+  }, []);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -186,7 +216,7 @@ export default function Matrix() {
     navigate('/login');
   };
 
-  const userNode = user ? matrix.find(m => m.userId === user.userId) : null;
+  const userNode = displayUser ? matrix.find(m => m.userId === displayUser.userId) : null;
   const usersByUserId = useMemo(() => {
     const users = Database.getUsers();
     return new Map(users.map((u) => [u.userId, u]));
@@ -194,51 +224,73 @@ export default function Matrix() {
   const getDisplayName = (userId: string, fallback: string) => usersByUserId.get(userId)?.fullName || fallback;
 
   const downline = useMemo(() => {
-    if (!user) return [] as MatrixNode[];
-    return Database.getUserDownline(user.userId, matrixViewMaxLevels);
-  }, [user, matrix, matrixViewMaxLevels]);
+    if (!displayUser) return [] as MatrixNode[];
+    return Database.getUserDownline(displayUser.userId, matrixViewMaxLevels);
+  }, [displayUser, matrix, matrixViewMaxLevels]);
 
   const teamStats = useMemo(
-    () => (user ? Database.getTeamCounts(user.userId) : { left: 0, right: 0, leftActive: 0, rightActive: 0 }),
-    [user, matrix]
+    () => (displayUser ? Database.getTeamCounts(displayUser.userId) : { left: 0, right: 0, leftActive: 0, rightActive: 0 }),
+    [displayUser, matrix]
   );
 
   const levelGroups = useMemo(() => {
-    if (!userNode) return [] as Array<{ level: number; nodes: MatrixNode[]; filled: number; capacity: number }>;
+    if (!userNode) {
+      return [] as Array<{
+        level: number;
+        slots: Array<MatrixNode | null>;
+        filled: number;
+        capacity: number;
+        renderFullSlots: boolean;
+      }>;
+    }
 
     const nodeMap = new Map(matrix.map((m) => [m.userId, m]));
     const slotViewMaxLevels = matrixViewMaxLevels;
-    const groups: Array<{ level: number; nodes: MatrixNode[]; filled: number; capacity: number }> = [];
-    let currentLevelNodes: MatrixNode[] = [userNode];
+    const groups: Array<{
+      level: number;
+      slots: Array<MatrixNode | null>;
+      filled: number;
+      capacity: number;
+      renderFullSlots: boolean;
+    }> = [];
+    let currentLevelSlots: Array<MatrixNode | null> = [userNode];
 
     for (let level = 1; level <= slotViewMaxLevels; level++) {
-      const nextNodes: MatrixNode[] = [];
-      for (const parent of currentLevelNodes) {
-        if (parent.leftChild) {
-          const left = nodeMap.get(parent.leftChild);
-          if (left) nextNodes.push(left);
-        }
-        if (parent.rightChild) {
-          const right = nodeMap.get(parent.rightChild);
-          if (right) nextNodes.push(right);
-        }
-      }
+      const nextSlots = currentLevelSlots.flatMap((parent) => {
+        if (!parent) return [null, null] as Array<MatrixNode | null>;
 
-      if (nextNodes.length === 0) break;
-
-      const capacity = 2 ** level;
-      groups.push({
-        level,
-        nodes: nextNodes,
-        filled: nextNodes.length,
-        capacity
+        const left = parent.leftChild ? nodeMap.get(parent.leftChild) || null : null;
+        const right = parent.rightChild ? nodeMap.get(parent.rightChild) || null : null;
+        return [left, right];
       });
 
-      currentLevelNodes = nextNodes;
+      const filled = nextSlots.filter((node): node is MatrixNode => !!node).length;
+      if (filled === 0) break;
+
+      const capacity = nextSlots.length;
+      const renderFullSlots = capacity <= FULL_SLOT_RENDER_LIMIT;
+      groups.push({
+        level,
+        slots: renderFullSlots ? nextSlots : nextSlots.filter((node): node is MatrixNode => !!node),
+        filled,
+        capacity,
+        renderFullSlots
+      });
+
+      currentLevelSlots = nextSlots;
     }
 
     return groups;
   }, [userNode, matrix, matrixViewMaxLevels]);
+
+  useEffect(() => {
+    for (const container of Object.values(levelScrollRefs.current)) {
+      if (container) {
+        container.scrollLeft = 0;
+      }
+    }
+  }, [levelGroups.length, zoom, displayUser?.userId]);
+
   // Compute distinct relative levels for the filter dropdown
   const availableLevels = useMemo(() => {
     if (!userNode) return [] as number[];
@@ -346,14 +398,7 @@ export default function Matrix() {
     setSortOrder('asc');
     setDownlineVisibleCount(DOWNLINE_CHUNK_SIZE);
   };
-  const handleLoadMoreLevelNodes = (level: number) => {
-    setLevelVisibleCounts((prev) => ({
-      ...prev,
-      [level]: (prev[level] || TREE_CHUNK_SIZE) + TREE_CHUNK_SIZE
-    }));
-  };
-
-  if (!user) return null;
+  if (!displayUser) return null;
 
   return (
     <div className="matrix-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
@@ -374,7 +419,14 @@ export default function Matrix() {
                 <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#118bdd] to-[#004e9a] flex items-center justify-center">
                   <Users className="w-5 h-5 text-white" />
                 </div>
-                <span className="text-base sm:text-xl font-bold text-white">My Matrix</span>
+                <div>
+                  <span className="text-base sm:text-xl font-bold text-white">My Matrix</span>
+                  {impersonatedUser && (
+                    <p className="text-[11px] text-amber-300/90 mt-0.5">
+                      Viewing as {impersonatedUser.fullName} ({impersonatedUser.userId})
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -438,7 +490,7 @@ export default function Matrix() {
           <Card className="glass border-white/10">
             <CardContent className="p-4">
               <p className="text-sm text-white/60 mb-1">Current Level</p>
-              <p className="text-2xl font-bold text-white">{Database.getCurrentMatrixLevel(user.id)}</p>
+              <p className="text-2xl font-bold text-white">{Database.getCurrentMatrixLevel(displayUser.id)}</p>
             </CardContent>
           </Card>
           <Card className="glass border-white/10">
@@ -459,7 +511,7 @@ export default function Matrix() {
 
         {/* Tree Visualization */}
         <Card ref={matrixCardRef} className="glass border-white/10">
-          <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <CardHeader className="px-4 sm:px-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <CardTitle className="text-white">Matrix Team View (Up to {matrixViewMaxLevels} Levels)</CardTitle>
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="border-emerald-500 text-emerald-400">
@@ -472,74 +524,62 @@ export default function Matrix() {
               </Badge>
             </div>
           </CardHeader>
-          <CardContent className="overflow-hidden">
+          <CardContent className="overflow-hidden px-0 sm:px-6">
             <div style={{ height: treeWrapHeight ? `${treeWrapHeight}px` : 'auto', overflow: 'hidden' }}>
             <div
               ref={treeContainerRef}
               className="flex flex-col items-center py-8 transition-transform duration-300"
               style={{
                 transform: `scale(${zoom})`,
-                transformOrigin: 'top center',
+                transformOrigin: isMobileViewport ? 'top left' : 'top center',
                 width: `${100 / zoom}%`,
-                marginLeft: `${-(100 / zoom - 100) / 2}%`
+                marginLeft: isMobileViewport ? '0%' : `${-(100 / zoom - 100) / 2}%`
               }}
             >
               {userNode ? (
                 <>
-                  <div className="mb-8">
+                  <div className="mb-8 px-4 sm:px-0">
                     <p className="text-center text-white/60 mb-3">Your ID</p>
                     <TreeNode node={userNode} displayName={getDisplayName(userNode.userId, userNode.username)} realIsActive={usersByUserId.get(userNode.userId)?.isActive ?? userNode.isActive} onNodeClick={setSelectedNode} />
                   </div>
 
-                  <div className="w-full space-y-8">
-                    {levelGroups.map((group) => (
-                      <div key={group.level} className="space-y-3">
-                        {(() => {
-                          const visibleCount = levelVisibleCounts[group.level] || TREE_CHUNK_SIZE;
-                          const visibleNodes = group.nodes.slice(0, visibleCount);
-                          const remaining = Math.max(0, group.nodes.length - visibleNodes.length);
-                          const loadCount = Math.min(TREE_CHUNK_SIZE, remaining);
-                          return (
-                            <>
-                        <div className="border-b border-white/10 mb-2" />
-                        <div className="flex items-center justify-between pb-2">
-                          <p className="text-white/70 font-medium">Level {group.level}</p>
-                          <Badge variant="outline" className="border-[#118bdd] text-[#118bdd]">
-                            {group.filled}/{group.capacity} filled
-                          </Badge>
-                        </div>
-                        {remaining > 0 && (
-                          <p className="text-xs text-amber-300/90">Showing first {visibleNodes.length} nodes for performance.</p>
-                        )}
-                        <div className="overflow-x-auto">
-                          <div className="flex items-start justify-center gap-5 min-w-max px-2">
-                            {visibleNodes.map((node, idx) => (
-                              <TreeNode
-                                key={`${node.userId}_${group.level}_${idx}`}
-                                node={node}
-                                displayName={getDisplayName(node.userId, node.username)}
-                                realIsActive={usersByUserId.get(node.userId)?.isActive ?? node.isActive}
-                                onNodeClick={setSelectedNode}
-                              />
-                            ))}
+                    <div className="w-full space-y-8">
+                      {levelGroups.map((group) => (
+                        <div key={group.level} className="space-y-3">
+                          <div className="border-b border-white/10 mb-2 mx-4 sm:mx-0" />
+                          <div className="flex items-center justify-between pb-2 px-4 sm:px-0">
+                            <p className="text-white/70 font-medium">Level {group.level}</p>
+                            <Badge variant="outline" className="border-[#118bdd] text-[#118bdd]">
+                              {group.filled}/{group.capacity} filled
+                            </Badge>
                           </div>
-                        </div>
-                        {remaining > 0 && (
-                          <div className="text-center">
-                            <Button
-                              variant="outline"
-                              className="border-[#118bdd]/40 text-[#8fcfff] hover:bg-[#118bdd]/10"
-                              onClick={() => handleLoadMoreLevelNodes(group.level)}
+                          <div className="w-full">
+                            <div
+                              className="w-full overflow-x-auto snap-x snap-mandatory px-3 sm:px-0 scroll-px-3 sm:scroll-px-0"
+                              ref={(el) => {
+                                levelScrollRefs.current[group.level] = el;
+                              }}
                             >
-                              Show more {loadCount} user{loadCount === 1 ? '' : 's'}
-                            </Button>
+                              <div className={`flex items-start gap-5 w-max min-w-full ${group.capacity <= 2 ? 'justify-center' : 'justify-start'} sm:justify-center px-0 sm:px-2`}>
+                                {group.slots.map((node, idx) => (
+                                  <div
+                                    key={`${group.level}_${idx}_${node?.userId || 'empty'}`}
+                                    className="w-24 shrink-0 flex justify-center snap-start"
+                                  >
+                                    <TreeNode
+                                      node={node}
+                                      slotNumber={idx + 1}
+                                      displayName={node ? getDisplayName(node.userId, node.username) : undefined}
+                                      realIsActive={node ? (usersByUserId.get(node.userId)?.isActive ?? node.isActive) : undefined}
+                                      onNodeClick={setSelectedNode}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
                           </div>
-                        )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    ))}
+                        </div>
+                      ))}
                     {downline.length === 0 && (
                       <div className="flex flex-col items-center justify-center py-4">
                         <p className="text-white/50">No downline yet</p>

@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/set-state-in-effect */
 import { useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -11,6 +12,10 @@ export default function ThemeToggle() {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // Temporarily hide theme toggle (can re-enable later by removing this)
+  if (!mounted) return null;
+  return null;
 
   const isDark = !mounted || resolvedTheme !== "light";
   const nextTheme = isDark ? "light" : "dark";

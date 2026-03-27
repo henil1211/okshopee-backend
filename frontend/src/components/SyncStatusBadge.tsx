@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { CheckCircle2, CloudOff, Loader2, RefreshCw } from 'lucide-react';
+import { CloudOff, Loader2, RefreshCw } from 'lucide-react';
 import Database, { type RemoteSyncStatus } from '@/db';
 import { useAuthStore } from '@/store';
 
@@ -39,58 +39,42 @@ export default function SyncStatusBadge() {
 
   useEffect(() => Database.subscribeRemoteSyncStatus(setStatus), []);
 
-  const stateUi = status.state === 'synced'
+  const stateUi = status.state === 'syncing'
     ? {
-        label: 'Synced',
-        textClass: 'text-emerald-300',
-        borderClass: 'border-emerald-400/35',
-        bgClass: 'bg-emerald-500/10',
-        icon: <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+        label: 'Syncing',
+        borderClass: 'border-sky-400/35',
+        bgClass: 'bg-sky-500/10',
+        icon: <Loader2 className="h-5 w-5 animate-spin text-sky-300" />
       }
-    : status.state === 'syncing'
+    : status.state === 'pending'
       ? {
-          label: 'Syncing',
-          textClass: 'text-sky-300',
-          borderClass: 'border-sky-400/35',
-          bgClass: 'bg-sky-500/10',
-          icon: <Loader2 className="h-4 w-4 animate-spin text-sky-300" />
+          label: 'Pending',
+          borderClass: 'border-amber-400/35',
+          bgClass: 'bg-amber-500/10',
+          icon: <RefreshCw className="h-5 w-5 text-amber-300 animate-spin" />
         }
-      : status.state === 'pending'
+      : status.state === 'offline'
         ? {
-            label: 'Pending',
-            textClass: 'text-amber-300',
-            borderClass: 'border-amber-400/35',
-            bgClass: 'bg-amber-500/10',
-            icon: <RefreshCw className="h-4 w-4 text-amber-300" />
-          }
-        : {
             label: 'Offline',
-            textClass: 'text-rose-300',
             borderClass: 'border-rose-400/35',
             bgClass: 'bg-rose-500/10',
-            icon: <CloudOff className="h-4 w-4 text-rose-300" />
-          };
+            icon: <CloudOff className="h-5 w-5 text-rose-300" />
+          }
+        : null;
 
   if (!isAuthenticated) return null;
   if (HIDDEN_ROUTES.has(location.pathname)) return null;
 
-  const detailText = status.state === 'synced'
-    ? `Last sync ${formatRelativeTime(status.lastSuccessAt)}`
-    : status.message || 'Sync retry in background';
+  const detailText = status.message || (status.state === 'synced' ? `Last sync ${formatRelativeTime(status.lastSuccessAt)}` : 'Sync in progress');
+
+  if (!stateUi) return null; // hide when synced/idle
 
   return (
     <div
-      className={`fixed right-4 bottom-40 md:bottom-20 z-[70] rounded-xl border px-3 py-2 text-xs backdrop-blur-md shadow-lg ${stateUi.bgClass} ${stateUi.borderClass}`}
-      title={`${stateUi.label} | ${detailText}`}
+      className={`fixed right-4 bottom-40 md:bottom-20 z-[70] h-12 w-12 rounded-full border flex items-center justify-center backdrop-blur-md shadow-lg ${stateUi.bgClass} ${stateUi.borderClass}`}
+      title={`${stateUi.label} | ${detailText}${status.dirtyKeys > 0 ? ` (${status.dirtyKeys} pending)` : ''}`}
     >
-      <div className="flex items-center gap-2">
-        {stateUi.icon}
-        <span className={`font-semibold ${stateUi.textClass}`}>{stateUi.label}</span>
-      </div>
-      <div className="mt-1 text-[11px] text-white/70">
-        {detailText}
-        {status.dirtyKeys > 0 ? ` (${status.dirtyKeys} pending)` : ''}
-      </div>
+      {stateUi.icon}
     </div>
   );
 }

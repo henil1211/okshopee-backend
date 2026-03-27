@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from 'clsx';
+import { getCountryCallingCode, isValidPhoneNumber as isValidPhoneNumberLib, type CountryCode } from 'libphonenumber-js';
 import { twMerge } from 'tailwind-merge';
 
 // Tailwind class merger
@@ -44,8 +45,8 @@ export function formatDate(dateInput: unknown): string {
 }
 
 // Normalize phone number by keeping digits and optional leading +
-export function normalizePhoneNumber(phoneInput: string): string {
-  const trimmed = phoneInput.trim();
+export function normalizePhoneNumber(phoneInput?: string | null): string {
+  const trimmed = String(phoneInput ?? '').trim();
   if (!trimmed) return '';
   const hasPlus = trimmed.startsWith('+');
   const digitsOnly = trimmed.replace(/\D/g, '');
@@ -53,8 +54,45 @@ export function normalizePhoneNumber(phoneInput: string): string {
   return hasPlus ? `+${digitsOnly}` : digitsOnly;
 }
 
+const COUNTRY_NAME_TO_CODE: Record<string, CountryCode> = {
+  'United States': 'US',
+  'United Kingdom': 'GB',
+  'Canada': 'CA',
+  'Australia': 'AU',
+  'Germany': 'DE',
+  'France': 'FR',
+  'India': 'IN',
+  'Pakistan': 'PK',
+  'Nigeria': 'NG',
+  'South Africa': 'ZA',
+  'Brazil': 'BR',
+  'Mexico': 'MX',
+  'China': 'CN',
+  'Japan': 'JP',
+  'South Korea': 'KR',
+  'Singapore': 'SG',
+  'Malaysia': 'MY',
+  'Indonesia': 'ID',
+  'Philippines': 'PH',
+  'Thailand': 'TH',
+  'Vietnam': 'VN',
+  'UAE': 'AE',
+  'Saudi Arabia': 'SA'
+};
+
+export function getCountryCodeFromName(countryName?: string | null): CountryCode | undefined {
+  if (!countryName) return undefined;
+  return COUNTRY_NAME_TO_CODE[countryName];
+}
+
+export function getDialCodeForCountry(countryName?: string | null): string | null {
+  const code = getCountryCodeFromName(countryName);
+  if (!code) return null;
+  return `+${getCountryCallingCode(code)}`;
+}
+
 // Basic phone validation: allows E.164 (+XXXXXXXX) or 8-15 local/international digits
-export function isValidPhoneNumber(phoneInput: string): boolean {
+export function isValidPhoneNumber(phoneInput?: string | null): boolean {
   const normalized = normalizePhoneNumber(phoneInput);
   if (!normalized) return false;
   const e164Like = /^\+[1-9]\d{7,14}$/;
@@ -62,6 +100,14 @@ export function isValidPhoneNumber(phoneInput: string): boolean {
   const numeric = normalized.startsWith('+') ? normalized.slice(1) : normalized;
   if (/^(\d)\1+$/.test(numeric)) return false;
   return e164Like.test(normalized) || digitsOnly.test(normalized);
+}
+
+export function isValidPhoneNumberForCountry(phoneInput?: string | null, countryName?: string | null): boolean {
+  const countryCode = getCountryCodeFromName(countryName);
+  if (countryCode) {
+    return isValidPhoneNumberLib(String(phoneInput ?? ''), countryCode);
+  }
+  return isValidPhoneNumber(phoneInput);
 }
 
 // Format relative time
@@ -102,9 +148,28 @@ export function isValidUsername(username: string): boolean {
   return usernameRegex.test(username);
 }
 
-// Validate password
-export function isValidPassword(password: string): boolean {
-  return password.length >= 6;
+// Validate login password (min 8, upper, lower, number, special)
+export function isStrongPassword(password: string): boolean {
+  return (
+    password.length >= 8
+    && /[A-Z]/.test(password)
+    && /[a-z]/.test(password)
+    && /\d/.test(password)
+    && /[^A-Za-z0-9]/.test(password)
+  );
+}
+
+export function getPasswordRequirementsText(): string {
+  return 'Password must be at least 8 characters and include uppercase, lowercase, number, and special character.';
+}
+
+// Validate transaction password (PIN-style)
+export function isValidTransactionPassword(password: string): boolean {
+  return /^\d{4,6}$/.test(password);
+}
+
+export function getTransactionPasswordRequirementsText(): string {
+  return 'Transaction password must be 4-6 digits.';
 }
 
 // Calculate percentage
@@ -276,9 +341,11 @@ export function getTransactionTypeColor(type: string): string {
   const colors: Record<string, string> = {
     activation: 'bg-blue-500',
     income_transfer: 'bg-indigo-500',
+    royalty_transfer: 'bg-amber-500',
     pin_used: 'bg-blue-500',
     direct_income: 'bg-green-500',
     level_income: 'bg-emerald-500',
+    royalty_income: 'bg-amber-500',
     give_help: 'bg-orange-500',
     get_help: 'bg-purple-500',
     receive_help: 'bg-purple-500',
@@ -295,9 +362,11 @@ export function getTransactionTypeIcon(type: string): string {
   const icons: Record<string, string> = {
     activation: 'Zap',
     income_transfer: 'ArrowRightLeft',
+    royalty_transfer: 'ArrowRightLeft',
     pin_used: 'Zap',
     direct_income: 'UserPlus',
     level_income: 'TrendingUp',
+    royalty_income: 'Award',
     give_help: 'ArrowUpRight',
     get_help: 'ArrowDownLeft',
     receive_help: 'ArrowDownLeft',
@@ -314,9 +383,11 @@ export function getTransactionTypeLabel(type: string): string {
   const labels: Record<string, string> = {
     activation: 'Activation',
     income_transfer: 'Income Transfer',
+    royalty_transfer: 'Royalty Transfer',
     pin_used: 'Activation',
     direct_income: 'Direct Income',
     level_income: 'Level Income',
+    royalty_income: 'Royalty Income',
     give_help: 'Give Help',
     get_help: 'Receive Help',
     receive_help: 'Receive Help',

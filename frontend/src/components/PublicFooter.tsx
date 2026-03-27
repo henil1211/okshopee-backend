@@ -15,7 +15,7 @@ export default function PublicFooter() {
               <BrandLogo variant="full" className="h-9 w-[152px] rounded-md" />
             </div>
             <p className="mt-3 text-sm text-white/60">
-              The next-generation referral network for smart shoppers and digital community growth.
+              The next-generation referral program for smart shoppers and digital community growth.
             </p>
           </div>
 

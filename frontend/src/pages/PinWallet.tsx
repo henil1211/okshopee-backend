@@ -7,8 +7,8 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { 
   Copy, Check, Send, Ticket, History, Download, 
-  MessageCircle, Share2, AlertTriangle,
-  RefreshCw, User, Upload, QrCode
+  MessageCircle, Share2, AlertTriangle, Maximize2,
+  RefreshCw, User, Upload, QrCode, Eye, EyeOff
 } from 'lucide-react';
 import Database from '@/db';
 import { toast } from 'sonner';
@@ -16,7 +16,7 @@ import { useNavigate } from 'react-router-dom';
 
 export default function PinWallet() {
   const navigate = useNavigate();
-  const { user, isAuthenticated, verifyTransactionPassword } = useAuthStore();
+  const { user, impersonatedUser, isAuthenticated, verifyTransactionPassword } = useAuthStore();
   const { 
     unusedPins, 
     usedPins, 
@@ -25,6 +25,7 @@ export default function PinWallet() {
     purchaseRequests,
     loadPins, 
     transferPin,
+    transferPinsBulk,
     requestPinPurchase,
     buyPinsDirect,
     loadPurchaseRequests,
@@ -32,10 +33,11 @@ export default function PinWallet() {
   } = usePinStore();
   const { sendOtp, verifyOtp } = useOtpStore();
   const syncKey = useSyncRefreshKey();
+  const displayUser = impersonatedUser || user;
 
   const [activeTab, setActiveTab] = useState<'unused' | 'used' | 'received' | 'transfer' | 'request'>('unused');
   const [transferUserId, setTransferUserId] = useState('');
-  const [selectedPin, setSelectedPin] = useState<string | null>(null);
+  const [selectedPins, setSelectedPins] = useState<string[]>([]);
   const [transactionPassword, setTransactionPassword] = useState('');
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [isTransferring, setIsTransferring] = useState(false);
@@ -44,25 +46,55 @@ export default function PinWallet() {
   const [transferOtp, setTransferOtp] = useState('');
   const [isSendingOtp, setIsSendingOtp] = useState(false);
   const [isTransferOtpSent, setIsTransferOtpSent] = useState(false);
-  const [requestQuantity, setRequestQuantity] = useState(1);
+  const [requestQuantity, setRequestQuantity] = useState('');
   const [requestTxHash, setRequestTxHash] = useState('');
   const [requestProof, setRequestProof] = useState<string | null>(null);
   const [isSubmittingRequest, setIsSubmittingRequest] = useState(false);
   const [isBuyingDirect, setIsBuyingDirect] = useState(false);
   const [showDirectBuyModal, setShowDirectBuyModal] = useState(false);
+  const [showQrFullscreen, setShowQrFullscreen] = useState(false);
   const [directBuyTransactionPassword, setDirectBuyTransactionPassword] = useState('');
+  const [showTransferTxPassword, setShowTransferTxPassword] = useState(false);
+  const [showDirectBuyTxPassword, setShowDirectBuyTxPassword] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [bulkSelectCount, setBulkSelectCount] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pinSyncInFlight = useRef(false);
 
   useEffect(() => {
     if (!isAuthenticated) {
       navigate('/login');
       return;
     }
-    if (user) {
-      loadPins(user.id);
-      loadPurchaseRequests(user.id);
+    if (displayUser) {
+      loadPins(displayUser.id);
+      loadPurchaseRequests(displayUser.id);
     }
-  }, [isAuthenticated, user, loadPins, loadPurchaseRequests, navigate, syncKey]);
+  }, [isAuthenticated, displayUser, loadPins, loadPurchaseRequests, navigate, syncKey]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !displayUser) return;
+    if (pinSyncInFlight.current) return;
+    let cancelled = false;
+    const syncPins = async () => {
+      pinSyncInFlight.current = true;
+      try {
+        await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      } catch {
+        // best-effort sync
+      } finally {
+        pinSyncInFlight.current = false;
+        if (!cancelled) {
+          loadPins(displayUser.id);
+          loadPurchaseRequests(displayUser.id);
+        }
+      }
+    };
+    void syncPins();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, displayUser?.id, loadPins, loadPurchaseRequests]);
 
   const handleCopyPin = async (pinCode: string) => {
     const success = await copyPinToClipboard(pinCode);
@@ -121,9 +153,9 @@ export default function PinWallet() {
     
     if (cleanValue.length === 7) {
       const targetUser = Database.getUserByUserId(cleanValue);
-      if (targetUser && user) {
+      if (targetUser && displayUser) {
         // Check if in same chain
-        const isInChain = Database.isInSameChain(user.id, targetUser.id);
+        const isInChain = Database.isInSameChain(displayUser.id, targetUser.id);
         if (isInChain) {
           setTargetUserName(targetUser.fullName);
         } else {
@@ -138,15 +170,39 @@ export default function PinWallet() {
   };
 
   const initiateTransfer = (pinId: string) => {
-    setSelectedPin(pinId);
+    setSelectedPins([pinId]);
     setShowPasswordModal(true);
   };
 
+  const togglePinSelection = (pinId: string) => {
+    setSelectedPins((prev) => (
+      prev.includes(pinId) ? prev.filter((id) => id !== pinId) : [...prev, pinId]
+    ));
+  };
+
+  const clearPinSelection = () => {
+    setSelectedPins([]);
+  };
+
+  const selectAllPins = () => {
+    setSelectedPins(unusedPins.map((pin) => pin.id));
+  };
+
+  const selectPinsByCount = () => {
+    const qty = Math.max(0, Number.parseInt(bulkSelectCount, 10) || 0);
+    if (qty < 1) {
+      toast.error('Enter a valid quantity');
+      return;
+    }
+    const count = Math.min(qty, unusedPins.length);
+    setSelectedPins(unusedPins.slice(0, count).map((pin) => pin.id));
+  };
+
   const confirmTransfer = async () => {
-    if (!user || !selectedPin) return;
+    if (!displayUser || selectedPins.length === 0) return;
     
     // Verify transaction password
-    if (!verifyTransactionPassword(user.id, transactionPassword)) {
+    if (!verifyTransactionPassword(displayUser.id, transactionPassword)) {
       toast.error('Invalid transaction password');
       return;
     }
@@ -155,7 +211,7 @@ export default function PinWallet() {
       return;
     }
 
-    const otpValid = await verifyOtp(user.id, transferOtp, 'transaction');
+    const otpValid = await verifyOtp(displayUser.id, transferOtp, 'transaction');
     if (!otpValid) {
       toast.error('Invalid or expired OTP');
       return;
@@ -170,18 +226,21 @@ export default function PinWallet() {
       return;
     }
 
-    const result = await transferPin(selectedPin, user.id, targetUser.id);
+    const result = selectedPins.length === 1
+      ? await transferPin(selectedPins[0], displayUser.id, targetUser.id)
+      : await transferPinsBulk(selectedPins, displayUser.id, targetUser.id);
     
     if (result.success) {
       toast.success(result.message);
       setShowPasswordModal(false);
       setTransactionPassword('');
+      setShowTransferTxPassword(false);
       setTransferOtp('');
       setIsTransferOtpSent(false);
       setTransferUserId('');
       setTargetUserName('');
-      setSelectedPin(null);
-      loadPins(user.id);
+      setSelectedPins([]);
+      loadPins(displayUser.id);
     } else {
       toast.error(result.message);
     }
@@ -190,9 +249,9 @@ export default function PinWallet() {
   };
 
   const handleSendTransferOtp = async () => {
-    if (!user) return;
+    if (!displayUser) return;
     setIsSendingOtp(true);
-    const result = await sendOtp(user.id, user.email, 'transaction');
+    const result = await sendOtp(displayUser.id, displayUser.email, 'transaction');
     setIsSendingOtp(false);
     if (result.success) {
       setIsTransferOtpSent(true);
@@ -213,8 +272,9 @@ export default function PinWallet() {
   };
 
   const handlePinRequestSubmit = async () => {
-    if (!user) return;
-    if (requestQuantity < 1) {
+    if (!displayUser) return;
+    const quantityNumber = Math.max(0, Number.parseInt(requestQuantity, 10) || 0);
+    if (quantityNumber < 1) {
       toast.error('Quantity must be at least 1');
       return;
     }
@@ -224,7 +284,7 @@ export default function PinWallet() {
     }
 
     setIsSubmittingRequest(true);
-    const result = await requestPinPurchase(user.id, requestQuantity, {
+    const result = await requestPinPurchase(displayUser.id, quantityNumber, {
       paymentMethod: 'crypto',
       paymentProof: requestProof,
       paymentTxHash: requestTxHash || undefined,
@@ -238,32 +298,33 @@ export default function PinWallet() {
     }
 
     toast.success(result.message);
-    setRequestQuantity(1);
+    setRequestQuantity('');
     setRequestTxHash('');
     setRequestProof(null);
-    loadPurchaseRequests(user.id);
+    loadPurchaseRequests(displayUser.id);
   };
 
   const handleDirectBuy = async () => {
-    if (!user) return;
-    if (requestQuantity < 1) {
+    if (!displayUser) return;
+    const quantityNumber = Math.max(0, Number.parseInt(requestQuantity, 10) || 0);
+    if (quantityNumber < 1) {
       toast.error('Quantity must be at least 1');
       return;
     }
-    if (!verifyTransactionPassword(user.id, directBuyTransactionPassword)) {
+    if (!verifyTransactionPassword(displayUser.id, directBuyTransactionPassword)) {
       toast.error('Invalid transaction password');
       return;
     }
 
     const settings = Database.getSettings();
-    const totalAmount = requestQuantity * settings.pinAmount;
+    const totalAmount = quantityNumber * settings.pinAmount;
     const isConfirmed = window.confirm(
-      `Are you sure to buy PIN now?\n\nPINs: ${requestQuantity}\nAmount to deduct: $${totalAmount}`
+      `Are you sure to buy PIN now?\n\nPINs: ${quantityNumber}\nAmount to deduct: $${totalAmount}`
     );
     if (!isConfirmed) return;
 
     setIsBuyingDirect(true);
-    const result = await buyPinsDirect(user.id, requestQuantity);
+    const result = await buyPinsDirect(displayUser.id, quantityNumber);
     setIsBuyingDirect(false);
     if (!result.success) {
       toast.error(result.message);
@@ -271,12 +332,13 @@ export default function PinWallet() {
     }
 
     toast.success(result.message);
-    setRequestQuantity(1);
+    setRequestQuantity('');
     setRequestTxHash('');
     setRequestProof(null);
     setDirectBuyTransactionPassword('');
+    setShowDirectBuyTxPassword(false);
     setShowDirectBuyModal(false);
-    loadPurchaseRequests(user.id);
+    loadPurchaseRequests(displayUser.id);
   };
 
   const renderUnusedPins = () => (
@@ -288,7 +350,68 @@ export default function PinWallet() {
           <p className="text-sm text-white/40 mt-1">Purchase PINs from the admin or receive from your upline</p>
         </div>
       ) : (
-        <div className="grid gap-4">
+        <div className="space-y-3">
+          {selectedPins.length > 0 && (
+            <div className="p-3 rounded-lg bg-[#0f172a] border border-white/10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="text-white/70 text-sm">
+                Selected {selectedPins.length} PIN{selectedPins.length === 1 ? '' : 's'}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => setShowPasswordModal(true)}
+                  className="btn-primary"
+                >
+                  <Send className="w-4 h-4 mr-1" /> Transfer Selected
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={clearPinSelection}
+                  className="border-white/20 text-white hover:bg-white/10"
+                >
+                  Clear
+                </Button>
+              </div>
+            </div>
+          )}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={selectAllPins}
+                className="border-white/20 text-white hover:bg-white/10"
+              >
+                Select All
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={clearPinSelection}
+                className="border-white/20 text-white hover:bg-white/10"
+              >
+                Select None
+              </Button>
+            </div>
+            <div className="flex gap-2">
+              <Input
+                value={bulkSelectCount}
+                onChange={(e) => setBulkSelectCount(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                placeholder="Qty"
+                className="w-24 bg-[#1f2937] border-white/10 text-white"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={selectPinsByCount}
+                className="border-white/20 text-white hover:bg-white/10"
+              >
+                Select Qty
+              </Button>
+            </div>
+          </div>
+          <div className="grid gap-4">
           {unusedPins.map((pin) => (
             <div 
               key={pin.id} 
@@ -312,6 +435,22 @@ export default function PinWallet() {
                 </div>
               </div>
               
+              <div className="flex items-center gap-2 mb-3">
+                <button
+                  type="button"
+                  onClick={() => togglePinSelection(pin.id)}
+                  className={`h-6 w-6 rounded-md border flex items-center justify-center ${
+                    selectedPins.includes(pin.id)
+                      ? 'bg-[#118bdd] border-[#118bdd] text-white'
+                      : 'border-white/30 text-white/50 hover:border-white/60'
+                  }`}
+                  title={selectedPins.includes(pin.id) ? 'Deselect PIN' : 'Select PIN'}
+                >
+                  {selectedPins.includes(pin.id) && <Check className="w-4 h-4" />}
+                </button>
+                <span className="text-xs text-white/60">Select for bulk transfer</span>
+              </div>
+
               <div className="flex flex-wrap gap-2">
                 <Button
                   variant="outline"
@@ -352,6 +491,7 @@ export default function PinWallet() {
               </div>
             </div>
           ))}
+          </div>
         </div>
       )}
     </div>
@@ -509,7 +649,7 @@ export default function PinWallet() {
                   <div>
                     <p className="font-mono text-white">{transfer.pinCode}</p>
                     <p className="text-xs text-white/50">
-                      {transfer.fromUserId === user?.id ? (
+                      {transfer.fromUserId === displayUser?.id ? (
                         <>To: {transfer.toUserName} ({transfer.toUserId})</>
                       ) : (
                         <>From: {transfer.fromUserName} ({transfer.fromUserId})</>
@@ -519,11 +659,11 @@ export default function PinWallet() {
                 </div>
                 <div className="text-right">
                   <span className={`px-2 py-0.5 rounded-full text-xs ${
-                    transfer.fromUserId === user?.id 
+                    transfer.fromUserId === displayUser?.id 
                       ? 'bg-amber-500/20 text-amber-400' 
                       : 'bg-emerald-500/20 text-emerald-400'
                   }`}>
-                    {transfer.fromUserId === user?.id ? 'Sent' : 'Received'}
+                    {transfer.fromUserId === displayUser?.id ? 'Sent' : 'Received'}
                   </span>
                   <p className="text-xs text-white/40 mt-1">
                     {new Date(transfer.transferredAt).toLocaleDateString()}
@@ -540,9 +680,10 @@ export default function PinWallet() {
   const renderPinRequest = () => {
     const settings = Database.getSettings();
     const pinAmount = settings.pinAmount;
-    const totalAmount = requestQuantity * pinAmount;
-    const fundWalletBalance = user ? (Database.getWallet(user.id)?.depositWallet || 0) : 0;
-    const canDirectBuy = fundWalletBalance >= totalAmount;
+    const quantityNumber = Math.max(0, Number.parseInt(requestQuantity, 10) || 0);
+    const totalAmount = quantityNumber * pinAmount;
+    const fundWalletBalance = displayUser ? (Database.getWallet(displayUser.id)?.depositWallet || 0) : 0;
+    const canDirectBuy = quantityNumber > 0 && fundWalletBalance >= totalAmount;
     const activeCryptoMethod = Database.getPaymentMethods().find(m => m.isActive && m.type === 'crypto');
 
     return (
@@ -558,7 +699,8 @@ export default function PinWallet() {
                 type="number"
                 min={1}
                 value={requestQuantity}
-                onChange={(e) => setRequestQuantity(Math.max(1, Number(e.target.value) || 1))}
+                onChange={(e) => setRequestQuantity(e.target.value.replace(/\D/g, ''))}
+                onWheel={(e) => e.currentTarget.blur()}
                 className="bg-[#0f172a] border-white/10 text-white"
               />
             </div>
@@ -568,31 +710,68 @@ export default function PinWallet() {
               <p className="text-sm text-white/60">Fund Wallet: ${fundWalletBalance}</p>
             </div>
 
-            {activeCryptoMethod?.walletAddress && (
-              <div className="space-y-3 p-3 rounded-lg bg-[#0f172a] border border-white/10">
-                <p className="text-sm text-white/70">USDT (BEP-20) Wallet Address</p>
-                <div className="flex gap-2">
-                  <Input
-                    readOnly
-                    value={activeCryptoMethod.walletAddress}
-                    className="bg-[#111827] border-white/10 text-white font-mono text-xs"
-                  />
-                  <Button
-                    variant="outline"
-                    className="border-white/20 text-white hover:bg-white/10"
-                    onClick={async () => {
-                      const ok = await copyPinToClipboard(activeCryptoMethod.walletAddress || '');
-                      if (ok) toast.success('Wallet address copied');
-                    }}
-                  >
-                    <Copy className="w-4 h-4" />
-                  </Button>
-                </div>
-                <div className="flex justify-center">
-                  <div className="p-3 rounded bg-white">
-                    <QrCode className="w-20 h-20 text-black" />
+            {activeCryptoMethod?.walletAddress ? (
+              <div className="space-y-4 p-4 rounded-lg bg-[#0f172a] border border-white/10">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-[#118bdd]/15 flex items-center justify-center">
+                    <QrCode className="w-5 h-5 text-[#118bdd]" />
+                  </div>
+                  <div className="flex-1 space-y-1">
+                    <p className="text-sm text-white font-semibold">Pay via USDT (BEP-20)</p>
+                    <p className="text-xs text-white/60">
+                      {activeCryptoMethod.instructions || 'Send USDT to this address and upload proof.'}
+                    </p>
                   </div>
                 </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs text-white/60 uppercase">Wallet Address</p>
+                  <div className="flex gap-2 items-center">
+                    <code className="flex-1 p-3 rounded-lg bg-[#111827] text-white/90 text-xs break-all border border-white/10">
+                      {activeCryptoMethod.walletAddress}
+                    </code>
+                    <Button
+                      variant="outline"
+                      className="border-white/20 text-white hover:bg-white/10"
+                      onClick={async () => {
+                        const ok = await copyPinToClipboard(activeCryptoMethod.walletAddress || '');
+                        toast[ok ? 'success' : 'error'](ok ? 'Wallet address copied' : 'Copy failed');
+                      }}
+                    >
+                      <Copy className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-white/50">Powered by admin deposit details</p>
+                </div>
+
+                <div className="flex flex-col items-center gap-2">
+                  {activeCryptoMethod.qrCode ? (
+                    <>
+                      <img
+                        src={activeCryptoMethod.qrCode}
+                        alt={`${activeCryptoMethod.name} QR`}
+                        className="w-44 h-44 object-contain rounded-lg bg-white p-2 border border-white/15"
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setShowQrFullscreen(true)}
+                        className="border-white/20 text-white hover:bg-white/10"
+                      >
+                        <Maximize2 className="w-4 h-4 mr-2" />
+                        Full Screen QR
+                      </Button>
+                    </>
+                  ) : (
+                    <div className="p-4 rounded-lg bg-white/5 border border-white/10 w-full text-center text-white/50">
+                      No QR configured in admin deposit details.
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 rounded-lg bg-[#0f172a] border border-amber-500/30 text-amber-300 text-sm">
+                Admin has not configured deposit details yet. Add a USDT (BEP-20) method in Deposit settings to enable PIN requests.
               </div>
             )}
 
@@ -633,7 +812,7 @@ export default function PinWallet() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Button
                 onClick={handlePinRequestSubmit}
-                disabled={isSubmittingRequest || isBuyingDirect}
+                disabled={isSubmittingRequest || isBuyingDirect || Math.max(0, Number.parseInt(requestQuantity, 10) || 0) < 1}
                 className="w-full btn-primary"
               >
                 {isSubmittingRequest ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Send className="w-4 h-4 mr-2" />}
@@ -697,17 +876,31 @@ export default function PinWallet() {
         <div>
           <h1 className="text-xl sm:text-2xl font-bold text-white">PIN Wallet</h1>
           <p className="text-white/60">Manage your activation PINs</p>
+          {impersonatedUser && (
+            <p className="text-[11px] text-amber-300/90 mt-0.5">
+              Viewing as {impersonatedUser.fullName} ({impersonatedUser.userId})
+            </p>
+          )}
         </div>
         <Button
           variant="outline"
-          onClick={() => {
-            if (!user) return;
-            loadPins(user.id);
-            loadPurchaseRequests(user.id);
+          onClick={async () => {
+            if (!displayUser || isRefreshing) return;
+            setIsRefreshing(true);
+            try {
+              await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+              await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+            } catch {
+              // best-effort sync
+            } finally {
+              loadPins(displayUser.id);
+              loadPurchaseRequests(displayUser.id);
+              setIsRefreshing(false);
+            }
           }}
           className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
         >
-          <RefreshCw className="w-4 h-4 mr-2" />
+          <RefreshCw className={`w-4 h-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
       </div>
@@ -764,7 +957,7 @@ export default function PinWallet() {
               </div>
               <div>
                 <p className="text-2xl font-bold text-white">
-                  {transfers.filter(t => t.fromUserId === user?.id).length}
+                  {transfers.filter(t => t.fromUserId === displayUser?.id).length}
                 </p>
                 <p className="text-xs text-white/60">Transfers Sent</p>
               </div>
@@ -776,11 +969,11 @@ export default function PinWallet() {
       {/* Tabs */}
       <div className="flex gap-2 overflow-x-auto pb-2">
         {[
+          { key: 'request', label: 'PIN Request', count: purchaseRequests.length },
           { key: 'unused', label: 'Unused PINs', count: unusedPins.length },
           { key: 'used', label: 'Used PINs', count: usedPins.length },
           { key: 'received', label: 'Received PINs', count: receivedPins.length },
-          { key: 'transfer', label: 'Transfer History', count: transfers.length },
-          { key: 'request', label: 'PIN Request', count: purchaseRequests.length }
+          { key: 'transfer', label: 'Transfer History', count: transfers.length }
         ].map((tab) => (
           <button
             key={tab.key}
@@ -853,13 +1046,23 @@ export default function PinWallet() {
 
               <div className="space-y-2">
                 <label className="text-sm text-white/80">Transaction Password</label>
-                <Input
-                  type="password"
-                  value={transactionPassword}
-                  onChange={(e) => setTransactionPassword(e.target.value)}
-                  placeholder="Enter your transaction password"
-                  className="bg-[#1f2937] border-white/10 text-white"
-                />
+                <div className="relative">
+                  <Input
+                    type={showTransferTxPassword ? 'text' : 'password'}
+                    value={transactionPassword}
+                    onChange={(e) => setTransactionPassword(e.target.value)}
+                    placeholder="Enter your transaction password"
+                    className="bg-[#1f2937] border-white/10 text-white pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowTransferTxPassword((v) => !v)}
+                    className="absolute inset-y-0 right-3 flex items-center text-white/60 hover:text-white"
+                    tabIndex={-1}
+                  >
+                    {showTransferTxPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
               <div className="space-y-2">
                 <label className="text-sm text-white/80">Email OTP</label>
@@ -892,11 +1095,12 @@ export default function PinWallet() {
                   onClick={() => {
                     setShowPasswordModal(false);
                     setTransactionPassword('');
+                    setShowTransferTxPassword(false);
                     setTransferOtp('');
                     setIsTransferOtpSent(false);
                     setTransferUserId('');
                     setTargetUserName('');
-                    setSelectedPin(null);
+                    setSelectedPins([]);
                   }}
                   className="flex-1 border-white/20 text-white hover:bg-white/10"
                 >
@@ -931,19 +1135,33 @@ export default function PinWallet() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="p-3 rounded-lg bg-[#1f2937] border border-white/10">
-                <p className="text-sm text-white/70">PIN Quantity: <span className="text-white font-medium">{requestQuantity}</span></p>
-                <p className="text-sm text-white/70">Amount to deduct: <span className="text-emerald-400 font-medium">${requestQuantity * Database.getSettings().pinAmount}</span></p>
+                <p className="text-sm text-white/70">
+                  PIN Quantity: <span className="text-white font-medium">{Math.max(0, Number.parseInt(requestQuantity, 10) || 0)}</span>
+                </p>
+                <p className="text-sm text-white/70">
+                  Amount to deduct: <span className="text-emerald-400 font-medium">${Math.max(0, Number.parseInt(requestQuantity, 10) || 0) * Database.getSettings().pinAmount}</span>
+                </p>
               </div>
 
               <div className="space-y-2">
                 <label className="text-sm text-white/80">Transaction Password</label>
-                <Input
-                  type="password"
-                  value={directBuyTransactionPassword}
-                  onChange={(e) => setDirectBuyTransactionPassword(e.target.value)}
-                  placeholder="Enter transaction password"
-                  className="bg-[#1f2937] border-white/10 text-white"
-                />
+                <div className="relative">
+                  <Input
+                    type={showDirectBuyTxPassword ? 'text' : 'password'}
+                    value={directBuyTransactionPassword}
+                    onChange={(e) => setDirectBuyTransactionPassword(e.target.value)}
+                    placeholder="Enter transaction password"
+                    className="bg-[#1f2937] border-white/10 text-white pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowDirectBuyTxPassword((v) => !v)}
+                    className="absolute inset-y-0 right-3 flex items-center text-white/60 hover:text-white"
+                    tabIndex={-1}
+                  >
+                    {showDirectBuyTxPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
 
               <div className="flex gap-3">
@@ -952,6 +1170,7 @@ export default function PinWallet() {
                   onClick={() => {
                     setShowDirectBuyModal(false);
                     setDirectBuyTransactionPassword('');
+                    setShowDirectBuyTxPassword(false);
                   }}
                   className="flex-1 border-white/20 text-white hover:bg-white/10"
                 >
@@ -971,6 +1190,31 @@ export default function PinWallet() {
               </div>
             </CardContent>
           </Card>
+        </div>
+      )}
+
+      {showQrFullscreen && Database.getPaymentMethods().find(m => m.isActive && m.type === 'crypto' && m.walletAddress)?.qrCode && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#0f172a] border border-white/10 rounded-xl p-4 max-w-3xl w-full">
+            <div className="flex justify-between items-center mb-3">
+              <p className="text-white font-semibold text-sm">Payment QR Code</p>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-white/70 hover:text-white"
+                onClick={() => setShowQrFullscreen(false)}
+              >
+                Close
+              </Button>
+            </div>
+            <div className="bg-white rounded-lg p-4 flex justify-center">
+              <img
+                src={Database.getPaymentMethods().find(m => m.isActive && m.type === 'crypto' && m.walletAddress)?.qrCode || ''}
+                alt="Payment QR Fullscreen"
+                className="w-full max-h-[70vh] object-contain"
+              />
+            </div>
+          </div>
         </div>
       )}
       <MobileBottomNav />

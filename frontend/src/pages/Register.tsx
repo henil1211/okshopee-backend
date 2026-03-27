@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
-import { useAuthStore, useOtpStore } from '@/store';
+import { useAuthStore, useOtpStore, useSyncRefreshKey } from '@/store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,12 +13,21 @@ import {
 } from 'lucide-react';
 import Database from '@/db';
 import PublicFooter from '@/components/PublicFooter';
-import { isValidPhoneNumber, normalizePhoneNumber } from '@/utils/helpers';
+import {
+  getDialCodeForCountry,
+  getPasswordRequirementsText,
+  getTransactionPasswordRequirementsText,
+  isStrongPassword,
+  isValidPhoneNumberForCountry,
+  isValidTransactionPassword,
+  normalizePhoneNumber
+} from '@/utils/helpers';
 
 export default function Register() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const sponsorParam = searchParams.get('sponsor');
+  const syncKey = useSyncRefreshKey();
   
   const { register } = useAuthStore();
   const { sendOtp, verifyOtp } = useOtpStore();
@@ -52,6 +61,59 @@ export default function Register() {
   const [otpVerified, setOtpVerified] = useState(false);
   const [isSendingOtp, setIsSendingOtp] = useState(false);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
+  const [emailInUse, setEmailInUse] = useState(false);
+  const [phoneInUse, setPhoneInUse] = useState(false);
+  const [isPinChecking, setIsPinChecking] = useState(false);
+  const pinCodeRef = useRef('');
+  const pinRefreshInFlight = useRef<Promise<void> | null>(null);
+  const lastPinRefresh = useRef<{ code: string; at: number } | null>(null);
+
+  const isEmailValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+
+  // Validate sponsor when prefilled or changed
+  useEffect(() => {
+    const cleanValue = (formData.sponsorId || '').trim();
+    if (cleanValue.length === 7) {
+      const sponsor = Database.getUserByUserId(cleanValue);
+      setSponsorName(sponsor ? sponsor.fullName : '');
+    } else {
+      setSponsorName('');
+    }
+  }, [formData.sponsorId, syncKey]);
+
+  useEffect(() => {
+    const email = formData.email.trim();
+    if (!email || !isEmailValid(email)) {
+      setEmailInUse(false);
+      return;
+    }
+    const existing = Database.getUserByEmail(email);
+    setEmailInUse(!!existing);
+  }, [formData.email, syncKey]);
+
+  useEffect(() => {
+    const phone = formData.phone.trim();
+    const country = formData.country.trim();
+    if (!phone || !country) {
+      setPhoneInUse(false);
+      return;
+    }
+    if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) {
+      setPhoneInUse(false);
+      return;
+    }
+    const normalized = normalizePhoneNumber(formData.phone);
+    if (!normalized) {
+      setPhoneInUse(false);
+      return;
+    }
+    const existing = Database.getUsers().some((u) => normalizePhoneNumber(u.phone) === normalized);
+    setPhoneInUse(existing);
+  }, [formData.phone, formData.country, syncKey]);
+
+  useEffect(() => {
+    pinCodeRef.current = formData.pinCode;
+  }, [formData.pinCode]);
 
   // Check sponsor ID when entered
   const handleSponsorIdChange = (value: string) => {
@@ -70,24 +132,56 @@ export default function Register() {
     }
   };
 
+  const refreshPinsForCode = async (code: string) => {
+    const now = Date.now();
+    const last = lastPinRefresh.current;
+    if (last && last.code === code && now - last.at < 4000) {
+      return;
+    }
+    if (pinRefreshInFlight.current) {
+      await pinRefreshInFlight.current;
+      return;
+    }
+    const refresh = Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 })
+      .then(() => {})
+      .catch(() => {});
+    pinRefreshInFlight.current = refresh;
+    lastPinRefresh.current = { code, at: now };
+    await refresh;
+    pinRefreshInFlight.current = null;
+  };
+
   // Check PIN when entered
-  const handlePinChange = (value: string) => {
+  const handlePinChange = async (value: string) => {
     const cleanValue = value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 7);
     setFormData({ ...formData, pinCode: cleanValue });
     
     if (cleanValue.length === 7) {
-      const pin = Database.getPinByCode(cleanValue);
-      if (pin && pin.status === 'unused') {
-        setPinValid(true);
-        const owner = Database.getUserById(pin.ownerId);
-        setPinOwner(owner?.fullName || 'System');
-      } else {
+      const applyPinStatus = (pin: ReturnType<typeof Database.getPinByCode>) => {
+        if (pin && pin.status === 'unused') {
+          setPinValid(true);
+          const owner = Database.getUserById(pin.ownerId);
+          setPinOwner(owner?.fullName || 'System');
+          return true;
+        }
         setPinValid(false);
         setPinOwner('');
+        return false;
+      };
+
+      setIsPinChecking(true);
+      applyPinStatus(Database.getPinByCode(cleanValue));
+      await refreshPinsForCode(cleanValue);
+      if (pinCodeRef.current !== cleanValue) {
+        setIsPinChecking(false);
+        return;
       }
+      applyPinStatus(Database.getPinByCode(cleanValue));
+      setIsPinChecking(false);
     } else {
       setPinValid(false);
       setPinOwner('');
+      setIsPinChecking(false);
     }
   };
 
@@ -104,8 +198,32 @@ export default function Register() {
     resetOtpFlow();
   };
 
+  const applyDialCode = (value: string, countryName: string) => {
+    const dial = getDialCodeForCountry(countryName);
+    if (!dial) return value;
+    const dialDigits = dial.replace(/\D/g, '');
+    const digits = value.replace(/\D/g, '');
+    let localDigits = digits;
+    if (digits.startsWith(dialDigits)) {
+      localDigits = digits.slice(dialDigits.length);
+    }
+    return dial + (localDigits ? ` ${localDigits}` : '');
+  };
+
   const handlePhoneChange = (value: string) => {
-    setFormData((prev) => ({ ...prev, phone: value }));
+    setFormData((prev) => ({
+      ...prev,
+      phone: applyDialCode(value, prev.country)
+    }));
+    resetOtpFlow();
+  };
+
+  const handleCountryChange = (value: string) => {
+    setFormData((prev) => ({
+      ...prev,
+      country: value,
+      phone: applyDialCode(prev.phone, value)
+    }));
     resetOtpFlow();
   };
 
@@ -113,12 +231,20 @@ export default function Register() {
 
   const handleSendOtp = async () => {
     setError('');
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
+    if (!isEmailValid(formData.email)) {
       setError('Enter a valid email before sending OTP');
       return;
     }
-    if (!isValidPhoneNumber(formData.phone)) {
+    if (emailInUse) {
+      setError('Email is already used');
+      return;
+    }
+    if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) {
       setError('Enter a valid mobile number before sending OTP');
+      return;
+    }
+    if (phoneInUse) {
+      setError('Phone number is already used');
       return;
     }
 
@@ -157,8 +283,12 @@ export default function Register() {
   const validateStep1 = () => {
     if (!formData.fullName.trim()) return 'Full name is required';
     if (!formData.email.trim()) return 'Email is required';
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) return 'Invalid email format';
-    if (formData.sponsorId && formData.sponsorId.length !== 7) return 'Sponsor ID must be 7 digits';
+    if (!isEmailValid(formData.email)) return 'Invalid email format';
+    if (emailInUse) return 'Email is already used';
+    if (!formData.sponsorId?.trim()) return 'Sponsor ID is required';
+    if (formData.sponsorId.length !== 7) return 'Sponsor ID must be 7 digits';
+    const sponsor = Database.getUserByUserId(formData.sponsorId);
+    if (!sponsor) return 'Invalid Sponsor ID';
     return '';
   };
 
@@ -174,15 +304,17 @@ export default function Register() {
 
   const validateStep3 = () => {
     if (!formData.password) return 'Password is required';
-    if (formData.password.length < 6) return 'Password must be at least 6 characters';
+    if (!isStrongPassword(formData.password)) return getPasswordRequirementsText();
     if (formData.password !== formData.confirmPassword) return 'Passwords do not match';
     if (!formData.transactionPassword) return 'Transaction password is required';
-    if (formData.transactionPassword.length < 4) return 'Transaction password must be at least 4 characters';
+    if (!isValidTransactionPassword(formData.transactionPassword)) return getTransactionPasswordRequirementsText();
     if (formData.transactionPassword !== formData.confirmTransactionPassword) return 'Transaction passwords do not match';
     if (formData.transactionPassword === formData.password) return 'Transaction password should be different from login password';
-    if (!formData.phone.trim()) return 'Phone number is required';
-    if (!isValidPhoneNumber(formData.phone)) return 'Enter a valid mobile number (8-15 digits)';
-    if (!formData.country.trim()) return 'Country is required';
+    if (emailInUse) return 'Email is already used';
+    if (!formData.phone?.trim()) return 'Phone number is required';
+    if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) return 'Enter a valid mobile number for the selected country';
+    if (phoneInUse) return 'Phone number is already used';
+    if (!formData.country?.trim()) return 'Country is required';
     if (!otpVerified) return 'Verify OTP sent to your email before creating account';
     return '';
   };
@@ -218,6 +350,17 @@ export default function Register() {
       return;
     }
 
+    if (formData.pinCode.length === 7) {
+      setIsPinChecking(true);
+      await refreshPinsForCode(formData.pinCode);
+      const latestPin = Database.getPinByCode(formData.pinCode);
+      setIsPinChecking(false);
+      if (!latestPin || latestPin.status !== 'unused') {
+        setError('Invalid or already used PIN');
+        return;
+      }
+    }
+
     setIsLoading(true);
 
     try {
@@ -240,8 +383,9 @@ export default function Register() {
       } else {
         setError(result.message);
       }
-    } catch {
-      setError('An error occurred. Please try again.');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'An error occurred. Please try again.';
+      setError(message);
     } finally {
       setIsLoading(false);
     }
@@ -441,11 +585,14 @@ export default function Register() {
                         className="pl-10 bg-[#1f2937] border-white/10 text-white placeholder:text-white/40 focus:border-[#118bdd] focus:ring-[#118bdd]/20"
                       />
                     </div>
+                    {emailInUse && (
+                      <p className="text-sm text-red-400">Email already in use</p>
+                    )}
                   </div>
 
                   <div className="space-y-2">
                     <Label htmlFor="sponsorId" className="text-white/80">
-                      Sponsor ID <span className="text-white/40">(Optional - 7 digits)</span>
+                      Sponsor ID <span className="text-red-400 text-xs">(Required)</span>
                     </Label>
                     <div className="relative">
                       <IdCard className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
@@ -521,7 +668,13 @@ export default function Register() {
                         Valid PIN from {pinOwner}
                       </p>
                     )}
-                    {formData.pinCode.length === 7 && !pinValid && (
+                    {isPinChecking && formData.pinCode.length === 7 && (
+                      <p className="text-sm text-white/60 flex items-center gap-1">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Checking PIN...
+                      </p>
+                    )}
+                    {formData.pinCode.length === 7 && !pinValid && !isPinChecking && (
                       <p className="text-sm text-red-400">Invalid or already used PIN</p>
                     )}
                   </div>
@@ -571,6 +724,7 @@ export default function Register() {
                         {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>
                     </div>
+                    <p className="text-xs text-white/40">{getPasswordRequirementsText()}</p>
                   </div>
 
                   <div className="space-y-2">
@@ -610,6 +764,7 @@ export default function Register() {
                         {showTransactionPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                       </button>
                     </div>
+                    <p className="text-xs text-white/40">{getTransactionPasswordRequirementsText()}</p>
                   </div>
 
                   <div className="space-y-2">
@@ -628,6 +783,26 @@ export default function Register() {
                   </div>
 
                   <div className="space-y-2">
+                    <Label htmlFor="country" className="text-white/80">Country</Label>
+                    <div className="relative">
+                      <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
+                      <select
+                        id="country"
+                        value={formData.country}
+                        onChange={(e) => handleCountryChange(e.target.value)}
+                        className="w-full pl-10 pr-4 py-2.5 bg-[#1f2937] border border-white/10 rounded-md text-white focus:border-[#118bdd] focus:ring-[#118bdd]/20 appearance-none"
+                      >
+                        <option value="" className="bg-[#1f2937]">Select your country</option>
+                        {countries.map((country) => (
+                          <option key={country} value={country} className="bg-[#1f2937]">
+                            {country}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
                     <Label htmlFor="phone" className="text-white/80">Phone Number</Label>
                     <div className="relative">
                       <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
@@ -640,26 +815,9 @@ export default function Register() {
                         className="pl-10 bg-[#1f2937] border-white/10 text-white placeholder:text-white/40 focus:border-[#118bdd] focus:ring-[#118bdd]/20"
                       />
                     </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="country" className="text-white/80">Country</Label>
-                    <div className="relative">
-                      <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/40" />
-                      <select
-                        id="country"
-                        value={formData.country}
-                        onChange={(e) => setFormData({ ...formData, country: e.target.value })}
-                        className="w-full pl-10 pr-4 py-2.5 bg-[#1f2937] border border-white/10 rounded-md text-white focus:border-[#118bdd] focus:ring-[#118bdd]/20 appearance-none"
-                      >
-                        <option value="" className="bg-[#1f2937]">Select your country</option>
-                        {countries.map((country) => (
-                          <option key={country} value={country} className="bg-[#1f2937]">
-                            {country}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                    {phoneInUse && (
+                      <p className="text-sm text-red-400">Phone number already in use</p>
+                    )}
                   </div>
 
                   <div className="space-y-3 rounded-lg border border-white/10 bg-[#1f2937]/50 p-3">
