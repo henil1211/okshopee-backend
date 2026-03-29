@@ -63,6 +63,17 @@ const SMTP_USER = process.env.SMTP_USER || '';
 const SMTP_PASS = process.env.SMTP_PASS || '';
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || '';
 const STATE_BACKUP_DIR = path.join(__dirname, 'data', 'backups');
+const UPLOADS_BASE_DIR = path.join(__dirname, 'data', 'uploads');
+const ALLOWED_UPLOAD_SCOPES = new Set([
+  'marketplace-invoices',
+  'support-attachments',
+  'invoice-queries',
+  'deposit-proofs',
+  'pin-request-proofs',
+  'withdrawal-receipts',
+  'payment-methods',
+  'announcements'
+]);
 let smtpTransporter;
 
 // All known state keys (same as before — frontend sends/receives these)
@@ -159,7 +170,13 @@ async function ensureFileStorageReady() {
   }
 }
 
+async function ensureUploadsDirReady() {
+  await fs.mkdir(UPLOADS_BASE_DIR, { recursive: true });
+}
+
 async function connectStorage() {
+  await ensureUploadsDirReady();
+
   if (STORAGE_MODE === 'file') {
     await ensureFileStorageReady();
     console.log(`File storage ready: ${STATE_FILE_PATH}`);
@@ -223,6 +240,108 @@ function getHttpStatusForRequestError(error) {
   if (error instanceof SyntaxError) return 400;
   if (isMySQLConnectivityError(error)) return 503;
   return 500;
+}
+
+function getPublicRequestBaseUrl(req) {
+  const forwardedProto = req?.headers?.['x-forwarded-proto'];
+  const forwardedHost = req?.headers?.['x-forwarded-host'];
+  const proto = typeof forwardedProto === 'string' && forwardedProto.trim()
+    ? forwardedProto.split(',')[0].trim()
+    : 'http';
+  const host = typeof forwardedHost === 'string' && forwardedHost.trim()
+    ? forwardedHost.split(',')[0].trim()
+    : (req?.headers?.host || `localhost:${PORT}`);
+  return `${proto}://${host}`;
+}
+
+function getMimeTypeForExtension(extension) {
+  const ext = String(extension || '').toLowerCase().replace(/^\./, '');
+  const map = {
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    pdf: 'application/pdf'
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+function getExtensionForMimeType(mimeType) {
+  const normalized = String(mimeType || '').toLowerCase();
+  const map = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'application/pdf': 'pdf'
+  };
+  return map[normalized] || '';
+}
+
+function parseDataUrl(dataUrl) {
+  const value = String(dataUrl || '');
+  const match = value.match(/^data:([^;,]+);base64,(.+)$/);
+  if (!match) {
+    throw new Error('Invalid data URL');
+  }
+
+  const mimeType = match[1];
+  const base64 = match[2];
+  const buffer = Buffer.from(base64, 'base64');
+  if (!buffer.length) {
+    throw new Error('Uploaded file is empty');
+  }
+
+  return { mimeType, buffer };
+}
+
+function sanitizeUploadScope(scope) {
+  const normalized = String(scope || '').trim().toLowerCase();
+  if (!normalized || !ALLOWED_UPLOAD_SCOPES.has(normalized)) {
+    throw new Error('Invalid upload scope');
+  }
+  return normalized;
+}
+
+function sanitizeUploadBaseName(fileName) {
+  const raw = path.basename(String(fileName || '').trim() || 'file');
+  const withoutExtension = raw.replace(/\.[^.]+$/, '');
+  const cleaned = withoutExtension
+    .replace(/[^a-z0-9_-]+/gi, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 60);
+  return cleaned || 'file';
+}
+
+function getSafeUploadExtension(fileName, mimeType) {
+  const providedExt = path.extname(String(fileName || '')).replace(/^\./, '').toLowerCase();
+  const safeProvided = /^[a-z0-9]+$/i.test(providedExt) ? providedExt : '';
+  const mimeExt = getExtensionForMimeType(mimeType);
+  return safeProvided || mimeExt || 'bin';
+}
+
+async function saveUploadedDataUrl({ scope, fileName, dataUrl }) {
+  const safeScope = sanitizeUploadScope(scope);
+  const { mimeType, buffer } = parseDataUrl(dataUrl);
+  const safeBaseName = sanitizeUploadBaseName(fileName);
+  const extension = getSafeUploadExtension(fileName, mimeType);
+  const scopeDir = path.join(UPLOADS_BASE_DIR, safeScope);
+  await fs.mkdir(scopeDir, { recursive: true });
+
+  const storedFileName = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${safeBaseName}.${extension}`;
+  const absolutePath = path.join(scopeDir, storedFileName);
+  await fs.writeFile(absolutePath, buffer);
+
+  return {
+    relativePath: `/uploads/${encodeURIComponent(safeScope)}/${encodeURIComponent(storedFileName)}`,
+    mimeType,
+    fileName: path.basename(String(fileName || storedFileName)),
+    storedFileName,
+    sizeBytes: buffer.length
+  };
 }
 
 function cloneStateSnapshot(snapshot) {
@@ -854,6 +973,38 @@ function getRequestBody(req) {
   });
 }
 
+async function serveUploadedFile(req, res, url) {
+  const relativeUploadPath = decodeURIComponent(url.pathname.replace(/^\/uploads\//, ''));
+  if (!relativeUploadPath || relativeUploadPath.includes('\0')) {
+    sendJson(res, 400, { ok: false, error: 'Invalid upload path' });
+    return;
+  }
+
+  const normalized = path.normalize(relativeUploadPath).replace(/^(\.\.(\/|\\|$))+/, '');
+  const absolutePath = path.join(UPLOADS_BASE_DIR, normalized);
+  const uploadsRoot = `${path.resolve(UPLOADS_BASE_DIR)}${path.sep}`;
+  const resolvedPath = path.resolve(absolutePath);
+
+  if (!resolvedPath.startsWith(uploadsRoot)) {
+    sendJson(res, 403, { ok: false, error: 'Forbidden' });
+    return;
+  }
+
+  try {
+    const fileBuffer = await fs.readFile(resolvedPath);
+    const contentType = getMimeTypeForExtension(path.extname(resolvedPath));
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': fileBuffer.length,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=31536000, immutable'
+    });
+    res.end(fileBuffer);
+  } catch {
+    sendJson(res, 404, { ok: false, error: 'File not found' });
+  }
+}
+
 // ─── HTTP server ─────────────────────────────────────────────────────
 
 const server = createServer(async (req, res) => {
@@ -861,6 +1012,11 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') {
     sendJson(res, 204, {});
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname.startsWith('/uploads/')) {
+    await serveUploadedFile(req, res, url);
     return;
   }
 
@@ -959,6 +1115,31 @@ const server = createServer(async (req, res) => {
       const message = getErrorMessage(error, 'Failed to persist state');
       const status = getHttpStatusForRequestError(error);
       console.error(`[POST /api/state] ${message}`);
+      sendJson(res, status, { ok: false, error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/upload-file') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const scope = sanitizeUploadScope(parsed?.scope);
+      const dataUrl = typeof parsed?.dataUrl === 'string' ? parsed.dataUrl : '';
+      const fileName = typeof parsed?.fileName === 'string' ? parsed.fileName : 'upload';
+      const saved = await saveUploadedDataUrl({ scope, fileName, dataUrl });
+      sendJson(res, 200, {
+        ok: true,
+        filePath: saved.relativePath,
+        fileUrl: `${getPublicRequestBaseUrl(req)}${saved.relativePath}`,
+        fileName: saved.fileName,
+        mimeType: saved.mimeType,
+        sizeBytes: saved.sizeBytes
+      });
+    } catch (error) {
+      const message = getErrorMessage(error, 'Failed to upload file');
+      const status = getHttpStatusForRequestError(error);
+      console.error(`[POST /api/upload-file] ${message}`);
       sendJson(res, status, { ok: false, error: message });
     }
     return;

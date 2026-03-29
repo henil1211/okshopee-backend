@@ -7,11 +7,47 @@ import {
   Gift, Music, Camera, Gamepad2, Dumbbell, Baby, Car, Smartphone, Share2, Tag, Zap, TrendingUp,
   ArrowRight, Award, Upload, FileText, Clock, CheckCircle, XCircle, Send, type LucideIcon
 } from 'lucide-react';
-import { copyToClipboard } from '@/utils/helpers';
+import { copyToClipboard, formatAmountForCountryCurrency, getCurrencyLabelForCountry, readOptimizedUploadDataUrl } from '@/utils/helpers';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { toast } from 'sonner';
 import Database from '@/db';
 import type { MarketplaceRetailer, MarketplaceInvoice, RewardRedemption } from '@/types';
+
+const BACKEND_BASE_URL = (
+  (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || 'http://localhost:4000'
+).replace(/\/+$/, '');
+
+async function uploadMarketplaceFile(dataUrl: string, fileName: string, mimeType?: string): Promise<{
+  fileUrl: string;
+  fileName: string;
+  mimeType: string;
+}> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/upload-file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      scope: 'marketplace-invoices',
+      fileName,
+      mimeType,
+      dataUrl
+    })
+  });
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false || typeof payload?.fileUrl !== 'string') {
+    const message =
+      typeof payload?.error === 'string'
+        ? payload.error
+        : `Failed to upload invoice file (HTTP ${response.status})`;
+    throw new Error(message);
+  }
+
+  return {
+    fileUrl: payload.fileUrl,
+    fileName: typeof payload?.fileName === 'string' ? payload.fileName : fileName,
+    mimeType: typeof payload?.mimeType === 'string' ? payload.mimeType : (mimeType || '')
+  };
+}
 
 // Lucide icon map for dynamic rendering
 const ICON_MAP: Record<string, LucideIcon> = {
@@ -47,6 +83,10 @@ export default function Ecommerce() {
   const location = useLocation();
   const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
   const displayUser = impersonatedUser || user;
+  const userCurrencyLabel = useMemo(
+    () => getCurrencyLabelForCountry(displayUser?.country) || 'Your Currency',
+    [displayUser?.country]
+  );
 
   const [activeTab, setActiveTab] = useState<TabId>('top-retailers');
   const [searchTerm, setSearchTerm] = useState('');
@@ -71,13 +111,16 @@ export default function Ecommerce() {
   );
   const [showInvoiceForm, setShowInvoiceForm] = useState(false);
   const [invoiceRetailerId, setInvoiceRetailerId] = useState('');
+  const [invoiceOrderId, setInvoiceOrderId] = useState('');
   const [invoiceAmount, setInvoiceAmount] = useState('');
   const [invoiceImage, setInvoiceImage] = useState('');
   const [invoiceFileName, setInvoiceFileName] = useState('');
+  const [invoiceFileMimeType, setInvoiceFileMimeType] = useState('');
   const [showRedeemForm, setShowRedeemForm] = useState(false);
   const [redeemPoints, setRedeemPoints] = useState('');
   const [marketplaceEnabled, setMarketplaceEnabled] = useState(() => Database.getSettings().marketplaceEnabled !== false);
   const [invoicePreview, setInvoicePreview] = useState<{ url: string; mimeType: string } | null>(null);
+  const [pendingInfoInvoice, setPendingInfoInvoice] = useState<MarketplaceInvoice | null>(null);
   const [showFullInstructions, setShowFullInstructions] = useState(false);
 
   // Marketplace data state
@@ -148,6 +191,14 @@ export default function Ecommerce() {
     const flag = search.get('preview');
     return flag === 'admin' || flag === '1' || flag === 'true';
   }, [location.search, displayUser?.isAdmin]);
+
+  useEffect(() => {
+    const search = new URLSearchParams(location.search);
+    const tab = search.get('tab');
+    if (tab === 'my-rewards') {
+      setActiveTab('my-rewards');
+    }
+  }, [location.search]);
 
   const isMarketplaceOpen = marketplaceEnabled || adminPreview;
 
@@ -285,7 +336,7 @@ export default function Ecommerce() {
     }
   }, [activeTab, reloadRewardsData]);
 
-  const handleInvoiceImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleInvoiceImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'application/pdf'];
@@ -297,54 +348,128 @@ export default function Ecommerce() {
       toast.error('File size must be less than 5MB');
       return;
     }
-    setInvoiceFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => {
-      setInvoiceImage(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      setInvoiceFileName(file.name);
+      setInvoiceFileMimeType(file.type || '');
+      const dataUrl = await readOptimizedUploadDataUrl(file, {
+        maxDimension: 1800,
+        targetBytes: 650 * 1024,
+        quality: 0.88
+      });
+      setInvoiceImage(dataUrl);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to process invoice file');
+    }
   };
 
-  const handleSubmitInvoice = () => {
+  const handleSubmitInvoice = async () => {
     if (!displayUser?.userId) return;
     if (!invoiceRetailerId) { toast.error('Please select a retailer'); return; }
+    if (!invoiceOrderId.trim()) { toast.error('Please enter order ID'); return; }
     if (!invoiceAmount || parseFloat(invoiceAmount) <= 0) { toast.error('Please enter a valid amount'); return; }
     if (!invoiceImage) { toast.error('Please upload an invoice image'); return; }
+    if (!invoiceFileName) { toast.error('Please select an invoice file'); return; }
     const retailer = allRetailers.find(r => r.id === invoiceRetailerId);
-    Database.createMarketplaceInvoice({
-      userId: displayUser.userId,
-      retailerId: invoiceRetailerId,
-      retailerName: retailer?.name || 'Unknown',
-      amount: parseFloat(invoiceAmount),
-      invoiceImage,
-      status: 'pending',
-      rewardPoints: 0,
-      adminNotes: '',
-      createdAt: new Date().toISOString(),
-      processedAt: null,
-      processedBy: null,
-    });
-    toast.success('Invoice submitted for review');
-    setShowInvoiceForm(false);
-    setInvoiceRetailerId('');
-    setInvoiceAmount('');
-    setInvoiceImage('');
-    setInvoiceFileName('');
-    reloadRewardsData();
+    try {
+      const existingInvoices = Database.getMarketplaceInvoices();
+      const legacyInvoices = existingInvoices.filter((inv) => typeof inv.invoiceImage === 'string' && inv.invoiceImage.startsWith('data:'));
+
+      if (legacyInvoices.length > 0) {
+        toast.info(`Optimizing ${legacyInvoices.length} older invoice file${legacyInvoices.length > 1 ? 's' : ''} for faster sync...`);
+        const migratedInvoices = [...existingInvoices];
+        for (let index = 0; index < migratedInvoices.length; index += 1) {
+          const currentInvoice = migratedInvoices[index];
+          if (!currentInvoice?.invoiceImage?.startsWith('data:')) continue;
+          const legacyUpload = await uploadMarketplaceFile(
+            currentInvoice.invoiceImage,
+            currentInvoice.invoiceImageFileName || `${currentInvoice.retailerName || 'invoice'}-${currentInvoice.orderId || currentInvoice.id}`,
+            currentInvoice.invoiceImageMimeType || undefined
+          );
+          migratedInvoices[index] = {
+            ...currentInvoice,
+            invoiceImage: legacyUpload.fileUrl,
+            invoiceImageMimeType: legacyUpload.mimeType || currentInvoice.invoiceImageMimeType || null,
+            invoiceImageFileName: legacyUpload.fileName || currentInvoice.invoiceImageFileName || null
+          };
+        }
+
+        await Database.commitCriticalAction(() => {
+          Database.saveMarketplaceInvoices(migratedInvoices);
+          return migratedInvoices.length;
+        }, {
+          full: false,
+          force: true,
+          timeoutMs: 90000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        });
+      }
+
+      const uploadedInvoiceFile = await uploadMarketplaceFile(invoiceImage, invoiceFileName, invoiceFileMimeType);
+      await Database.runWithLocalStateTransaction(() => Database.createMarketplaceInvoice({
+        userId: displayUser.userId,
+        retailerId: invoiceRetailerId,
+        retailerName: retailer?.name || 'Unknown',
+        orderId: invoiceOrderId.trim(),
+        amount: parseFloat(invoiceAmount),
+        invoiceImage: uploadedInvoiceFile.fileUrl,
+        invoiceImageMimeType: uploadedInvoiceFile.mimeType || invoiceFileMimeType || null,
+        invoiceImageFileName: uploadedInvoiceFile.fileName || invoiceFileName,
+        status: 'pending',
+        rewardPoints: 0,
+        adminNotes: '',
+        createdAt: new Date().toISOString(),
+        processedAt: null,
+        processedBy: null,
+      }), {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 90000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      });
+      toast.success('Invoice submitted for review');
+      setShowInvoiceForm(false);
+      setInvoiceRetailerId('');
+      setInvoiceOrderId('');
+      setInvoiceAmount('');
+      setInvoiceImage('');
+      setInvoiceFileName('');
+      setInvoiceFileMimeType('');
+      reloadRewardsData();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to submit invoice');
+    }
   };
 
-  const handleSubmitRedemption = () => {
+  const handleSubmitRedemption = async () => {
     if (!displayUser?.userId) return;
     const pts = parseInt(redeemPoints);
     if (!pts || pts <= 0) { toast.error('Enter a valid number of points'); return; }
     const currentRP = userWallet?.rewardPoints || 0;
     if (pts > currentRP) { toast.error(`You only have ${currentRP} reward points`); return; }
-    const result = Database.createRedemptionRequest(displayUser.userId, pts);
-    if (!result) { toast.error('Failed to create redemption request'); return; }
-    toast.success(`Redemption request for ${pts} RP ($${(pts * 0.01).toFixed(2)} USDT) submitted`);
-    setShowRedeemForm(false);
-    setRedeemPoints('');
-    reloadRewardsData();
+    try {
+      const result = await Database.runWithLocalStateTransaction(() => Database.createRedemptionRequest(displayUser.userId, pts), {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 60000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      });
+      if (!result) { toast.error('Failed to create redemption request'); return; }
+      toast.success(`Redemption request for ${pts} RP ($${(pts * 0.01).toFixed(2)} USDT) submitted`);
+      setShowRedeemForm(false);
+      setRedeemPoints('');
+      reloadRewardsData();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to submit redemption request');
+    }
   };
 
   const closeInvoicePreview = () => {
@@ -1034,12 +1159,22 @@ export default function Ecommerce() {
                     </select>
                   </div>
                   <div>
-                    <label className="text-white/50 text-xs font-medium block mb-1.5">Purchase Amount ($)</label>
+                    <label className="text-white/50 text-xs font-medium block mb-1.5">Purchase Amount ({userCurrencyLabel})</label>
                     <input
                       type="number"
                       value={invoiceAmount}
                       onChange={e => setInvoiceAmount(e.target.value)}
-                      placeholder="Enter purchase amount"
+                      placeholder={`Enter purchase amount in ${userCurrencyLabel}`}
+                      className="w-full h-11 rounded-xl px-4 text-sm bg-white/[0.06] border border-white/[0.08] text-white placeholder:text-white/30 outline-none focus:border-[#118bdd]/50"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-white/50 text-xs font-medium block mb-1.5">Order ID</label>
+                    <input
+                      type="text"
+                      value={invoiceOrderId}
+                      onChange={e => setInvoiceOrderId(e.target.value)}
+                      placeholder="Enter order ID"
                       className="w-full h-11 rounded-xl px-4 text-sm bg-white/[0.06] border border-white/[0.08] text-white placeholder:text-white/30 outline-none focus:border-[#118bdd]/50"
                     />
                   </div>
@@ -1062,7 +1197,7 @@ export default function Ecommerce() {
                     <button onClick={handleSubmitInvoice} className="w-full min-w-0 h-11 rounded-xl px-2 sm:px-4 text-[13px] sm:text-sm font-bold text-white inline-flex items-center justify-center gap-1.5" style={{ background: 'linear-gradient(135deg, #118bdd, #6366f1)' }}>
                       Submit Invoice
                     </button>
-                    <button onClick={() => { setShowInvoiceForm(false); setInvoiceRetailerId(''); setInvoiceAmount(''); setInvoiceImage(''); setInvoiceFileName(''); }} className="w-full min-w-0 h-11 px-2 sm:px-4 rounded-xl text-[13px] sm:text-sm font-medium text-white/60 bg-white/[0.04] border border-white/[0.08] hover:text-white">
+                    <button onClick={() => { setShowInvoiceForm(false); setInvoiceRetailerId(''); setInvoiceOrderId(''); setInvoiceAmount(''); setInvoiceImage(''); setInvoiceFileName(''); }} className="w-full min-w-0 h-11 px-2 sm:px-4 rounded-xl text-[13px] sm:text-sm font-medium text-white/60 bg-white/[0.04] border border-white/[0.08] hover:text-white">
                       Cancel
                     </button>
                   </div>
@@ -1096,17 +1231,40 @@ export default function Ecommerce() {
                           }`}>{inv.status}</span>
                         </div>
                         <p className="text-white/30 text-xs mt-0.5">
-                          ${inv.amount.toFixed(2)} - {new Date(inv.createdAt).toLocaleDateString()}
+                          {formatAmountForCountryCurrency(inv.amount, displayUser?.country)} - {new Date(inv.createdAt).toLocaleDateString()}
                           {inv.status === 'approved' && ` - +${inv.rewardPoints} RP`}
                         </p>
-                        <button
-                          type="button"
-                          onClick={() => void handleViewInvoice(inv.invoiceImage)}
-                          className="mt-2 text-[11px] font-semibold text-[#118bdd] hover:text-blue-300 inline-flex items-center gap-1 transition-colors"
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                          View Invoice
-                        </button>
+                        {inv.orderId && (
+                          <p className="text-white/35 text-[11px] mt-1">Order ID: {inv.orderId}</p>
+                        )}
+                        <div className="mt-3 space-y-2.5">
+                          <button
+                            type="button"
+                            onClick={() => void handleViewInvoice(inv.invoiceImage)}
+                            className="text-[11px] font-semibold text-[#118bdd] hover:text-blue-300 inline-flex items-center gap-1 transition-colors"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            View Invoice
+                          </button>
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            {inv.status === 'pending' && (
+                              <button
+                                type="button"
+                                onClick={() => setPendingInfoInvoice(inv)}
+                                className="min-h-9 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-1.5 text-[11px] font-semibold text-amber-300 transition-colors hover:bg-amber-400/15"
+                              >
+                                Why Pending?
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => navigate('/invoice-query', { state: { invoice: inv } })}
+                              className="min-h-9 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-3 py-1.5 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-400/15"
+                            >
+                              Raise Query
+                            </button>
+                          </div>
+                        </div>
                         {inv.status === 'rejected' && inv.adminNotes && (
                           <p className="text-red-400/60 text-[10px] mt-0.5">Reason: {inv.adminNotes}</p>
                         )}
@@ -1207,6 +1365,56 @@ export default function Ecommerce() {
               ) : (
                 <iframe src={invoicePreview.url} title="Invoice preview" className="w-full h-full bg-white" />
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {pendingInfoInvoice && (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center p-4">
+          <button
+            type="button"
+            onClick={() => setPendingInfoInvoice(null)}
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            aria-label="Close pending information"
+          />
+          <div
+            className="relative w-full max-w-lg overflow-hidden rounded-[28px] text-white shadow-2xl"
+            style={{ background: 'linear-gradient(180deg, #111827 0%, #0d1117 100%)', border: '1px solid rgba(255,255,255,0.08)' }}
+          >
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(17,139,221,0.18),transparent_32%),radial-gradient(circle_at_top_left,rgba(245,158,11,0.12),transparent_26%)]" />
+            <button
+              type="button"
+              onClick={() => setPendingInfoInvoice(null)}
+              className="absolute right-4 top-4 z-10 inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/5 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+              aria-label="Close pending information"
+            >
+              <XCircle className="h-5 w-5" />
+            </button>
+            <div className="relative px-6 pb-8 pt-7 sm:px-8">
+              <div className="flex items-center gap-3 pr-12">
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-amber-400/20 bg-amber-400/10 text-amber-300">
+                  <Clock className="h-5 w-5" />
+                </div>
+                <div className="flex-1">
+                  <p className="text-lg font-bold uppercase tracking-tight text-white">
+                    {pendingInfoInvoice.retailerName}
+                  </p>
+                  <p className="mt-1 text-xs font-medium uppercase tracking-[0.22em] text-amber-300/80">
+                    Pending Invoice
+                  </p>
+                </div>
+              </div>
+              <div className="mt-5 border-b border-dashed border-white/10" />
+              <div className="mt-6 rounded-2xl border border-white/8 bg-white/[0.03] p-5 sm:p-6">
+                <div className="space-y-4 text-[15px] leading-8 text-white/75 sm:text-base">
+                <p>
+                  Your profit has been tracked and will be processed by the brand after the return or cancellation period.
+                </p>
+                <p>
+                  If approved, it will be confirmed. If the order is returned, cancelled, or does not meet the terms and conditions, it may be cancelled.
+                </p>
+                </div>
+              </div>
             </div>
           </div>
         </div>

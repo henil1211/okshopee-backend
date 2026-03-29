@@ -78,10 +78,15 @@ export default function ForgotPassword() {
       return;
     }
 
-    Database.updateUser(user.id, { password: newPassword });
-    setIsResetting(false);
-    toast.success('Password updated successfully');
-    navigate('/login');
+    try {
+      await Database.commitCriticalAction(() => Database.updateUser(user.id, { password: newPassword }));
+      setIsResetting(false);
+      toast.success('Password updated successfully');
+      navigate('/login');
+    } catch (error) {
+      setIsResetting(false);
+      setError(error instanceof Error ? error.message : 'Failed to update password');
+    }
   };
 
   return (

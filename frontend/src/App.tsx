@@ -33,6 +33,11 @@ import Disclaimer from '@/pages/Disclaimer';
 import Referrals from '@/pages/Referrals';
 import RefundPolicy from '@/pages/RefundPolicy';
 import DummyMail from '@/pages/DummyMail';
+import InvoiceQuery from '@/pages/InvoiceQuery';
+import InvoiceProfitTrackedIncorrectly from '@/pages/InvoiceProfitTrackedIncorrectly';
+import InvoiceWhyPending from '@/pages/InvoiceWhyPending';
+import InvoiceHowToWithdrawProfit from '@/pages/InvoiceHowToWithdrawProfit';
+import InvoiceDifferentQuery from '@/pages/InvoiceDifferentQuery';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -113,6 +118,11 @@ function App() {
         <Route path="/referrals" element={<Referrals />} />
         <Route path="/create-id" element={<CreateId />} />
         <Route path="/e-commerce" element={<Ecommerce />} />
+        <Route path="/invoice-query" element={<InvoiceQuery />} />
+        <Route path="/invoice-query/profit-tracked-incorrectly" element={<InvoiceProfitTrackedIncorrectly />} />
+        <Route path="/invoice-query/why-profit-pending" element={<InvoiceWhyPending />} />
+        <Route path="/invoice-query/how-to-withdraw-profit" element={<InvoiceHowToWithdrawProfit />} />
+        <Route path="/invoice-query/different-query" element={<InvoiceDifferentQuery />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/about-us" element={<AboutUs />} />
         <Route path="/contact-us" element={<ContactUs />} />

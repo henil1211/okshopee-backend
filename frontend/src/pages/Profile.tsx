@@ -184,19 +184,24 @@ export default function Profile() {
     }
 
     setIsSaving(true);
-    await updateUser({
-      email: finalEmail,
-      phone: normalizePhoneNumber(finalPhone),
-      usdtAddress: finalUsdt,
-      ...(hasContactChanges ? { lastActions: newLastActions } : {})
-    });
-    setIsSaving(false);
+    try {
+      await updateUser({
+        email: finalEmail,
+        phone: normalizePhoneNumber(finalPhone),
+        usdtAddress: finalUsdt,
+        ...(hasContactChanges ? { lastActions: newLastActions } : {})
+      });
 
-    setContactData(prev => ({ ...prev, newEmail: '', newPhone: '', newUsdtAddress: '', transactionPassword: '', otp: '' }));
-    setShowChangeEmail(false);
-    setShowChangePhone(false);
-    setShowChangeUsdt(false);
-    toast.success('Profile contact details updated');
+      setContactData(prev => ({ ...prev, newEmail: '', newPhone: '', newUsdtAddress: '', transactionPassword: '', otp: '' }));
+      setShowChangeEmail(false);
+      setShowChangePhone(false);
+      setShowChangeUsdt(false);
+      toast.success('Profile contact details updated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update profile contact details');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleUpdatePassword = async () => {
@@ -206,17 +211,15 @@ export default function Profile() {
         toast.error('Current password is incorrect');
         return;
       }
-    } else {
-      // Forgot password mode: require OTP
-      if (!passwordData.otp) {
-        toast.error('OTP is required');
-        return;
-      }
-      const otpValid = await verifyOtp(displayUser.id, passwordData.otp, 'profile_update');
-      if (!otpValid) {
-        toast.error('Invalid or expired OTP');
-        return;
-      }
+    }
+    if (!passwordData.otp) {
+      toast.error('OTP is required');
+      return;
+    }
+    const otpValid = await verifyOtp(displayUser.id, passwordData.otp, 'profile_update');
+    if (!otpValid) {
+      toast.error('Invalid or expired OTP');
+      return;
     }
     if (!isStrongPassword(passwordData.newPassword)) {
       toast.error(getPasswordRequirementsText());
@@ -232,20 +235,25 @@ export default function Profile() {
     }
 
     setIsSaving(true);
-    await updateUser({
-      password: passwordData.newPassword,
-      lastActions: { ...(displayUser.lastActions || {}), loginPassword: new Date().toISOString() }
-    });
-    setIsSaving(false);
+    try {
+      await updateUser({
+        password: passwordData.newPassword,
+        lastActions: { ...(displayUser.lastActions || {}), loginPassword: new Date().toISOString() }
+      });
 
-    setPasswordData({
-      currentPassword: '',
-      newPassword: '',
-      confirmPassword: '',
-      otp: ''
-    });
-    setForgotLoginPassword(false);
-    toast.success('Login password updated');
+      setPasswordData({
+        currentPassword: '',
+        newPassword: '',
+        confirmPassword: '',
+        otp: ''
+      });
+      setForgotLoginPassword(false);
+      toast.success('Login password updated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update login password');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleUpdateTransactionPassword = async () => {
@@ -255,17 +263,15 @@ export default function Profile() {
         toast.error('Current transaction password is incorrect');
         return;
       }
-    } else {
-      // Forgot password mode: require OTP
-      if (!txPasswordData.otp) {
-        toast.error('OTP is required');
-        return;
-      }
-      const otpValid = await verifyOtp(displayUser.id, txPasswordData.otp, 'profile_update');
-      if (!otpValid) {
-        toast.error('Invalid or expired OTP');
-        return;
-      }
+    }
+    if (!txPasswordData.otp) {
+      toast.error('OTP is required');
+      return;
+    }
+    const otpValid = await verifyOtp(displayUser.id, txPasswordData.otp, 'profile_update');
+    if (!otpValid) {
+      toast.error('Invalid or expired OTP');
+      return;
     }
     if (!isValidTransactionPassword(txPasswordData.newTxPassword)) {
       toast.error(getTransactionPasswordRequirementsText());
@@ -281,20 +287,25 @@ export default function Profile() {
     }
 
     setIsSaving(true);
-    await updateUser({
-      transactionPassword: txPasswordData.newTxPassword,
-      lastActions: { ...(displayUser.lastActions || {}), transactionPassword: new Date().toISOString() }
-    });
-    setIsSaving(false);
+    try {
+      await updateUser({
+        transactionPassword: txPasswordData.newTxPassword,
+        lastActions: { ...(displayUser.lastActions || {}), transactionPassword: new Date().toISOString() }
+      });
 
-    setTxPasswordData({
-      currentTxPassword: '',
-      newTxPassword: '',
-      confirmTxPassword: '',
-      otp: ''
-    });
-    setForgotTxPassword(false);
-    toast.success('Transaction password updated');
+      setTxPasswordData({
+        currentTxPassword: '',
+        newTxPassword: '',
+        confirmTxPassword: '',
+        otp: ''
+      });
+      setForgotTxPassword(false);
+      toast.success('Transaction password updated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update transaction password');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   if (!displayUser) return null;
@@ -541,11 +552,13 @@ export default function Profile() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            {forgotLoginPassword && (
-              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
-                <p className="text-sm text-amber-400">Enter your new password and verify with OTP sent to your registered email.</p>
-              </div>
-            )}
+            <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
+              <p className="text-sm text-amber-400">
+                {forgotLoginPassword
+                  ? 'Enter your new password and verify with OTP sent to your registered email.'
+                  : 'Enter your current password, new password, and verify with OTP sent to your registered email.'}
+              </p>
+            </div>
             <div className={`grid grid-cols-1 ${forgotLoginPassword ? 'md:grid-cols-2' : 'md:grid-cols-3'} gap-4`}>
               {!forgotLoginPassword && (
                 <div className="relative">
@@ -587,26 +600,24 @@ export default function Profile() {
               </div>
             </div>
             <p className="text-xs text-white/40">{getPasswordRequirementsText()}</p>
-            {forgotLoginPassword && (
-              <div className="flex flex-col sm:flex-row gap-2">
-                <Input
-                  value={passwordData.otp}
-                  onChange={(e) => setPasswordData({ ...passwordData, otp: e.target.value.replace(/\D/g, '').slice(0, 6) })}
-                  maxLength={6}
-                  placeholder="Email OTP"
-                  className="bg-[#1f2937] border-white/10 text-white"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => handleSendOtp('password')}
-                  disabled={sendingOtpFor === 'password'}
-                  className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
-                >
-                  {sendingOtpFor === 'password' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send OTP'}
-                </Button>
-              </div>
-            )}
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Input
+                value={passwordData.otp}
+                onChange={(e) => setPasswordData({ ...passwordData, otp: e.target.value.replace(/\D/g, '').slice(0, 6) })}
+                maxLength={6}
+                placeholder="Email OTP"
+                className="bg-[#1f2937] border-white/10 text-white"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleSendOtp('password')}
+                disabled={sendingOtpFor === 'password'}
+                className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
+              >
+                {sendingOtpFor === 'password' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send OTP'}
+              </Button>
+            </div>
             <div className="space-y-1">
               <Button onClick={handleUpdatePassword} disabled={isSaving} className="btn-primary w-full sm:w-auto">
                 Update Login Password
@@ -633,11 +644,13 @@ export default function Profile() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            {forgotTxPassword && (
-              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
-                <p className="text-sm text-amber-400">Enter your new transaction password and verify with OTP sent to your registered email.</p>
-              </div>
-            )}
+            <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
+              <p className="text-sm text-amber-400">
+                {forgotTxPassword
+                  ? 'Enter your new transaction password and verify with OTP sent to your registered email.'
+                  : 'Enter your current transaction password, new password, and verify with OTP sent to your registered email.'}
+              </p>
+            </div>
             <div className={`grid grid-cols-1 ${forgotTxPassword ? 'md:grid-cols-2' : 'md:grid-cols-3'} gap-4`}>
               {!forgotTxPassword && (
                 <div className="relative">
@@ -679,26 +692,24 @@ export default function Profile() {
               </div>
             </div>
             <p className="text-xs text-white/40">{getTransactionPasswordRequirementsText()}</p>
-            {forgotTxPassword && (
-              <div className="flex flex-col sm:flex-row gap-2">
-                <Input
-                  value={txPasswordData.otp}
-                  onChange={(e) => setTxPasswordData({ ...txPasswordData, otp: e.target.value.replace(/\D/g, '').slice(0, 6) })}
-                  maxLength={6}
-                  placeholder="Email OTP"
-                  className="bg-[#1f2937] border-white/10 text-white"
-                />
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => handleSendOtp('tx')}
-                  disabled={sendingOtpFor === 'tx'}
-                  className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
-                >
-                  {sendingOtpFor === 'tx' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send OTP'}
-                </Button>
-              </div>
-            )}
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Input
+                value={txPasswordData.otp}
+                onChange={(e) => setTxPasswordData({ ...txPasswordData, otp: e.target.value.replace(/\D/g, '').slice(0, 6) })}
+                maxLength={6}
+                placeholder="Email OTP"
+                className="bg-[#1f2937] border-white/10 text-white"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleSendOtp('tx')}
+                disabled={sendingOtpFor === 'tx'}
+                className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
+              >
+                {sendingOtpFor === 'tx' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send OTP'}
+              </Button>
+            </div>
             <div className="space-y-1">
               <Button onClick={handleUpdateTransactionPassword} disabled={isSaving} className="btn-primary w-full sm:w-auto">
                 <Key className="w-4 h-4 mr-2" />

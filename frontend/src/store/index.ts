@@ -522,7 +522,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const directIncome = 5;
         const adminFee = 1;
 
-        // Direct sponsor income
+        // Referral income
         if (sponsor) {
           const sponsorWallet = Database.getWallet(sponsor.id);
           if (sponsorWallet) {
@@ -538,7 +538,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               amount: directIncome,
               fromUserId: createdUser.id,
               status: 'completed',
-              description: `Direct sponsor income from ${createdUser.fullName} (${createdUser.userId})`,
+              description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`,
               createdAt: new Date().toISOString(),
               completedAt: new Date().toISOString()
             });
@@ -546,7 +546,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             Database.deductPendingSystemFee(sponsor.id);
           }
         } else {
-          Database.addToSafetyPool(directIncome, createdUser.id, 'No sponsor - direct income');
+          Database.addToSafetyPool(directIncome, createdUser.id, 'No sponsor - referral income');
         }
 
         // Admin fee to safety pool
@@ -630,7 +630,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const targetUser = impersonatedUser || user;
 
     if (targetUser) {
-      const updatedUser = Database.updateUser(targetUser.id, updates);
+      const updatedUser = await Database.commitCriticalAction(() => Database.updateUser(targetUser.id, updates));
       if (updatedUser) {
         if (impersonatedUser) {
           set({ impersonatedUser: updatedUser });
@@ -638,8 +638,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           Database.setCurrentUser(updatedUser);
           set({ user: updatedUser });
         }
-        // Sync to backend and wait for it
-        await Database.syncNow();
       }
     }
   },
@@ -2001,12 +1999,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
               amount: directIncome,
               fromUserId: newUser.id,
               status: 'completed',
-              description: `Direct sponsor income from ${newUser.fullName} (${newUser.userId})`,
+              description: `Referral income from ${newUser.fullName} (${newUser.userId})`,
               createdAt: new Date().toISOString(),
               completedAt: new Date().toISOString()
             });
           } else {
-            Database.addToSafetyPool(directIncome, newUser.id, 'No sponsor - direct income');
+            Database.addToSafetyPool(directIncome, newUser.id, 'No sponsor - referral income');
           }
 
           Database.addToSafetyPool(adminFee, newUser.id, 'Admin fee');

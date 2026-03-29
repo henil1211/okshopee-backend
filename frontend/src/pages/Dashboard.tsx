@@ -11,7 +11,7 @@ import {
   DollarSign, UserPlus, BarChart3, PlusCircle, LogOut, Shield,
   Ticket, Award, UserCog, IdCard, PhoneCall, ShoppingBag, MessageCircle, Share2, X
 } from 'lucide-react';
-import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel, calculateTimeRemainingWithDays } from '@/utils/helpers';
+import { formatCurrency, formatNumber, getInitials, generateAvatarColor, truncateText, getTransactionTypeLabel, calculateTimeRemainingWithDays, getVisibleTransactionDescription } from '@/utils/helpers';
 import { helpDistributionTable } from '@/db';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogClose } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -79,9 +79,6 @@ export default function Dashboard() {
     if (!activeUser) return null;
     return Database.getUserByUserId(activeUser.userId) || Database.getUserById(activeUser.id) || activeUser;
   }, [impersonatedUser, user]);
-  const getVisibleTransactionDescription = (description: string | undefined) =>
-    String(description || '').replace(/\s*\[Redemption:[^\]]+\]\s*/g, '').trim();
-
   useEffect(() => {
     if (!isAuthenticated) {
       navigate('/login');
@@ -919,7 +916,7 @@ export default function Dashboard() {
 
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm text-slate-600 dark:text-white/60">Direct Referrals</span>
+                  <span className="text-sm text-slate-600 dark:text-white/60">My Referrals</span>
                   <div className="flex items-center gap-3">
                     <span className="text-sm font-medium text-slate-900 dark:text-white">{effectiveDirectCount}</span>
                     <Button
@@ -984,7 +981,7 @@ export default function Dashboard() {
                         </div>
                         <div>
                           <p className="text-sm font-medium text-slate-900 dark:text-white">
-                            {getTransactionTypeLabel(tx.type)}
+                            {getTransactionTypeLabel(tx.type, tx.description)}
                           </p>
                           <p className="text-xs text-slate-500 dark:text-white/50 truncate">{truncateText(getVisibleTransactionDescription(tx.description), 30)}</p>
                         </div>
@@ -1234,9 +1231,9 @@ export default function Dashboard() {
           onOpenAutoFocus={(event) => event.preventDefault()}
         >
           <DialogHeader>
-            <DialogTitle className="text-white">Direct Referrals</DialogTitle>
+            <DialogTitle className="text-white">My Referrals</DialogTitle>
             <DialogDescription className="text-white/60">
-              Total direct referrals: {directReferralUsers.length}
+              Total referrals: {directReferralUsers.length}
             </DialogDescription>
           </DialogHeader>
 
@@ -1359,7 +1356,7 @@ export default function Dashboard() {
 
               <div className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-2">
                 <p>
-                  The company first calculates the <span className="font-semibold text-white">total monthly generated system fee</span>.
+                  The system first calculates the <span className="font-semibold text-white">total monthly generated system fee</span>.
                 </p>
                 <p>
                   Then <span className="font-semibold text-white">{royaltyExplanation.percent}%</span> of that monthly total becomes the

@@ -341,7 +341,7 @@ class Database {
   private static readonly STARTUP_DEFERRED_SYNC_BATCHES = [
     [DB_KEYS.MATRIX],
     [DB_KEYS.TRANSACTIONS, DB_KEYS.SAFETY_POOL, DB_KEYS.GHOST_HELP_REPAIR_LOG],
-    [DB_KEYS.NOTIFICATIONS, DB_KEYS.ANNOUNCEMENTS],
+    [DB_KEYS.NOTIFICATIONS, DB_KEYS.ANNOUNCEMENTS, DB_KEYS.SUPPORT_TICKETS],
     [DB_KEYS.MARKETPLACE_CATEGORIES, DB_KEYS.MARKETPLACE_RETAILERS, DB_KEYS.MARKETPLACE_BANNERS, DB_KEYS.MARKETPLACE_DEALS],
     [DB_KEYS.MARKETPLACE_INVOICES, DB_KEYS.MARKETPLACE_REDEMPTIONS]
   ] as const;
@@ -350,7 +350,7 @@ class Database {
     [DB_KEYS.WALLETS],
     [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL],
     [DB_KEYS.TRANSACTIONS, DB_KEYS.GHOST_HELP_REPAIR_LOG],
-    [DB_KEYS.NOTIFICATIONS, DB_KEYS.ANNOUNCEMENTS],
+    [DB_KEYS.NOTIFICATIONS, DB_KEYS.ANNOUNCEMENTS, DB_KEYS.SUPPORT_TICKETS],
     [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS, DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.PAYMENT_METHODS, DB_KEYS.PAYMENTS],
     [DB_KEYS.MATRIX, DB_KEYS.HELP_TRACKERS, DB_KEYS.MATRIX_PENDING_CONTRIBUTIONS, DB_KEYS.GRACE_PERIODS, DB_KEYS.RE_ENTRIES],
     [DB_KEYS.MARKETPLACE_CATEGORIES, DB_KEYS.MARKETPLACE_RETAILERS, DB_KEYS.MARKETPLACE_BANNERS, DB_KEYS.MARKETPLACE_DEALS],
@@ -1084,6 +1084,30 @@ class Database {
       this.emitRemoteSyncStatus();
       throw error;
     }
+  }
+
+  static async commitCriticalAction<T>(
+    work: () => Promise<T> | T,
+    syncOptions?: {
+      destructive?: boolean;
+      full?: boolean;
+      force?: boolean;
+      timeoutMs?: number;
+      maxAttempts?: number;
+      retryDelayMs?: number;
+    }
+  ): Promise<T> {
+    return this.runWithLocalStateTransaction(work, {
+      syncOnCommit: true,
+      syncOptions: {
+        full: false,
+        force: true,
+        timeoutMs: 60000,
+        maxAttempts: 3,
+        retryDelayMs: 1500,
+        ...syncOptions
+      }
+    });
   }
 
   static async hydrateFromServer(options?: {
@@ -3300,7 +3324,7 @@ class Database {
               amount: directIncome,
               fromUserId: user.id,
               status: 'completed',
-              description: `Direct sponsor income from ${user.fullName} (${user.userId})`,
+              description: `Referral income from ${user.fullName} (${user.userId})`,
               createdAt: now,
               completedAt: now
             });
@@ -6979,7 +7003,17 @@ class Database {
             ? Array.from(this.REMOTE_SYNC_KEYS)
             : Array.from(this.remoteSyncDirtyKeys);
 
-          const heavyKeys = ['mlm_transactions', 'mlm_help_trackers', 'mlm_matrix', 'mlm_users', 'mlm_payments', 'mlm_wallets'];
+          const heavyKeys = [
+            'mlm_transactions',
+            'mlm_help_trackers',
+            'mlm_matrix',
+            'mlm_users',
+            'mlm_payments',
+            'mlm_wallets',
+            DB_KEYS.SUPPORT_TICKETS,
+            DB_KEYS.MARKETPLACE_INVOICES,
+            DB_KEYS.MARKETPLACE_REDEMPTIONS
+          ];
           const batches: string[][] = [];
 
           const others = targetKeys.filter(k => !heavyKeys.includes(k));

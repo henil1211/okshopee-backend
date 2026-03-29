@@ -54,6 +54,28 @@ export function normalizePhoneNumber(phoneInput?: string | null): string {
   return hasPlus ? `+${digitsOnly}` : digitsOnly;
 }
 
+const COUNTRY_NAME_ALIASES: Record<string, string> = {
+  usa: 'United States',
+  us: 'United States',
+  'u.s.a': 'United States',
+  'u.s': 'United States',
+  uk: 'United Kingdom',
+  'u.k': 'United Kingdom',
+  england: 'United Kingdom',
+  uae: 'UAE',
+  'united arab emirates': 'UAE',
+  'saudi arabia': 'Saudi Arabia',
+  'south korea': 'South Korea',
+  korea: 'South Korea'
+};
+
+function normalizeCountryName(countryName?: string | null): string {
+  const raw = String(countryName ?? '').trim();
+  if (!raw) return '';
+  const alias = COUNTRY_NAME_ALIASES[raw.toLowerCase()];
+  return alias || raw;
+}
+
 const COUNTRY_NAME_TO_CODE: Record<string, CountryCode> = {
   'United States': 'US',
   'United Kingdom': 'GB',
@@ -80,15 +102,171 @@ const COUNTRY_NAME_TO_CODE: Record<string, CountryCode> = {
   'Saudi Arabia': 'SA'
 };
 
+const COUNTRY_NAME_TO_CURRENCY: Record<string, string> = {
+  'United States': 'USD',
+  'United Kingdom': 'GBP',
+  'Canada': 'CAD',
+  'Australia': 'AUD',
+  'Germany': 'EUR',
+  'France': 'EUR',
+  'India': 'INR',
+  'Pakistan': 'PKR',
+  'Nigeria': 'NGN',
+  'South Africa': 'ZAR',
+  'Brazil': 'BRL',
+  'Mexico': 'MXN',
+  'China': 'CNY',
+  'Japan': 'JPY',
+  'South Korea': 'KRW',
+  'Singapore': 'SGD',
+  'Malaysia': 'MYR',
+  'Indonesia': 'IDR',
+  'Philippines': 'PHP',
+  'Thailand': 'THB',
+  'Vietnam': 'VND',
+  'UAE': 'AED',
+  'Saudi Arabia': 'SAR'
+};
+
 export function getCountryCodeFromName(countryName?: string | null): CountryCode | undefined {
-  if (!countryName) return undefined;
-  return COUNTRY_NAME_TO_CODE[countryName];
+  const normalizedCountry = normalizeCountryName(countryName);
+  if (!normalizedCountry) return undefined;
+  return COUNTRY_NAME_TO_CODE[normalizedCountry];
 }
 
 export function getDialCodeForCountry(countryName?: string | null): string | null {
   const code = getCountryCodeFromName(countryName);
   if (!code) return null;
   return `+${getCountryCallingCode(code)}`;
+}
+
+export function getCurrencyCodeForCountry(countryName?: string | null): string | null {
+  const normalizedCountry = normalizeCountryName(countryName);
+  if (!normalizedCountry) return null;
+  return COUNTRY_NAME_TO_CURRENCY[normalizedCountry] || null;
+}
+
+export function getCurrencyLabelForCountry(countryName?: string | null): string | null {
+  const currencyCode = getCurrencyCodeForCountry(countryName);
+  if (!currencyCode) return null;
+  try {
+    const currencyPart = new Intl.NumberFormat('en', {
+      style: 'currency',
+      currency: currencyCode,
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).formatToParts(1).find(part => part.type === 'currency')?.value;
+
+    if (currencyPart && currencyPart !== currencyCode) {
+      return `${currencyPart} ${currencyCode}`;
+    }
+  } catch {
+    // Ignore formatter issues and fall back to code.
+  }
+  return currencyCode;
+}
+
+export function formatAmountForCountryCurrency(amount: number, countryName?: string | null): string {
+  const currencyCode = getCurrencyCodeForCountry(countryName);
+  if (!currencyCode) return amount.toFixed(2);
+  try {
+    return new Intl.NumberFormat('en', {
+      style: 'currency',
+      currency: currencyCode,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(amount);
+  } catch {
+    return amount.toFixed(2);
+  }
+}
+
+export function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function estimateDataUrlSizeBytes(dataUrl: string): number {
+  const base64 = dataUrl.split(',')[1] || '';
+  const padding = (base64.match(/=*$/)?.[0].length || 0);
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Failed to load image'));
+    image.src = src;
+  });
+}
+
+export async function readOptimizedUploadDataUrl(
+  file: File,
+  options?: {
+    maxDimension?: number;
+    targetBytes?: number;
+    quality?: number;
+  }
+): Promise<string> {
+  const originalDataUrl = await readFileAsDataUrl(file);
+
+  if (!file.type.startsWith('image/') || file.type === 'image/svg+xml') {
+    return originalDataUrl;
+  }
+
+  const maxDimension = Math.max(600, Number(options?.maxDimension ?? 1600));
+  const targetBytes = Math.max(150 * 1024, Number(options?.targetBytes ?? 700 * 1024));
+  const startingQuality = Math.min(0.92, Math.max(0.55, Number(options?.quality ?? 0.86)));
+
+  try {
+    const image = await loadImageElement(originalDataUrl);
+    const largestSide = Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height, 1);
+    const initialScale = largestSide > maxDimension ? maxDimension / largestSide : 1;
+
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (!context) return originalDataUrl;
+
+    const qualitySteps = [startingQuality, 0.8, 0.72, 0.64, 0.58];
+    let scale = initialScale;
+    let bestDataUrl = originalDataUrl;
+    let bestSize = estimateDataUrlSizeBytes(originalDataUrl);
+
+    for (let scaleStep = 0; scaleStep < 3; scaleStep += 1) {
+      const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+      const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+      canvas.width = width;
+      canvas.height = height;
+
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+
+      for (const quality of qualitySteps) {
+        const candidate = canvas.toDataURL('image/jpeg', quality);
+        const candidateSize = estimateDataUrlSizeBytes(candidate);
+        if (candidateSize < bestSize) {
+          bestDataUrl = candidate;
+          bestSize = candidateSize;
+        }
+        if (candidateSize <= targetBytes) {
+          return candidateSize < estimateDataUrlSizeBytes(originalDataUrl) ? candidate : originalDataUrl;
+        }
+      }
+
+      scale *= 0.82;
+    }
+
+    return bestSize < estimateDataUrlSizeBytes(originalDataUrl) ? bestDataUrl : originalDataUrl;
+  } catch {
+    return originalDataUrl;
+  }
 }
 
 // Basic phone validation: allows E.164 (+XXXXXXXX) or 8-15 local/international digits
@@ -379,13 +557,25 @@ export function getTransactionTypeIcon(type: string): string {
 }
 
 // Get transaction type display label
-export function getTransactionTypeLabel(type: string): string {
+export function getTransactionTypeLabel(type: string, description?: string): string {
+  const normalizedDescription = String(description || '').toLowerCase();
+  const isInternalTransfer =
+    (type === 'income_transfer' || type === 'royalty_transfer' || type === 'p2p_transfer')
+    && (
+      normalizedDescription.includes('to your fund wallet')
+      || normalizedDescription.includes('to your income wallet')
+      || normalizedDescription.includes('credited from your income wallet transfer')
+      || normalizedDescription.includes('credited from your royalty wallet transfer')
+    );
+
+  if (isInternalTransfer) return 'Internal Transfer';
+
   const labels: Record<string, string> = {
     activation: 'Activation',
     income_transfer: 'Income Transfer',
     royalty_transfer: 'Royalty Transfer',
     pin_used: 'Activation',
-    direct_income: 'Direct Income',
+    direct_income: 'Referral Income',
     level_income: 'Level Income',
     royalty_income: 'Royalty Income',
     give_help: 'Give Help',
@@ -406,6 +596,14 @@ export function getTransactionTypeLabel(type: string): string {
     .split('_')
     .map(word => (word ? word[0].toUpperCase() + word.slice(1) : word))
     .join(' ');
+}
+
+export function getVisibleTransactionDescription(description: string | undefined): string {
+  return String(description || '')
+    .replace(/\s*\[Redemption:[^\]]+\]\s*/g, ' ')
+    .replace(/Direct sponsor income/gi, 'Referral income')
+    .replace(/No sponsor - direct income/gi, 'No sponsor - referral income')
+    .trim();
 }
 
 // Calculate matrix position

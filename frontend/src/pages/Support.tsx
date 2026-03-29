@@ -12,6 +12,7 @@ import type {
   SupportTicketPriority,
   SupportTicketStatus
 } from '@/types';
+import { readOptimizedUploadDataUrl } from '@/utils/helpers';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -65,17 +66,12 @@ const statusClassMap: Record<SupportTicketStatus, string> = {
   closed: 'bg-gray-500/20 text-gray-300 border-gray-500/30'
 };
 
-function toDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(new Error('Failed to read file'));
-    reader.readAsDataURL(file);
-  });
-}
-
 async function toAttachment(file: File, uploadedBy: string): Promise<SupportTicketAttachment> {
-  const dataUrl = await toDataUrl(file);
+  const dataUrl = await readOptimizedUploadDataUrl(file, {
+    maxDimension: 1800,
+    targetBytes: 650 * 1024,
+    quality: 0.86
+  });
   return {
     id: `support_att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     file_name: file.name,
@@ -189,7 +185,7 @@ export default function Support() {
 
     setIsSubmitting(true);
     try {
-      const created = Database.createSupportTicket({
+      const created = await Database.runWithLocalStateTransaction(() => Database.createSupportTicket({
         user_id: displayUser.userId,
         name: displayUser.fullName,
         email: displayUser.email,
@@ -198,6 +194,15 @@ export default function Support() {
         message: formData.description.trim(),
         priority: formData.priority,
         attachments: submitAttachment ? [submitAttachment] : []
+      }), {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 60000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
       });
       setFormData((prev) => ({ ...prev, subject: '', description: '' }));
       setSubmitAttachment(null);
@@ -219,13 +224,22 @@ export default function Support() {
     }
     setIsReplying(true);
     try {
-      const updated = Database.addSupportTicketMessage({
+      const updated = await Database.runWithLocalStateTransaction(() => Database.addSupportTicketMessage({
         ticket_id: selectedTicket.ticket_id,
         sender_type: 'user',
         sender_user_id: displayUser.userId,
         sender_name: displayUser.fullName,
         message: replyMessage.trim(),
         attachments: replyAttachment ? [replyAttachment] : []
+      }), {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 60000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
       });
       if (!updated) {
         toast.error('Ticket not found');
@@ -243,13 +257,13 @@ export default function Support() {
   const handleUserMessageEdit = async () => {
     if (!displayUser || !selectedTicket || !editingMessageId) return;
     try {
-      const updated = Database.updateSupportTicketMessage({
+      const updated = await Database.commitCriticalAction(() => Database.updateSupportTicketMessage({
         ticket_id: selectedTicket.ticket_id,
         message_id: editingMessageId,
         editor_type: 'user',
         editor_user_id: displayUser.userId,
         message: editingMessageText.trim()
-      });
+      }));
       if (!updated) {
         toast.error('Failed to edit ticket message');
         return;

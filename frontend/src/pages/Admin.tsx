@@ -23,10 +23,12 @@ import {
   getInitials,
   generateAvatarColor,
   getTransactionTypeLabel,
+  getVisibleTransactionDescription,
   getPasswordRequirementsText,
   getTransactionPasswordRequirementsText,
   isStrongPassword,
-  isValidTransactionPassword
+  isValidTransactionPassword,
+  readOptimizedUploadDataUrl
 } from '@/utils/helpers';
 import { toast } from 'sonner';
 import Database, { DB_KEYS, helpDistributionTable } from '@/db';
@@ -219,9 +221,18 @@ function MarketplaceRetailerForm({ retailer, categories, onSave, onCancel }: {
   const handleLogoUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setLogoUrl(reader.result as string);
-    reader.readAsDataURL(file);
+    void (async () => {
+      try {
+        const dataUrl = await readOptimizedUploadDataUrl(file, {
+          maxDimension: 1600,
+          targetBytes: 500 * 1024,
+          quality: 0.84
+        });
+        setLogoUrl(dataUrl);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Unable to read retailer logo');
+      }
+    })();
   };
 
   return (
@@ -348,9 +359,18 @@ function MarketplaceBannerForm({ banner, onSave, onCancel }: {
   const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setImageUrl(reader.result as string);
-    reader.readAsDataURL(file);
+    void (async () => {
+      try {
+        const dataUrl = await readOptimizedUploadDataUrl(file, {
+          maxDimension: 1800,
+          targetBytes: 650 * 1024,
+          quality: 0.84
+        });
+        setImageUrl(dataUrl);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Unable to read banner image');
+      }
+    })();
   };
 
   return (
@@ -413,9 +433,18 @@ function MarketplaceDealForm({ deal, retailers, onSave, onCancel }: {
   const handleImageUpload = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setImageUrl(reader.result as string);
-    reader.readAsDataURL(file);
+    void (async () => {
+      try {
+        const dataUrl = await readOptimizedUploadDataUrl(file, {
+          maxDimension: 1800,
+          targetBytes: 650 * 1024,
+          quality: 0.84
+        });
+        setImageUrl(dataUrl);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Unable to read deal image');
+      }
+    })();
   };
 
   return (
@@ -624,9 +653,12 @@ export default function Admin() {
   const [mktEditingRetailer, setMktEditingRetailer] = useState<MarketplaceRetailer | null>(null);
   const [mktShowForm, setMktShowForm] = useState(false);
 
-  const syncMarketplaceChanges = useCallback(async (successMessage: string) => {
+  const syncMarketplaceChanges = useCallback(async (work: () => unknown, successMessage: string) => {
     try {
-      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 });
+      await Database.commitCriticalAction(() => {
+        work();
+        return true;
+      }, { timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 });
       await Database.hydrateFromServerBatches(
         [[
           'mlm_marketplace_categories',
@@ -641,7 +673,7 @@ export default function Admin() {
     } catch (error) {
       console.warn('Marketplace sync failed:', error);
       loadMarketplaceData();
-      toast.error('Marketplace changes saved locally, but server sync is still pending.');
+      toast.error(error instanceof Error ? error.message : 'Failed to save marketplace changes to backend.');
     }
   }, [loadMarketplaceData]);
 
@@ -1052,11 +1084,10 @@ export default function Admin() {
   }
 
   const readSupportAttachment = async (file: File): Promise<SupportTicketAttachment> => {
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ''));
-      reader.onerror = () => reject(new Error('Failed to read attachment'));
-      reader.readAsDataURL(file);
+    const dataUrl = await readOptimizedUploadDataUrl(file, {
+      maxDimension: 1800,
+      targetBytes: 650 * 1024,
+      quality: 0.86
     });
 
     return {
@@ -1087,11 +1118,10 @@ export default function Admin() {
     }
 
     try {
-      const imageUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(new Error('Failed to read image'));
-        reader.readAsDataURL(file);
+      const imageUrl = await readOptimizedUploadDataUrl(file, {
+        maxDimension: 1800,
+        targetBytes: 500 * 1024,
+        quality: 0.82
       });
       setAnnouncementData((prev) => ({ ...prev, imageUrl }));
       toast.success('Announcement image attached');
@@ -1125,7 +1155,7 @@ export default function Admin() {
 
     setIsSendingAnnouncement(true);
     try {
-      const announcement = Database.createAnnouncement({
+      const announcement = await Database.commitCriticalAction(() => Database.createAnnouncement({
         title,
         message,
         type: 'info',
@@ -1136,25 +1166,11 @@ export default function Admin() {
         isPermanent,
         durationDays,
         includeFutureUsers
-      });
+      }), { timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
 
       if (!announcement) {
         toast.error('No users found for announcement');
         return;
-      }
-
-      if (import.meta.env.PROD) {
-        try {
-          await Database.forceRemoteSyncNowWithOptions({
-            full: false,
-            force: true,
-            timeoutMs: 120000,
-            maxAttempts: 3,
-            retryDelayMs: 2000
-          });
-        } catch (error) {
-          console.warn('Announcement sync failed:', error);
-        }
       }
 
       setAnnouncementData((prev) => ({
@@ -1167,6 +1183,8 @@ export default function Admin() {
       }));
       await loadAnnouncementHistory();
       toast.success(`Announcement sent to ${announcement.totalRecipients} user(s)`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to send announcement');
     } finally {
       setIsSendingAnnouncement(false);
     }
@@ -1221,7 +1239,7 @@ export default function Admin() {
 
     setIsUpdatingAnnouncement(true);
     try {
-      const result = Database.updateAnnouncement({
+      const result = await Database.commitCriticalAction(() => Database.updateAnnouncement({
         id: editingAnnouncement.id,
         title,
         message,
@@ -1230,30 +1248,18 @@ export default function Admin() {
         isPermanent,
         durationDays,
         includeFutureUsers
-      });
+      }), { timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
 
       if (!result.success) {
         toast.error(result.message);
         return;
       }
 
-      if (import.meta.env.PROD) {
-        try {
-          await Database.forceRemoteSyncNowWithOptions({
-            full: false,
-            force: true,
-            timeoutMs: 120000,
-            maxAttempts: 3,
-            retryDelayMs: 2000
-          });
-        } catch (error) {
-          console.warn('Announcement update sync failed:', error);
-        }
-      }
-
       await loadAnnouncementHistory();
       cancelEditAnnouncement();
       toast.success(result.message);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update announcement');
     } finally {
       setIsUpdatingAnnouncement(false);
     }
@@ -1275,28 +1281,22 @@ export default function Admin() {
       console.warn('Announcement pre-refresh failed:', error);
     }
 
-    const result = Database.recallAnnouncement(announcement.id, user.userId);
-    if (!result.success) {
-      toast.error(result.message);
-      return;
-    }
-
-    if (import.meta.env.PROD) {
-      try {
-        await Database.forceRemoteSyncNowWithOptions({
-          full: false,
-          force: true,
-          timeoutMs: 120000,
-          maxAttempts: 3,
-          retryDelayMs: 2000
-        });
-      } catch (error) {
-        console.warn('Announcement recall sync failed:', error);
+    try {
+      const result = await Database.commitCriticalAction(() => Database.recallAnnouncement(announcement.id, user.userId), {
+        timeoutMs: 120000,
+        maxAttempts: 3,
+        retryDelayMs: 2000
+      });
+      if (!result.success) {
+        toast.error(result.message);
+        return;
       }
-    }
 
-    await loadAnnouncementHistory();
-    toast.success(result.message);
+      await loadAnnouncementHistory();
+      toast.success(result.message);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to recall announcement');
+    }
   };
 
   const handleApprovePayment = async () => {
@@ -1304,16 +1304,24 @@ export default function Admin() {
 
     await Database.ensureFreshData();
 
-    const result = Database.approvePayment(selectedPayment.id, user.id);
-    if (result) {
-      toast.success('Payment approved and funds added to user wallet');
-      loadPayments();
-      loadDepositHistory();
-      loadAllUsers();
-      setShowPaymentDialog(false);
-      setSelectedPayment(null);
-    } else {
-      toast.error('Failed to approve payment');
+    try {
+      const result = await Database.commitCriticalAction(() => Database.approvePayment(selectedPayment.id, user.id), {
+        timeoutMs: 120000,
+        maxAttempts: 3,
+        retryDelayMs: 2000
+      });
+      if (result) {
+        toast.success('Payment approved and funds added to user wallet');
+        loadPayments();
+        loadDepositHistory();
+        loadAllUsers();
+        setShowPaymentDialog(false);
+        setSelectedPayment(null);
+      } else {
+        toast.error('Failed to approve payment');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to approve payment');
     }
   };
 
@@ -1322,16 +1330,24 @@ export default function Admin() {
 
     await Database.ensureFreshData();
 
-    const result = Database.rejectPayment(selectedPayment.id, user.id, adminNotes);
-    if (result) {
-      toast.success('Payment rejected');
-      loadPayments();
-      loadDepositHistory();
-      setShowPaymentDialog(false);
-      setSelectedPayment(null);
-      setAdminNotes('');
-    } else {
-      toast.error('Failed to reject payment');
+    try {
+      const result = await Database.commitCriticalAction(() => Database.rejectPayment(selectedPayment.id, user.id, adminNotes), {
+        timeoutMs: 120000,
+        maxAttempts: 3,
+        retryDelayMs: 2000
+      });
+      if (result) {
+        toast.success('Payment rejected');
+        loadPayments();
+        loadDepositHistory();
+        setShowPaymentDialog(false);
+        setSelectedPayment(null);
+        setAdminNotes('');
+      } else {
+        toast.error('Failed to reject payment');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to reject payment');
     }
   };
 
@@ -1346,7 +1362,11 @@ export default function Admin() {
     if (!confirm) return;
     try {
       await Database.ensureFreshData();
-      Database.reversePayment(selectedPayment.id, user.id, reason);
+      await Database.commitCriticalAction(() => Database.reversePayment(selectedPayment.id, user.id, reason), {
+        timeoutMs: 120000,
+        maxAttempts: 3,
+        retryDelayMs: 2000
+      });
       toast.success('Deposit reversed and funds deducted');
       loadPayments();
       loadDepositHistory();
@@ -1374,11 +1394,10 @@ export default function Admin() {
     }
 
     try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(new Error('Failed to read receipt file'));
-        reader.readAsDataURL(file);
+      const dataUrl = await readOptimizedUploadDataUrl(file, {
+        maxDimension: 1800,
+        targetBytes: 650 * 1024,
+        quality: 0.86
       });
       setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: dataUrl }));
       toast.success('Receipt attached');
@@ -1390,37 +1409,33 @@ export default function Admin() {
   const handleApproveWithdrawalRequest = async (requestId: string) => {
     if (!user?.isAdmin) return;
     await Database.ensureFreshData();
-    const result = Database.processWithdrawalRequest({
-      transactionId: requestId,
-      adminUserId: user.userId,
-      action: 'approve',
-      adminReason: withdrawalReasonDrafts[requestId] || undefined,
-      adminReceipt: withdrawalReceiptDrafts[requestId] || undefined
-    });
+    try {
+      const result = await Database.commitCriticalAction(() => Database.processWithdrawalRequest({
+        transactionId: requestId,
+        adminUserId: user.userId,
+        action: 'approve',
+        adminReason: withdrawalReasonDrafts[requestId] || undefined,
+        adminReceipt: withdrawalReceiptDrafts[requestId] || undefined
+      }), { timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
 
-    if (!result.success) {
-      toast.error(result.message);
-      return;
-    }
-
-    if (import.meta.env.PROD) {
-      try {
-        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
-      } catch (error) {
-        console.warn('Withdrawal approval sync failed:', error);
+      if (!result.success) {
+        toast.error(result.message);
+        return;
       }
-    }
 
-    setWithdrawalReasonDrafts((prev) => ({ ...prev, [requestId]: '' }));
-    setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: '' }));
-    loadAllTransactions();
-    loadWithdrawalRequests();
-    loadStats();
-    if (selectedWithdrawalRequest?.id === requestId) {
-      setShowWithdrawalRequestDialog(false);
-      setSelectedWithdrawalRequest(null);
+      setWithdrawalReasonDrafts((prev) => ({ ...prev, [requestId]: '' }));
+      setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: '' }));
+      loadAllTransactions();
+      loadWithdrawalRequests();
+      loadStats();
+      if (selectedWithdrawalRequest?.id === requestId) {
+        setShowWithdrawalRequestDialog(false);
+        setSelectedWithdrawalRequest(null);
+      }
+      toast.success(result.message);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to approve withdrawal request');
     }
-    toast.success(result.message);
   };
 
   const handleRejectWithdrawalRequest = async (requestId: string) => {
@@ -1433,37 +1448,33 @@ export default function Admin() {
     const confirmed = window.confirm(confirmText);
     if (!confirmed) return;
 
-    const result = Database.processWithdrawalRequest({
-      transactionId: requestId,
-      adminUserId: user.userId,
-      action: 'reject',
-      adminReason: reason || undefined,
-      adminReceipt: withdrawalReceiptDrafts[requestId] || undefined
-    });
+    try {
+      const result = await Database.commitCriticalAction(() => Database.processWithdrawalRequest({
+        transactionId: requestId,
+        adminUserId: user.userId,
+        action: 'reject',
+        adminReason: reason || undefined,
+        adminReceipt: withdrawalReceiptDrafts[requestId] || undefined
+      }), { timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
 
-    if (!result.success) {
-      toast.error(result.message);
-      return;
-    }
-
-    if (import.meta.env.PROD) {
-      try {
-        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
-      } catch (error) {
-        console.warn('Withdrawal rejection sync failed:', error);
+      if (!result.success) {
+        toast.error(result.message);
+        return;
       }
-    }
 
-    setWithdrawalReasonDrafts((prev) => ({ ...prev, [requestId]: '' }));
-    setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: '' }));
-    loadAllTransactions();
-    loadWithdrawalRequests();
-    loadStats();
-    if (selectedWithdrawalRequest?.id === requestId) {
-      setShowWithdrawalRequestDialog(false);
-      setSelectedWithdrawalRequest(null);
+      setWithdrawalReasonDrafts((prev) => ({ ...prev, [requestId]: '' }));
+      setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: '' }));
+      loadAllTransactions();
+      loadWithdrawalRequests();
+      loadStats();
+      if (selectedWithdrawalRequest?.id === requestId) {
+        setShowWithdrawalRequestDialog(false);
+        setSelectedWithdrawalRequest(null);
+      }
+      toast.success(result.message);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to reject withdrawal request');
     }
-    toast.success(result.message);
   };
 
   const handleScanMissingPendingWithdrawals = async () => {
@@ -1482,10 +1493,18 @@ export default function Admin() {
     }
   };
 
-  const togglePaymentMethod = (methodId: string, isActive: boolean) => {
-    Database.updatePaymentMethod(methodId, { isActive });
-    loadPaymentMethods();
-    toast.success(`Payment method ${isActive ? 'enabled' : 'disabled'}`);
+  const togglePaymentMethod = async (methodId: string, isActive: boolean) => {
+    try {
+      await Database.commitCriticalAction(() => Database.updatePaymentMethod(methodId, { isActive }), {
+        timeoutMs: 120000,
+        maxAttempts: 3,
+        retryDelayMs: 2000
+      });
+      loadPaymentMethods();
+      toast.success(`Payment method ${isActive ? 'enabled' : 'disabled'}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update payment method');
+    }
   };
 
   const openPaymentMethodEditor = (method: PaymentMethod) => {
@@ -1552,11 +1571,10 @@ export default function Admin() {
     }
 
     try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ''));
-        reader.onerror = () => reject(new Error('Failed to read QR image'));
-        reader.readAsDataURL(file);
+      const dataUrl = await readOptimizedUploadDataUrl(file, {
+        maxDimension: 1200,
+        targetBytes: 350 * 1024,
+        quality: 0.84
       });
       updatePaymentMethodDraft('qrCode', dataUrl);
       toast.success('QR code updated in editor');
@@ -1605,60 +1623,64 @@ export default function Admin() {
       processingTime: paymentMethodDraft.processingTime.trim()
     };
 
-    if (editingPaymentMethodId === 'new') {
-      const newId = `pm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      const newMethod: PaymentMethod = {
-        id: newId,
-        type: paymentMethodDraft.type,
-        icon: paymentMethodDraft.type,
-        isActive: true,
-        name: baseFields.name || 'New Payment Method',
-        description: baseFields.description || '',
-        instructions: baseFields.instructions || '',
-        walletAddress: baseFields.walletAddress,
-        accountNumber: baseFields.accountNumber,
-        accountName: baseFields.accountName,
-        bankName: baseFields.bankName,
-        upiId: baseFields.upiId,
-        qrCode: baseFields.qrCode,
-        minAmount: minAmount || 0,
-        maxAmount: maxAmount || minAmount || 0,
-        processingFee: processingFee || 0,
-      processingTime: baseFields.processingTime || `Within ${settings.depositProcessingHours} hours`
-      };
-      Database.addPaymentMethod(newMethod);
-    } else {
-      const currentMethod = paymentMethods.find((method) => method.id === editingPaymentMethodId);
-      if (!currentMethod) {
-        toast.error('Payment method not found');
-        return;
-      }
-      const updates: Partial<PaymentMethod> = {
-        ...baseFields,
-        name: baseFields.name || currentMethod.name,
-        description: baseFields.description || currentMethod.description,
-        instructions: baseFields.instructions || currentMethod.instructions,
-        processingTime: baseFields.processingTime || currentMethod.processingTime || `Within ${settings.depositProcessingHours} hours`
-      };
+    try {
+      if (editingPaymentMethodId === 'new') {
+        const newId = `pm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const newMethod: PaymentMethod = {
+          id: newId,
+          type: paymentMethodDraft.type,
+          icon: paymentMethodDraft.type,
+          isActive: true,
+          name: baseFields.name || 'New Payment Method',
+          description: baseFields.description || '',
+          instructions: baseFields.instructions || '',
+          walletAddress: baseFields.walletAddress,
+          accountNumber: baseFields.accountNumber,
+          accountName: baseFields.accountName,
+          bankName: baseFields.bankName,
+          upiId: baseFields.upiId,
+          qrCode: baseFields.qrCode,
+          minAmount: minAmount || 0,
+          maxAmount: maxAmount || minAmount || 0,
+          processingFee: processingFee || 0,
+          processingTime: baseFields.processingTime || `Within ${settings.depositProcessingHours} hours`
+        };
+        await Database.commitCriticalAction(() => Database.addPaymentMethod(newMethod), {
+          timeoutMs: 120000,
+          maxAttempts: 3,
+          retryDelayMs: 2000
+        });
+      } else {
+        const currentMethod = paymentMethods.find((method) => method.id === editingPaymentMethodId);
+        if (!currentMethod) {
+          toast.error('Payment method not found');
+          return;
+        }
+        const updates: Partial<PaymentMethod> = {
+          ...baseFields,
+          name: baseFields.name || currentMethod.name,
+          description: baseFields.description || currentMethod.description,
+          instructions: baseFields.instructions || currentMethod.instructions,
+          processingTime: baseFields.processingTime || currentMethod.processingTime || `Within ${settings.depositProcessingHours} hours`
+        };
 
-      const updated = Database.updatePaymentMethod(editingPaymentMethodId, updates);
-      if (!updated) {
-        toast.error('Failed to update payment method');
-        return;
+        const updated = await Database.commitCriticalAction(() => Database.updatePaymentMethod(editingPaymentMethodId, updates), {
+          timeoutMs: 120000,
+          maxAttempts: 3,
+          retryDelayMs: 2000
+        });
+        if (!updated) {
+          toast.error('Failed to update payment method');
+          return;
+        }
       }
+
+      loadPaymentMethods();
+      closePaymentMethodEditor();
+      toast.success(editingPaymentMethodId === 'new' ? 'Payment method added' : 'Payment method details updated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to save payment method');
     }
-
-    if (import.meta.env.PROD) {
-      try {
-        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 });
-      } catch (error) {
-        console.warn('Payment method sync failed:', error);
-      }
-    }
-
-    loadPaymentMethods();
-    closePaymentMethodEditor();
-    toast.success(editingPaymentMethodId === 'new' ? 'Payment method added' : 'Payment method details updated');
   };
 
   const handleAddFunds = async () => {
@@ -1824,7 +1846,7 @@ export default function Admin() {
       searchUserById(missingUserRecovery.userId);
       toast.success(`Recovered user ${result.user.fullName} (${result.user.userId}).`);
       if (result.sponsorIncomeRestored) {
-        toast.success('Restored missing direct sponsor income.');
+        toast.success('Restored missing referral income.');
       }
       if (result.generatedLoginPassword) {
         toast.success(`Temporary login password: ${result.generatedLoginPassword}`);
@@ -1911,27 +1933,20 @@ export default function Admin() {
 
     setIsUpdatingUserProfile(true);
     try {
-      const updated = Database.updateUser(searchedUser.id, updates);
+      const updated = await Database.commitCriticalAction(() => Database.updateUser(searchedUser.id, updates), {
+        timeoutMs: 120000,
+        maxAttempts: 3,
+        retryDelayMs: 2000
+      });
       if (!updated) {
         toast.error('Unable to update user profile');
         return;
       }
-      if (import.meta.env.PROD) {
-        try {
-          await Database.forceRemoteSyncNowWithOptions({
-            full: false,
-            force: true,
-            timeoutMs: 120000,
-            maxAttempts: 3,
-            retryDelayMs: 2000
-          });
-        } catch (error) {
-          console.warn('User profile sync failed:', error);
-        }
-      }
       loadAllUsers();
       searchUserById();
       toast.success('User profile updated');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to update user profile');
     } finally {
       setIsUpdatingUserProfile(false);
     }
@@ -3393,15 +3408,19 @@ export default function Admin() {
     setEditingSupportMessageText('');
   }, [selectedSupportTicketId]);
 
-  const handleSupportStatusUpdate = () => {
+  const handleSupportStatusUpdate = async () => {
     if (!selectedSupportTicket) return;
-    const updated = Database.updateSupportTicketStatus(selectedSupportTicket.ticket_id, supportStatusDraft);
-    if (!updated) {
-      toast.error('Failed to update ticket status');
-      return;
+    try {
+      const updated = await Database.commitCriticalAction(() => Database.updateSupportTicketStatus(selectedSupportTicket.ticket_id, supportStatusDraft));
+      if (!updated) {
+        toast.error('Failed to update ticket status');
+        return;
+      }
+      loadSupportTickets();
+      toast.success(`Ticket ${updated.ticket_id} marked ${SUPPORT_STATUS_OPTIONS.find((s) => s.value === updated.status)?.label || updated.status}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update ticket status');
     }
-    loadSupportTickets();
-    toast.success(`Ticket ${updated.ticket_id} marked ${SUPPORT_STATUS_OPTIONS.find((s) => s.value === updated.status)?.label || updated.status}`);
   };
 
   const handleSupportAttachmentChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -3422,41 +3441,45 @@ export default function Admin() {
     }
   };
 
-  const handleSupportReply = () => {
+  const handleSupportReply = async () => {
     if (!selectedSupportTicket || !user) return;
     if (!supportReplyMessage.trim() && !supportReplyAttachment) {
       toast.error('Write a reply or attach a file');
       return;
     }
-    const updated = Database.addSupportTicketMessage({
-      ticket_id: selectedSupportTicket.ticket_id,
-      sender_type: 'admin',
-      sender_user_id: user.userId,
-      sender_name: 'Admin',
-      message: supportReplyMessage.trim(),
-      attachments: supportReplyAttachment ? [supportReplyAttachment] : []
-    });
-    if (!updated) {
-      toast.error('Failed to send reply');
-      return;
+    try {
+      const updated = await Database.commitCriticalAction(() => Database.addSupportTicketMessage({
+        ticket_id: selectedSupportTicket.ticket_id,
+        sender_type: 'admin',
+        sender_user_id: user.userId,
+        sender_name: 'Admin',
+        message: supportReplyMessage.trim(),
+        attachments: supportReplyAttachment ? [supportReplyAttachment] : []
+      }));
+      if (!updated) {
+        toast.error('Failed to send reply');
+        return;
+      }
+      setSupportReplyMessage('');
+      setSupportReplyAttachment(null);
+      setSupportStatusDraft(updated.status);
+      loadSupportTickets();
+      toast.success('Reply sent');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to send reply');
     }
-    setSupportReplyMessage('');
-    setSupportReplyAttachment(null);
-    setSupportStatusDraft(updated.status);
-    loadSupportTickets();
-    toast.success('Reply sent');
   };
 
-  const handleAdminSupportMessageEdit = () => {
+  const handleAdminSupportMessageEdit = async () => {
     if (!selectedSupportTicket || !user || !editingSupportMessageId) return;
     try {
-      const updated = Database.updateSupportTicketMessage({
+      const updated = await Database.commitCriticalAction(() => Database.updateSupportTicketMessage({
         ticket_id: selectedSupportTicket.ticket_id,
         message_id: editingSupportMessageId,
         editor_type: 'admin',
         editor_user_id: user.userId,
         message: editingSupportMessageText.trim()
-      });
+      }));
       if (!updated) {
         toast.error('Failed to edit reply');
         return;
@@ -5604,7 +5627,7 @@ export default function Admin() {
                       <div>
                         <h4 className="text-white font-semibold">Recover Missing User Record</h4>
                         <p className="text-xs text-white/60">
-                          Matrix slot found for this ID. This recovery recreates the user record and direct sponsor income (if missing)
+                          Matrix slot found for this ID. This recovery recreates the user record and referral income (if missing)
                           without re-running any give-help logic.
                         </p>
                         <p className="text-xs text-white/50 mt-1">
@@ -5684,7 +5707,7 @@ export default function Admin() {
                         onChange={(e) => setMissingUserRecovery((prev) => ({ ...prev, restoreSponsorIncome: e.target.checked }))}
                         className="rounded"
                       />
-                      Restore direct sponsor income if missing
+                      Restore referral income if missing
                     </label>
                     <Button
                       onClick={handleRecoverMissingUser}
@@ -6457,7 +6480,7 @@ export default function Admin() {
                                       {entry.status === 'locked' ? 'Locked' : 'Unlocked'}
                                     </Badge>
                                   </td>
-                                  <td className="py-2 px-3 text-white/60 text-xs">{entry.description}</td>
+                                  <td className="py-2 px-3 text-white/60 text-xs">{getVisibleTransactionDescription(entry.description)}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -6487,13 +6510,13 @@ export default function Admin() {
                               <tr key={tx.id} className="border-b border-white/5">
                                 <td className="py-2 px-4">
                                   <Badge variant="outline" className="border-white/20 text-white/80">
-                                    {getTransactionTypeLabel(tx.type)}
+                                    {getTransactionTypeLabel(tx.type, tx.description)}
                                   </Badge>
                                 </td>
                                 <td className={`py-2 px-4 font-medium ${tx.amount > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                   {tx.amount > 0 ? '+' : ''}{formatCurrency(tx.amount)}
                                 </td>
-                                <td className="py-2 px-4 text-white/60 text-sm">{tx.description}</td>
+                                <td className="py-2 px-4 text-white/60 text-sm">{getVisibleTransactionDescription(tx.description)}</td>
                                 <td className="py-2 px-4 text-white/60 text-sm">{formatDate(tx.createdAt)}</td>
                               </tr>
                             ))}
@@ -6812,15 +6835,19 @@ export default function Admin() {
                                 </Button>
                                 <Button
                                   variant="outline"
-                                  onClick={() => {
+                                  onClick={async () => {
                                     setSupportStatusDraft('closed');
-                                    const closed = Database.updateSupportTicketStatus(selectedSupportTicket.ticket_id, 'closed');
-                                    if (!closed) {
-                                      toast.error('Failed to close ticket');
-                                      return;
+                                    try {
+                                      const closed = await Database.commitCriticalAction(() => Database.updateSupportTicketStatus(selectedSupportTicket.ticket_id, 'closed'));
+                                      if (!closed) {
+                                        toast.error('Failed to close ticket');
+                                        return;
+                                      }
+                                      loadSupportTickets();
+                                      toast.success('Ticket closed');
+                                    } catch (error) {
+                                      toast.error(error instanceof Error ? error.message : 'Failed to close ticket');
                                     }
-                                    loadSupportTickets();
-                                    toast.success('Ticket closed');
                                   }}
                                   className="border-red-500/40 text-red-300 hover:bg-red-500/10"
                                 >
@@ -7177,7 +7204,7 @@ export default function Admin() {
                                   {r.status}
                                 </Badge>
                               </td>
-                              <td className="py-2 px-3 text-white/60 text-sm">{r.description}</td>
+                              <td className="py-2 px-3 text-white/60 text-sm">{getVisibleTransactionDescription(r.description)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -7628,14 +7655,15 @@ export default function Admin() {
                         categories={marketplaceCategories}
                         onSave={async (data) => {
                           const successMessage = mktEditingRetailer ? 'Retailer updated' : 'Retailer added';
-                          if (mktEditingRetailer) {
-                            Database.updateMarketplaceRetailer(mktEditingRetailer.id, data);
-                          } else {
-                            Database.createMarketplaceRetailer(data as Omit<MarketplaceRetailer, 'id'>);
-                          }
                           setMktShowForm(false);
                           setMktEditingRetailer(null);
-                          await syncMarketplaceChanges(successMessage);
+                          await syncMarketplaceChanges(() => {
+                            if (mktEditingRetailer) {
+                              Database.updateMarketplaceRetailer(mktEditingRetailer.id, data);
+                            } else {
+                              Database.createMarketplaceRetailer(data as Omit<MarketplaceRetailer, 'id'>);
+                            }
+                          }, successMessage);
                         }}
                         onCancel={() => { setMktShowForm(false); setMktEditingRetailer(null); }}
                       />
@@ -7662,7 +7690,7 @@ export default function Admin() {
                             <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingRetailer(r); setMktShowForm(true); }}>
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { Database.deleteMarketplaceRetailer(r.id); await syncMarketplaceChanges('Retailer deleted'); }}>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { await syncMarketplaceChanges(() => Database.deleteMarketplaceRetailer(r.id), 'Retailer deleted'); }}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </div>
@@ -7687,14 +7715,15 @@ export default function Admin() {
                         category={mktEditingCategory}
                         onSave={async (data) => {
                           const successMessage = mktEditingCategory ? 'Category updated' : 'Category added';
-                          if (mktEditingCategory) {
-                            Database.updateMarketplaceCategory(mktEditingCategory.id, data);
-                          } else {
-                            Database.createMarketplaceCategory(data as Omit<MarketplaceCategory, 'id'>);
-                          }
                           setMktShowForm(false);
                           setMktEditingCategory(null);
-                          await syncMarketplaceChanges(successMessage);
+                          await syncMarketplaceChanges(() => {
+                            if (mktEditingCategory) {
+                              Database.updateMarketplaceCategory(mktEditingCategory.id, data);
+                            } else {
+                              Database.createMarketplaceCategory(data as Omit<MarketplaceCategory, 'id'>);
+                            }
+                          }, successMessage);
                         }}
                         onCancel={() => { setMktShowForm(false); setMktEditingCategory(null); }}
                       />
@@ -7716,7 +7745,7 @@ export default function Admin() {
                             <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingCategory(c); setMktShowForm(true); }}>
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { Database.deleteMarketplaceCategory(c.id); await syncMarketplaceChanges('Category deleted'); }}>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { await syncMarketplaceChanges(() => Database.deleteMarketplaceCategory(c.id), 'Category deleted'); }}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </div>
@@ -7740,14 +7769,15 @@ export default function Admin() {
                         banner={mktEditingBanner}
                         onSave={async (data) => {
                           const successMessage = mktEditingBanner ? 'Banner updated' : 'Banner added';
-                          if (mktEditingBanner) {
-                            Database.updateMarketplaceBanner(mktEditingBanner.id, data);
-                          } else {
-                            Database.createMarketplaceBanner(data as Omit<MarketplaceBanner, 'id'>);
-                          }
                           setMktShowForm(false);
                           setMktEditingBanner(null);
-                          await syncMarketplaceChanges(successMessage);
+                          await syncMarketplaceChanges(() => {
+                            if (mktEditingBanner) {
+                              Database.updateMarketplaceBanner(mktEditingBanner.id, data);
+                            } else {
+                              Database.createMarketplaceBanner(data as Omit<MarketplaceBanner, 'id'>);
+                            }
+                          }, successMessage);
                         }}
                         onCancel={() => { setMktShowForm(false); setMktEditingBanner(null); }}
                       />
@@ -7773,7 +7803,7 @@ export default function Admin() {
                             <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingBanner(b); setMktShowForm(true); }}>
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { Database.deleteMarketplaceBanner(b.id); await syncMarketplaceChanges('Banner deleted'); }}>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { await syncMarketplaceChanges(() => Database.deleteMarketplaceBanner(b.id), 'Banner deleted'); }}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </div>
@@ -7799,14 +7829,15 @@ export default function Admin() {
                         retailers={marketplaceRetailers}
                         onSave={async (data) => {
                           const successMessage = mktEditingDeal ? 'Deal updated' : 'Deal added';
-                          if (mktEditingDeal) {
-                            Database.updateMarketplaceDeal(mktEditingDeal.id, data);
-                          } else {
-                            Database.createMarketplaceDeal(data as Omit<MarketplaceDeal, 'id'>);
-                          }
                           setMktShowForm(false);
                           setMktEditingDeal(null);
-                          await syncMarketplaceChanges(successMessage);
+                          await syncMarketplaceChanges(() => {
+                            if (mktEditingDeal) {
+                              Database.updateMarketplaceDeal(mktEditingDeal.id, data);
+                            } else {
+                              Database.createMarketplaceDeal(data as Omit<MarketplaceDeal, 'id'>);
+                            }
+                          }, successMessage);
                         }}
                         onCancel={() => { setMktShowForm(false); setMktEditingDeal(null); }}
                       />
@@ -7832,7 +7863,7 @@ export default function Admin() {
                             <Button size="sm" variant="ghost" className="text-white/50 hover:text-white h-8 w-8 p-0" onClick={() => { setMktEditingDeal(d); setMktShowForm(true); }}>
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
-                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { Database.deleteMarketplaceDeal(d.id); await syncMarketplaceChanges('Deal deleted'); }}>
+                            <Button size="sm" variant="ghost" className="text-red-400 hover:text-red-300 h-8 w-8 p-0" onClick={async () => { await syncMarketplaceChanges(() => Database.deleteMarketplaceDeal(d.id), 'Deal deleted'); }}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </Button>
                           </div>
@@ -7874,6 +7905,7 @@ export default function Admin() {
                               <p className="text-white/40 text-xs mt-0.5">
                                 User: {inv.userId} • Amount: ${inv.amount.toFixed(2)} • {new Date(inv.createdAt).toLocaleDateString()}
                               </p>
+                              {inv.orderId && <p className="text-white/40 text-xs mt-0.5">Order ID: {inv.orderId}</p>}
                               {inv.status === 'approved' && <p className="text-emerald-400/60 text-xs mt-0.5">Awarded: {inv.rewardPoints} RP</p>}
                               {inv.status === 'approved' && inv.rpRevoked && (
                                 <p className="text-rose-300/70 text-xs mt-0.5">
@@ -7883,16 +7915,24 @@ export default function Admin() {
                               {inv.status === 'rejected' && inv.adminNotes && <p className="text-red-400/60 text-xs mt-0.5">Reason: {inv.adminNotes}</p>}
                             </div>
                           </div>
-                          {inv.invoiceImage && inv.invoiceImage.startsWith('data:image') && (
+                          {inv.invoiceImage && (
+                            (String(inv.invoiceImageMimeType || '').startsWith('image/'))
+                            || inv.invoiceImage.startsWith('data:image')
+                            || /\.(png|jpe?g|webp|gif)(?:$|[?#])/i.test(inv.invoiceImage)
+                          ) && (
                             <div className="rounded-lg overflow-hidden border border-white/10 max-w-xs">
                               <img src={inv.invoiceImage} alt="Invoice" className="w-full max-h-48 object-contain bg-white/5" />
                             </div>
                           )}
-                          {inv.invoiceImage && inv.invoiceImage.startsWith('data:application/pdf') && (
+                          {inv.invoiceImage && (
+                            String(inv.invoiceImageMimeType || '').toLowerCase() === 'application/pdf'
+                            || inv.invoiceImage.startsWith('data:application/pdf')
+                            || /\.pdf(?:$|[?#])/i.test(inv.invoiceImage)
+                          ) && (
                             <div className="rounded-lg border border-white/10 p-3 flex items-center gap-2 max-w-xs bg-white/5">
                               <FileText className="w-5 h-5 text-red-400" />
                               <span className="text-white/60 text-xs">PDF Invoice Uploaded</span>
-                              <a href={inv.invoiceImage} download={`invoice-${inv.id}.pdf`} className="text-[#118bdd] text-xs underline ml-auto">Download</a>
+                              <a href={inv.invoiceImage} target="_blank" rel="noreferrer" download={inv.invoiceImageFileName || `invoice-${inv.id}.pdf`} className="text-[#118bdd] text-xs underline ml-auto">Download</a>
                             </div>
                           )}
                           {inv.status === 'pending' && (
@@ -7909,13 +7949,17 @@ export default function Admin() {
                               <Button
                                 size="sm"
                                 className="bg-emerald-600 hover:bg-emerald-700 h-9"
-                                onClick={() => {
-                                  const rpInput = document.getElementById(`inv-rp-${inv.id}`) as HTMLInputElement;
-                                  const rp = parseInt(rpInput?.value || '0');
-                                  if (!rp || rp <= 0) { toast.error('Enter valid reward points'); return; }
-                                  Database.approveMarketplaceInvoice(inv.id, user?.userId || '', rp);
-                                  loadMarketplaceData();
-                                  toast.success(`Invoice approved with ${rp} RP`);
+                                onClick={async () => {
+                                  try {
+                                    const rpInput = document.getElementById(`inv-rp-${inv.id}`) as HTMLInputElement;
+                                    const rp = parseInt(rpInput?.value || '0');
+                                    if (!rp || rp <= 0) { toast.error('Enter valid reward points'); return; }
+                                    await Database.commitCriticalAction(() => Database.approveMarketplaceInvoice(inv.id, user?.userId || '', rp), { timeoutMs: 90000 });
+                                    loadMarketplaceData();
+                                    toast.success(`Invoice approved with ${rp} RP`);
+                                  } catch (error) {
+                                    toast.error(error instanceof Error ? error.message : 'Failed to approve invoice');
+                                  }
                                 }}
                               >
                                 <CheckCircle className="w-3.5 h-3.5 mr-1" /> Approve
@@ -7924,11 +7968,15 @@ export default function Admin() {
                                 size="sm"
                                 variant="outline"
                                 className="border-red-500/30 text-red-400 hover:bg-red-500/10 h-9"
-                                onClick={() => {
-                                  const reason = prompt('Rejection reason (optional):') || '';
-                                  Database.rejectMarketplaceInvoice(inv.id, user?.userId || '', reason);
-                                  loadMarketplaceData();
-                                  toast.success('Invoice rejected');
+                                onClick={async () => {
+                                  try {
+                                    const reason = prompt('Rejection reason (optional):') || '';
+                                    await Database.commitCriticalAction(() => Database.rejectMarketplaceInvoice(inv.id, user?.userId || '', reason), { timeoutMs: 90000 });
+                                    loadMarketplaceData();
+                                    toast.success('Invoice rejected');
+                                  } catch (error) {
+                                    toast.error(error instanceof Error ? error.message : 'Failed to reject invoice');
+                                  }
                                 }}
                               >
                                 <XCircle className="w-3.5 h-3.5 mr-1" /> Reject
@@ -7941,18 +7989,22 @@ export default function Admin() {
                                 size="sm"
                                 variant="outline"
                                 className="border-rose-500/40 text-rose-300 hover:bg-rose-500/10 h-9"
-                                onClick={() => {
-                                  const confirmed = window.confirm(
-                                    `Take back ${inv.rewardPoints} RP from user ${inv.userId}? This will silently move the invoice back to pending so you can approve again with correct RP.`
-                                  );
-                                  if (!confirmed) return;
-                                  const result = Database.revokeMarketplaceInvoiceRewardPoints(inv.id, user?.userId || '');
-                                  if (!result.success) {
-                                    toast.error(result.message);
-                                    return;
+                                onClick={async () => {
+                                  try {
+                                    const confirmed = window.confirm(
+                                      `Take back ${inv.rewardPoints} RP from user ${inv.userId}? This will silently move the invoice back to pending so you can approve again with correct RP.`
+                                    );
+                                    if (!confirmed) return;
+                                    const result = await Database.commitCriticalAction(() => Database.revokeMarketplaceInvoiceRewardPoints(inv.id, user?.userId || ''), { timeoutMs: 90000 });
+                                    if (!result.success) {
+                                      toast.error(result.message);
+                                      return;
+                                    }
+                                    loadMarketplaceData();
+                                    toast.success(result.message);
+                                  } catch (error) {
+                                    toast.error(error instanceof Error ? error.message : 'Failed to take back reward points');
                                   }
-                                  loadMarketplaceData();
-                                  toast.success(result.message);
                                 }}
                               >
                                 <ArrowDown className="w-3.5 h-3.5 mr-1" /> Take Back & Reopen
@@ -8005,10 +8057,14 @@ export default function Admin() {
                                 <Button
                                   size="sm"
                                   className="bg-emerald-600 hover:bg-emerald-700 h-8"
-                                  onClick={() => {
-                                    Database.approveRedemption(red.id, user?.userId || '');
-                                    loadMarketplaceData();
-                                    toast.success(`Approved. $${red.usdtAmount.toFixed(2)} credited to user's Income Wallet`);
+                                  onClick={async () => {
+                                    try {
+                                      await Database.commitCriticalAction(() => Database.approveRedemption(red.id, user?.userId || ''), { timeoutMs: 90000 });
+                                      loadMarketplaceData();
+                                      toast.success(`Approved. $${red.usdtAmount.toFixed(2)} credited to user's Income Wallet`);
+                                    } catch (error) {
+                                      toast.error(error instanceof Error ? error.message : 'Failed to approve redemption');
+                                    }
                                   }}
                                 >
                                   <CheckCircle className="w-3.5 h-3.5 mr-1" /> Approve
@@ -8017,11 +8073,15 @@ export default function Admin() {
                                   size="sm"
                                   variant="outline"
                                   className="border-red-500/30 text-red-400 hover:bg-red-500/10 h-8"
-                                  onClick={() => {
-                                    const reason = prompt('Rejection reason (optional):') || '';
-                                    Database.rejectRedemption(red.id, user?.userId || '', reason);
-                                    loadMarketplaceData();
-                                    toast.success('Rejected. Points refunded to user.');
+                                  onClick={async () => {
+                                    try {
+                                      const reason = prompt('Rejection reason (optional):') || '';
+                                      await Database.commitCriticalAction(() => Database.rejectRedemption(red.id, user?.userId || '', reason), { timeoutMs: 90000 });
+                                      loadMarketplaceData();
+                                      toast.success('Rejected. Points refunded to user.');
+                                    } catch (error) {
+                                      toast.error(error instanceof Error ? error.message : 'Failed to reject redemption');
+                                    }
                                   }}
                                 >
                                   <XCircle className="w-3.5 h-3.5 mr-1" /> Reject

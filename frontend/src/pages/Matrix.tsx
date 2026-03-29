@@ -903,7 +903,7 @@ export default function Matrix() {
                         <p className="text-lg font-bold text-white">{memberStats.right}</p>
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">
-                        <p className="text-sm text-white/50">Direct Referrals</p>
+                        <p className="text-sm text-white/50">My Referrals</p>
                         <p className="text-lg font-bold text-white">{memberUser ? Database.getEffectiveDirectCount(memberUser) : 0}</p>
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">

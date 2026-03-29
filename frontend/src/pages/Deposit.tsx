@@ -12,7 +12,7 @@ import {
   AlertCircle, Upload, RefreshCw, Bitcoin, 
   ChevronRight, QrCode, LogOut, Maximize2, Download
 } from 'lucide-react';
-import { formatCurrency, copyToClipboard } from '@/utils/helpers';
+import { formatCurrency, copyToClipboard, readOptimizedUploadDataUrl } from '@/utils/helpers';
 import Database from '@/db';
 import type { PaymentMethod, Payment } from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
@@ -69,14 +69,19 @@ export default function Deposit() {
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setScreenshot(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      try {
+        const dataUrl = await readOptimizedUploadDataUrl(file, {
+          maxDimension: 1800,
+          targetBytes: 650 * 1024,
+          quality: 0.86
+        });
+        setScreenshot(dataUrl);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : 'Failed to process screenshot');
+      }
     }
   };
 
@@ -118,20 +123,25 @@ export default function Deposit() {
       createdAt: new Date().toISOString()
     };
 
-    Database.createPayment(payment);
-    
-    // Refresh payments
-    const payments = Database.getUserPayments(displayUser.id);
-    setUserPayments(payments);
+    try {
+      await Database.commitCriticalAction(() => Database.createPayment(payment), {
+        timeoutMs: 90000
+      });
 
-    setIsSubmitting(false);
-    setShowSuccessDialog(true);
-    
-    // Reset form
-    setAmount('');
-    setTxHash('');
-    setScreenshot(null);
-    setSelectedMethod(null);
+      const payments = Database.getUserPayments(displayUser.id);
+      setUserPayments(payments);
+
+      setIsSubmitting(false);
+      setShowSuccessDialog(true);
+
+      setAmount('');
+      setTxHash('');
+      setScreenshot(null);
+      setSelectedMethod(null);
+    } catch (error) {
+      setIsSubmitting(false);
+      toast.error(error instanceof Error ? error.message : 'Failed to submit deposit request');
+    }
   };
 
   const handleLogout = () => {

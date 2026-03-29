@@ -658,8 +658,11 @@ export interface MarketplaceInvoice {
   userId: string;
   retailerId: string;
   retailerName: string;
+  orderId?: string;
   amount: number;
-  invoiceImage: string; // base64 data URL
+  invoiceImage: string; // remote URL or legacy base64 data URL
+  invoiceImageMimeType?: string | null;
+  invoiceImageFileName?: string | null;
   status: MarketplaceInvoiceStatus;
   rewardPoints: number; // points awarded on approval
   adminNotes: string;

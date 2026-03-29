@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   ArrowLeft, ArrowDownLeft, ArrowUpRight, LogOut, RefreshCw
 } from 'lucide-react';
-import { formatCurrency, getTransactionTypeLabel } from '@/utils/helpers';
+import { formatCurrency, getTransactionTypeLabel, getVisibleTransactionDescription } from '@/utils/helpers';
 import Database from '@/db';
 import type { Transaction } from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
@@ -20,7 +20,7 @@ export default function Transactions() {
   const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
   const syncKey = useSyncRefreshKey();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [filterType, setFilterType] = useState<'all' | 'help' | 'direct_income' | 'others' | 'deposit' | 'withdrawal'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'help' | 'direct_income' | 'royalty_income' | 'fund_transfer' | 'deposit' | 'withdrawal'>('all');
   const [levelFilter, setLevelFilter] = useState<'all' | number>('all');
   const displayUser = useMemo(() => {
     const activeUser = impersonatedUser || user;
@@ -48,9 +48,6 @@ export default function Transactions() {
     navigate('/login');
     toast.success('Logged out successfully');
   };
-
-  const getVisibleTransactionDescription = (description: string | undefined) =>
-    String(description || '').replace(/\s*\[Redemption:[^\]]+\]\s*/g, '').trim();
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -88,7 +85,7 @@ export default function Transactions() {
       return numericLevel;
     }
 
-    // 2. Dynamic Matrix Depth for Direct Income
+    // 2. Dynamic Matrix Depth for Referral Income
     if (tx.type === 'direct_income' && tx.fromUserId) {
       const fromUser = userMap.get(tx.fromUserId);
       if (!fromUser) return 1;
@@ -380,9 +377,12 @@ export default function Transactions() {
       rows = rows.filter((tx) => tx.type === 'give_help' || tx.type === 'receive_help');
     } else if (filterType === 'direct_income') {
       rows = rows.filter((tx) => tx.type === 'direct_income');
-    } else if (filterType === 'others') {
+    } else if (filterType === 'royalty_income') {
+      rows = rows.filter((tx) => tx.type === 'royalty_income');
+    } else if (filterType === 'fund_transfer') {
       rows = rows.filter((tx) =>
         tx.type === 'p2p_transfer'
+        || tx.type === 'royalty_transfer'
         || (tx.type === 'income_transfer' && !isWithdrawalRefundEntry(tx))
       );
     } else if (filterType === 'deposit') {
@@ -463,15 +463,16 @@ export default function Transactions() {
             <div className="flex w-full sm:w-auto flex-col sm:flex-row sm:items-center gap-3">
               <select
                 value={filterType}
-                onChange={(e) => setFilterType(e.target.value as 'all' | 'help' | 'direct_income' | 'others' | 'deposit' | 'withdrawal')}
+                onChange={(e) => setFilterType(e.target.value as 'all' | 'help' | 'direct_income' | 'royalty_income' | 'fund_transfer' | 'deposit' | 'withdrawal')}
                 className="h-9 px-3 rounded-md bg-[#1f2937] border border-white/10 text-white text-sm w-full sm:w-auto"
               >
                 <option value="all">All</option>
                 <option value="help">Help (Receive + Give)</option>
-                <option value="direct_income">Direct Sponsor Income</option>
+                <option value="direct_income">Referral Income</option>
                 <option value="deposit">Deposit</option>
                 <option value="withdrawal">Withdrawal</option>
-                <option value="others">Others (P2P / Transfer)</option>
+                <option value="fund_transfer">Fund Transfer</option>
+                <option value="royalty_income">Royalty Income</option>
               </select>
               <select
                 value={levelFilter}
@@ -502,7 +503,7 @@ export default function Transactions() {
                         <p className="text-xs text-white/50">{getTransactionDateLabel(tx)}</p>
                         <div className="mt-1 flex items-center gap-2">
                           <Badge variant="outline" className="border-white/20 text-white/80">
-                            {getTransactionTypeLabel(tx.type)}
+                            {getTransactionTypeLabel(tx.type, tx.description)}
                           </Badge>
                           {lockedIncomeStateByTxId.get(tx.id) === 'locked' && (
                             <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30">
@@ -559,7 +560,7 @@ export default function Transactions() {
                               )}
                             </div>
                             <Badge variant="outline" className="border-white/20 text-white/80">
-                              {getTransactionTypeLabel(tx.type)}
+                              {getTransactionTypeLabel(tx.type, tx.description)}
                             </Badge>
                             {lockedIncomeStateByTxId.get(tx.id) === 'locked' && (
                               <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30">

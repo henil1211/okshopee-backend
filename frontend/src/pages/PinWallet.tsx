@@ -13,6 +13,7 @@ import {
 import Database from '@/db';
 import { toast } from 'sonner';
 import { useNavigate } from 'react-router-dom';
+import { readOptimizedUploadDataUrl } from '@/utils/helpers';
 
 export default function PinWallet() {
   const navigate = useNavigate();
@@ -261,14 +262,19 @@ export default function PinWallet() {
     }
   };
 
-  const handleRequestProofUpload = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleRequestProofUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setRequestProof(reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const proofDataUrl = await readOptimizedUploadDataUrl(file, {
+        maxDimension: 1800,
+        targetBytes: 650 * 1024,
+        quality: 0.86
+      });
+      setRequestProof(proofDataUrl);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to process payment screenshot');
+    }
   };
 
   const handlePinRequestSubmit = async () => {
