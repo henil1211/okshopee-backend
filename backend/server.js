@@ -65,6 +65,9 @@ const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || '';
 const STATE_BACKUP_DIR = path.join(__dirname, 'data', 'backups');
 const UPLOADS_BASE_DIR = path.join(__dirname, 'data', 'uploads');
 const ALLOWED_UPLOAD_SCOPES = new Set([
+  'marketplace-retailers',
+  'marketplace-banners',
+  'marketplace-deals',
   'marketplace-invoices',
   'support-attachments',
   'invoice-queries',
