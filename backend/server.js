@@ -1008,6 +1008,22 @@ async function serveUploadedFile(req, res, url) {
   }
 }
 
+async function readPaymentMethodsState() {
+  const raw = await readStateKeyValue('mlm_payment_methods');
+  if (!raw) return [];
+
+  const parsed = safeParseJSON(raw);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+async function writePaymentMethodsState(methods) {
+  const normalized = Array.isArray(methods) ? methods : [];
+  const saved = await writeStateToDB({
+    mlm_payment_methods: JSON.stringify(normalized)
+  }, false);
+  return saved;
+}
+
 // ─── HTTP server ─────────────────────────────────────────────────────
 
 const server = createServer(async (req, res) => {
@@ -1118,6 +1134,35 @@ const server = createServer(async (req, res) => {
       const message = getErrorMessage(error, 'Failed to persist state');
       const status = getHttpStatusForRequestError(error);
       console.error(`[POST /api/state] ${message}`);
+      sendJson(res, status, { ok: false, error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/payment-methods') {
+    try {
+      const methods = await readPaymentMethodsState();
+      sendJson(res, 200, { ok: true, methods });
+    } catch (error) {
+      const message = getErrorMessage(error, 'Failed to load payment methods');
+      const status = getHttpStatusForRequestError(error);
+      console.error(`[GET /api/payment-methods] ${message}`);
+      sendJson(res, status, { ok: false, error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/payment-methods') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const methods = Array.isArray(parsed?.methods) ? parsed.methods : [];
+      const saved = await writePaymentMethodsState(methods);
+      sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt });
+    } catch (error) {
+      const message = getErrorMessage(error, 'Failed to save payment methods');
+      const status = getHttpStatusForRequestError(error);
+      console.error(`[POST /api/payment-methods] ${message}`);
       sendJson(res, status, { ok: false, error: message });
     }
     return;
