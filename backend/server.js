@@ -218,6 +218,16 @@ function toMySQLDatetime(isoString) {
 // ─── In-memory snapshot cache ────────────────────────────────────────
 let stateSnapshotCache = null;
 let activeStateBackupPromise = null;
+let paymentMethodsSnapshotCache = null;
+
+function clonePaymentMethodsSnapshot(methods) {
+  if (!Array.isArray(methods)) return [];
+  try {
+    return JSON.parse(JSON.stringify(methods));
+  } catch {
+    return methods.map((method) => ({ ...method }));
+  }
+}
 
 function getErrorMessage(error, fallback = 'Unknown error') {
   return error instanceof Error ? error.message : fallback;
@@ -1009,19 +1019,58 @@ async function serveUploadedFile(req, res, url) {
 }
 
 async function readPaymentMethodsState() {
-  const raw = await readStateKeyValue('mlm_payment_methods');
-  if (!raw) return [];
+  if (Array.isArray(paymentMethodsSnapshotCache)) {
+    return clonePaymentMethodsSnapshot(paymentMethodsSnapshotCache);
+  }
 
-  const parsed = safeParseJSON(raw);
-  return Array.isArray(parsed) ? parsed : [];
+  const cachedRaw = stateSnapshotCache?.snapshot?.state?.mlm_payment_methods;
+  if (typeof cachedRaw === 'string') {
+    const cachedParsed = safeParseJSON(cachedRaw);
+    if (Array.isArray(cachedParsed)) {
+      paymentMethodsSnapshotCache = clonePaymentMethodsSnapshot(cachedParsed);
+      return clonePaymentMethodsSnapshot(cachedParsed);
+    }
+  }
+
+  try {
+    const raw = await readStateKeyValue('mlm_payment_methods');
+    if (!raw) {
+      paymentMethodsSnapshotCache = [];
+      return [];
+    }
+
+    const parsed = safeParseJSON(raw);
+    if (Array.isArray(parsed)) {
+      paymentMethodsSnapshotCache = clonePaymentMethodsSnapshot(parsed);
+      return clonePaymentMethodsSnapshot(parsed);
+    }
+  } catch (error) {
+    if (Array.isArray(paymentMethodsSnapshotCache)) {
+      return clonePaymentMethodsSnapshot(paymentMethodsSnapshotCache);
+    }
+    throw error;
+  }
+
+  paymentMethodsSnapshotCache = [];
+  return [];
 }
 
 async function writePaymentMethodsState(methods) {
   const normalized = Array.isArray(methods) ? methods : [];
-  const saved = await writeStateToDB({
-    mlm_payment_methods: JSON.stringify(normalized)
-  }, false);
-  return saved;
+  const updatedAt = new Date().toISOString();
+  const serialized = JSON.stringify(normalized);
+
+  await upsertStateKeyValue('mlm_payment_methods', serialized, updatedAt);
+  paymentMethodsSnapshotCache = clonePaymentMethodsSnapshot(normalized);
+
+  if (stateSnapshotCache?.snapshot) {
+    const nextSnapshot = cloneStateSnapshot(stateSnapshotCache.snapshot);
+    nextSnapshot.state = { ...(nextSnapshot.state || {}), mlm_payment_methods: serialized };
+    nextSnapshot.updatedAt = updatedAt;
+    await setStateSnapshotCache(nextSnapshot);
+  }
+
+  return { updatedAt };
 }
 
 // ─── HTTP server ─────────────────────────────────────────────────────
