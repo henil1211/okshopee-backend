@@ -170,7 +170,8 @@ async function runAudit() {
     for (let w of projectedWallets) {
        if (w.lockedIncomeWallet < 0) {
          const debt = Math.abs(w.lockedIncomeWallet);
-         const theirGives = projectedTransactions.filter(t => t.type === 'give_help' && t.userId === w.id && !t._markRemove && t.status === 'completed');
+         // FIX: Use w.userId instead of w.id since wallets schema only has userId
+         const theirGives = projectedTransactions.filter(t => t.type === 'give_help' && t.userId === w.userId && !t._markRemove && t.status === 'completed');
          theirGives.sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
          
          let remainingDebt = debt;
@@ -184,7 +185,7 @@ async function runAudit() {
            
            auditLog.push(`CASCADING FIX: Reversed give_help of $${Math.abs(gTx.amount)} for User ${w.userId} because their locked balance dropped below zero due to ghost/dup fixes.`);
 
-           const matchedReceive = projectedTransactions.find(t => t.type === 'receive_help' && !t._markRemove && t.fromUserId === w.id && t.amount === Math.abs(gTx.amount) && Math.abs(new Date(t.createdAt).getTime() - new Date(gTx.createdAt).getTime()) < 5000);
+           const matchedReceive = projectedTransactions.find(t => t.type === 'receive_help' && !t._markRemove && t.fromUserId === w.userId && t.amount === Math.abs(gTx.amount) && Math.abs(new Date(t.createdAt).getTime() - new Date(gTx.createdAt).getTime()) < 5000);
            if (matchedReceive) {
               matchedReceive._markRemove = true;
               let rec_w = resolveUser(matchedReceive.userId, projectedWallets);
@@ -197,14 +198,15 @@ async function runAudit() {
            }
          }
        }
-       
-       // SPENT RECOVERY (Debt)
-       // If after all reversals, their incomeWallet drops below 0 (because they withdrew/spent fake funds), store it in fundRecoveryDue
+    }
+
+    // 5. SPENT RECOVERY (Debt Calculation for all users)
+    // Run this as a final pass so all cascading deductions (even on uplines processed earlier) are caught!
+    for (let w of projectedWallets) {
        if (w.incomeWallet < 0) {
          w.fundRecoveryDue = (w.fundRecoveryDue || 0) + Math.abs(w.incomeWallet);
          w.incomeWallet = 0;
        }
-       // Process same for locked income (though rare to be spent before unlock)
        if (w.lockedIncomeWallet < 0) {
          w.fundRecoveryDue = (w.fundRecoveryDue || 0) + Math.abs(w.lockedIncomeWallet);
          w.lockedIncomeWallet = 0; 
