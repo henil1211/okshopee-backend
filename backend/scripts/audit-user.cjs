@@ -2,20 +2,23 @@ const mysql = require('mysql2/promise');
 const fs = require('fs').promises;
 const path = require('path');
 
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
 async function auditUser() {
     const targetId = process.argv[2];
     const backupPath = process.argv[3];
 
     if (!targetId || !backupPath) {
-        console.log('Usage: node scripts/audit-user.js [USER_ID] [PATH_TO_BACKUP_JSON]');
+        console.log('Usage: node scripts/audit-user.cjs [USER_ID] [PATH_TO_BACKUP_JSON]');
         process.exit(1);
     }
 
     const pool = mysql.createPool({
-        host: 'localhost',
-        user: 'root',
-        password: '',
-        database: 'okshopee'
+        host: process.env.MYSQL_HOST,
+        user: process.env.MYSQL_USER,
+        password: process.env.MYSQL_PASSWORD,
+        database: process.env.MYSQL_DATABASE,
+        port: Number(process.env.MYSQL_PORT) || 3306
     });
 
     try {
