@@ -21,7 +21,13 @@ async function dumpBackup() {
     try {
         console.log("Loading data for Backup Dump...");
         
-        // 1. Load Live Users (for naming)
+        // Helper to handle ID format inconsistencies
+        const normalizeId = (id) => {
+            if (!id) return '';
+            return String(id).replace('user_', '').trim();
+        };
+
+        // 1. Load Live Users (for naming bridge)
         const [userRows] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_users'");
         const liveUsers = JSON.parse(userRows[0]?.state_value || '[]');
 
