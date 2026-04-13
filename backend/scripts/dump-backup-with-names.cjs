@@ -30,29 +30,33 @@ async function dumpBackup() {
         const oldWallets = backupData.wallets || [];
         const oldTxs = backupData.transactions || [];
 
-        // 3. Normalization Helper
-        const normalizeId = (id) => String(id || '').replace('user_', '').trim();
-
-        // 4. Build Identity Map from Backup Transactions (The most reliable way)
-        const backupIdentityMap = new Map(); 
+        // 4. Discovery Phase: Bridge Old IDs to Real Names/Public IDs
+        console.log("Discovery Phase: Bridging backup IDs to identities...");
+        const identityBridge = new Map(); // Key: Internal Backup ID -> Value: { name, publicId }
+        
         for (const tx of oldTxs) {
             const match = String(tx.description).match(/(.*?)\s?\((.*?)\)/);
             if (match) {
                 const nameInTx = match[1].trim();
                 const publicIdInTx = match[2].trim();
-                backupIdentityMap.set(normalizeId(tx.userId), { name: nameInTx, publicId: publicIdInTx });
+                
+                // Only save the identity if it looks like a real name, not a transaction type
+                if (!nameInTx.includes('income') && !nameInTx.includes('help') && !nameInTx.includes('split')) {
+                    identityBridge.set(tx.userId, { name: nameInTx, publicId: publicIdInTx });
+                }
             }
         }
 
-        // 5. Generate Report
+        // 5. Generate Report from Backup Wallets
         const reportData = [];
         for (const wallet of oldWallets) {
-            const normId = normalizeId(wallet.userId);
+            const id = wallet.userId;
+            const normId = normalizeId(id);
             
-            // Try to get name from transaction history map
-            let identity = backupIdentityMap.get(normId);
+            // Try to get identity from our transaction bridge
+            let identity = identityBridge.get(id);
 
-            // Fallback: Try to get name from live users
+            // Fallback: If no transaction found, check live users by normalized ID
             if (!identity) {
                 const liveU = liveUsers.find(u => normalizeId(u.userId) === normId || String(u.publicUserId) === normId);
                 if (liveU) {
@@ -61,12 +65,13 @@ async function dumpBackup() {
             }
 
             reportData.push({
-                'Internal ID': wallet.userId,
-                'Public ID': identity?.publicId || 'Unknown',
-                'Name': identity?.name || 'Unknown User',
-                'Income Wallet': wallet.incomeWallet || 0,
-                'Activation Wallet': wallet.activationWallet || 0,
-                'Debt (Recovery)': wallet.fundRecoveryDue || 0
+                'Internal ID': id,
+                'Public ID': identity?.publicId || 'N/A',
+                'Name': identity?.name || 'Unknown',
+                'Income Wallet': (wallet.incomeWallet || 0).toFixed(2),
+                'Deposit (Activation)': (wallet.activationWallet || 0).toFixed(2),
+                'Locked Income': (wallet.lockedIncome || 0).toFixed(2),
+                'Total Income (Earned)': (wallet.totalIncome || 0).toFixed(2)
             });
         }
 
@@ -74,7 +79,12 @@ async function dumpBackup() {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const reportDir = path.join(__dirname, '..', 'data', 'reports');
         await fs.mkdir(reportDir, { recursive: true });
-        const reportPath = path.join(reportDir, `backup-data-dump-${timestamp}.csv`);
+        const reportPath = path.join(reportDir, `PRE-CLEANUP-DATA-${timestamp}.csv`);
+
+        if (reportData.length === 0) {
+            console.log("No data found in backup JSON!");
+            return;
+        }
 
         const headers = Object.keys(reportData[0]).join(',');
         const rows = reportData.map(row => 
