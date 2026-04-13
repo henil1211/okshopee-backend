@@ -143,10 +143,13 @@ async function runAudit() {
           tx._isReversed = true;
           let w = resolveUser(tx.userId, projectedWallets);
           if (w) {
-            // Usually L1 or L2 goes to locked in some matrix rules, but let's check description for "locked"
+            // Fix: Level 1 help goes to incomeWallet (Unlocked). Level 2+ usually goes to lockedIncomeWallet if description contains "locked"
             const isLockedDesc = String(tx.description || '').toLowerCase().includes('locked');
-            if (L === 1 || isLockedDesc) w.lockedIncomeWallet -= Math.abs(tx.amount);
-            else w.incomeWallet -= Math.abs(tx.amount);
+            if (L > 1 && isLockedDesc) {
+              w.lockedIncomeWallet -= Math.abs(tx.amount);
+            } else {
+              w.incomeWallet -= Math.abs(tx.amount);
+            }
             w.totalReceived -= Math.abs(tx.amount);
           }
 
@@ -183,8 +186,11 @@ async function runAudit() {
           let w = resolveUser(txs[i].userId, projectedWallets);
           if (w) {
             const isLockedDesc = String(txs[i].description || '').toLowerCase().includes('locked');
-            if (extractedLevel === 1 || isLockedDesc) w.lockedIncomeWallet -= Math.abs(txs[i].amount);
-            else w.incomeWallet -= Math.abs(txs[i].amount);
+            if (extractedLevel > 1 && isLockedDesc) {
+              w.lockedIncomeWallet -= Math.abs(txs[i].amount);
+            } else {
+              w.incomeWallet -= Math.abs(txs[i].amount);
+            }
             w.totalReceived -= Math.abs(txs[i].amount);
           }
 
@@ -210,7 +216,14 @@ async function runAudit() {
        if (w.lockedIncomeWallet < 0) {
          const debt = Math.abs(w.lockedIncomeWallet);
          // FIX: Use w.userId instead of w.id since wallets schema only has userId
-         const theirGives = projectedTransactions.filter(t => t.type === 'give_help' && t.userId === w.userId && !t._isReversed && t.status === 'completed');
+         // FIX: DO NOT reverse Level 1 gives, because Level 1 $5 auto-give happens at activation and doesn't come from lockedIncomeWallet!
+         const theirGives = projectedTransactions.filter(t => 
+           t.type === 'give_help' && 
+           t.userId === w.userId && 
+           !t._isReversed && 
+           t.status === 'completed' &&
+           resolveTransactionLevel(t) > 1 
+         );
          theirGives.sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
          
          let remainingDebt = debt;
@@ -241,8 +254,12 @@ async function runAudit() {
               matchedReceive._isReversed = true;
               let rec_w = resolveUser(matchedReceive.userId, projectedWallets);
               if (rec_w) {
-                if (resolveTransactionLevel(matchedReceive) === 1 || String(matchedReceive.description).toLowerCase().includes('locked')) rec_w.lockedIncomeWallet -= Math.abs(matchedReceive.amount);
-                else rec_w.incomeWallet -= Math.abs(matchedReceive.amount);
+                const isLockedDesc = String(matchedReceive.description).toLowerCase().includes('locked');
+                if (resolveTransactionLevel(matchedReceive) > 1 && isLockedDesc) {
+                  rec_w.lockedIncomeWallet -= Math.abs(matchedReceive.amount);
+                } else {
+                  rec_w.incomeWallet -= Math.abs(matchedReceive.amount);
+                }
                 rec_w.totalReceived -= Math.abs(matchedReceive.amount);
 
                 projectedTransactions.push({
