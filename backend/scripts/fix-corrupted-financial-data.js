@@ -80,12 +80,18 @@ async function run() {
     for (const tx of transactions) {
       let isGhost = false;
       if (tx.type === 'receive_help' || tx.type === 'direct_income') {
-        if (tx.fromUserId && !validUserIds.has(tx.fromUserId) && !validInternalIds.has(tx.fromUserId)) {
+        // FORCE GHOST DETECTION: Treat any legacy 'user_' ID as a ghost now,
+        // because we only want to keep income from the new 7-digit numeric IDs.
+        if (tx.fromUserId && (String(tx.fromUserId).startsWith('user_') || (!validUserIds.has(tx.fromUserId) && !validInternalIds.has(tx.fromUserId)))) {
           isGhost = true;
         }
+        
+        // Also check if description contains an old ID pattern
         const match = String(tx.description || '').match(/\((\d{7})\)/);
-        if (match && !validUserIds.has(match[1])) {
-          isGhost = true;
+        if (match) {
+           if (!validUserIds.has(match[1])) isGhost = true;
+        } else if (String(tx.description || '').includes('user_')) {
+           isGhost = true;
         }
       }
 
