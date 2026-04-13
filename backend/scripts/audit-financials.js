@@ -212,11 +212,15 @@ async function runAudit() {
     }
 
     // GENERATE WALLET DIFF EXCEL (CSV)
-    let csvData = "UserId,Old_Income,New_Income,Income_Diff,Old_Locked,New_Locked,Locked_Diff,Old_Total_Recv,New_Total_Recv,Recv_Diff,Fund_Recovery_Debt,Status\n";
+    let csvData = "Internal_Id,7_Digit_Id,Name,Old_Income,New_Income,Income_Diff,Old_Locked,New_Locked,Locked_Diff,Old_Total_Recv,New_Total_Recv,Recv_Diff,Fund_Recovery_Debt,Status\n";
     for (const oldW of originalWallets) {
       const newW = projectedWallets.find(w => w.userId === oldW.userId);
       if (!newW) continue;
       
+      const u = resolveUser(oldW.userId, users);
+      const publicId = u ? u.userId : 'Unknown';
+      const fullName = u ? u.fullName : 'Unknown';
+
       const incDiff = newW.incomeWallet - oldW.incomeWallet;
       const lockedDiff = newW.lockedIncomeWallet - oldW.lockedIncomeWallet;
       const recvDiff = newW.totalReceived - oldW.totalReceived;
@@ -226,7 +230,7 @@ async function runAudit() {
         let status = "Adjusted";
         if (debtCreated > 0) status = "DEBT_CREATED (Spent Fake Funds)";
         
-        csvData += `${oldW.userId},${oldW.incomeWallet.toFixed(2)},${newW.incomeWallet.toFixed(2)},${incDiff.toFixed(2)},${oldW.lockedIncomeWallet.toFixed(2)},${newW.lockedIncomeWallet.toFixed(2)},${lockedDiff.toFixed(2)},${oldW.totalReceived.toFixed(2)},${newW.totalReceived.toFixed(2)},${recvDiff.toFixed(2)},${newW.fundRecoveryDue || 0},${status}\n`;
+        csvData += `${oldW.userId},${publicId},${fullName},${oldW.incomeWallet.toFixed(2)},${newW.incomeWallet.toFixed(2)},${incDiff.toFixed(2)},${oldW.lockedIncomeWallet.toFixed(2)},${newW.lockedIncomeWallet.toFixed(2)},${lockedDiff.toFixed(2)},${oldW.totalReceived.toFixed(2)},${newW.totalReceived.toFixed(2)},${recvDiff.toFixed(2)},${newW.fundRecoveryDue || 0},${status}\n`;
       }
     }
 
