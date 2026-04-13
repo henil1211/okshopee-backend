@@ -106,17 +106,9 @@ async function run() {
              wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
              wallet.incomeWallet = 0;
           }
-          const ghostSnd = tx.fromUserId || String(tx.description || '').match(/\((\d{7})\)/)?.[1] || 'Unknown';
-          correctionTxs.push({
-             id: generateTxId('ghost_reversal'),
-             userId: tx.userId,
-             type: 'admin_correction',
-             amount: -amt,
-             status: 'completed',
-             description: `System Correction: Reversal of ghost payment from unmatched user (${ghostSnd})`,
-             createdAt: new Date().toISOString(),
-             completedAt: new Date().toISOString()
-          });
+          tx.status = 'reversed';
+          tx.description = `${tx.description} [REVERSED: Unmatched Sender]`;
+          retainedTransactions.push(tx);
         }
       } else {
         retainedTransactions.push(tx);
@@ -222,25 +214,13 @@ async function run() {
                    wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
                    wallet.incomeWallet = 0;
                 }
-                const refSnd = resolveUserByRef(dup.fromUserId, users);
-                const refDisplay = refSnd ? `${refSnd.fullName} (${refSnd.userId})` : dup.fromUserId;
-                correctionTxs.push({
-                   id: generateTxId('duplicate_referral'),
-                   userId: dup.userId,
-                   type: 'admin_correction',
-                   amount: -amt,
-                   status: 'completed',
-                   description: `System Correction: Reversal of accidentally duplicated direct referral income from ${refDisplay}`,
-                   createdAt: new Date().toISOString(),
-                   completedAt: new Date().toISOString()
-                });
+                dup.status = 'reversed';
+                dup.description = `${dup.description} [REVERSED: Duplicate Entry]`;
              }
           }
        }
     }
-
-    transactions = transactions.filter(tx => !directIncomeIdsToRemove.has(tx.id));
-    console.log(`-> Removed ${trueDuplicatesRemoved} redundant referral records. Reversed ${trueDupAmt} from wallets.`);
+    console.log(`-> Handled exact duplicate referral incomes.`);
 
 
     // ==========================================
@@ -303,6 +283,8 @@ async function run() {
                    sWallet.giveHelpLocked += Math.abs(gTx.amount || 0);
                    sWallet.totalGiven -= Math.abs(gTx.amount || 0);
                 }
+                gTx.status = 'reversed';
+                gTx.description = `${gTx.description} [REVERSED: Duplicate Help Entry]`;
              }
 
              for (let i = 1; i < matchedReceives.length; i++) {
@@ -318,18 +300,8 @@ async function run() {
                       rWallet.fundRecoveryDue = (rWallet.fundRecoveryDue || 0) + Math.abs(rWallet.incomeWallet);
                       rWallet.incomeWallet = 0;
                    }
-                   const hlpSnd = resolveUserByRef(rTx.fromUserId, users);
-                   const hlpDisplay = hlpSnd ? `${hlpSnd.fullName} (${hlpSnd.userId})` : rTx.fromUserId;
-                   correctionTxs.push({
-                      id: generateTxId('duplicate_help_reversal'),
-                      userId: rTx.userId,
-                      type: 'admin_correction',
-                      amount: -amt,
-                      status: 'completed',
-                      description: `System Correction: Erased accidentally duplicated identical help reception from ${hlpDisplay}`,
-                      createdAt: new Date().toISOString(),
-                      completedAt: new Date().toISOString()
-                   });
+                   rTx.status = 'reversed';
+                   rTx.description = `${rTx.description} [REVERSED: Duplicate Help Entry]`;
                 }
              }
           }
@@ -347,8 +319,7 @@ async function run() {
        flush();
     }
 
-    transactions = transactions.filter(tx => !dupLockedGiveIdsToRemove.has(tx.id) && !dupReceiveIdsToRemove.has(tx.id));
-    console.log(`-> Removed ${dupLockedGiveIdsToRemove.size} duplicate give_help and ${dupReceiveIdsToRemove.size} duplicate receive_help.`);
+    console.log(`-> Handled ${dupLockedGiveIdsToRemove.size} duplicate give_help and ${dupReceiveIdsToRemove.size} duplicate receive_help.`);
 
     // ==========================================
     // PHASE 5: Recursive Matrix Downgrade Cascade
@@ -408,12 +379,14 @@ async function run() {
           for (const tx of transactions) {
              if (invalidGiveIds.has(tx.id)) {
                 const displayUser = resolveUserByRef(tx.userId, users)?.userId || tx.userId;
-                console.log(`[Cascade] Deleting invalid upgrade ${tx.id} for user ${displayUser} at Level ${resolveTransactionLevel(tx)}`);
+                console.log(`[Cascade] Reversing invalid upgrade ${tx.id} for user ${displayUser} at Level ${resolveTransactionLevel(tx)}`);
                 const wallet = wallets.find(w => w.userId === tx.userId || w.userId === resolveUserByRef(tx.userId, users)?.userId);
                 if (wallet) {
                    wallet.giveHelpLocked -= Math.abs(tx.amount || 0);
                    wallet.totalGiven -= Math.abs(tx.amount || 0);
                 }
+                tx.status = 'reversed';
+                tx.description = `${tx.description} [REVERSED: Unearned Matrix Upgrade]`;
              }
              if (associatedReceiveIds.has(tx.id)) {
                 const uplineDisplay = resolveUserByRef(tx.userId, users)?.userId || tx.userId;
@@ -433,28 +406,12 @@ async function run() {
                       wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
                       wallet.incomeWallet = 0;
                    }
-                   const dnSnd = resolveUserByRef(tx.fromUserId, users);
-                   const dnDisplay = dnSnd ? `${dnSnd.fullName} (${dnSnd.userId})` : tx.fromUserId;
-                   correctionTxs.push({
-                      id: generateTxId('cascade_downgrade'),
-                      userId: tx.userId,
-                      type: 'admin_correction',
-                      amount: -amt,
-                      status: 'completed',
-                      description: `System Correction: Refund of unearned matrix progression cascade originating from ${dnDisplay}`,
-                      createdAt: new Date().toISOString(),
-                      completedAt: new Date().toISOString()
-                   });
+                   tx.status = 'reversed';
+                   tx.description = `${tx.description} [REVERSED: From Invalid Downline Upgrade]`;
                 }
              }
           }
-    transactions = transactions.filter(tx => !invalidGiveIds.has(tx.id) && !associatedReceiveIds.has(tx.id));
        }
-    }
-    
-    if (correctionTxs.length > 0) {
-       console.log(`\nAdding ${correctionTxs.length} explicit System Correction logs to the database...`);
-       transactions.push(...correctionTxs);
     }
     
     console.log(`-> Cascaded Matrix Reversal: Reclaimed ${cascadeCount} invalid upgrades from uplines.`);
