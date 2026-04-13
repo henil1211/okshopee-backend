@@ -16,7 +16,15 @@ async function run() {
     return;
   }
 
-  const backupPath = path.join(__dirname, '..', 'data', 'backups', backupFilename);
+  let backupPath = backupFilename;
+  if (!path.isAbsolute(backupPath)) {
+    // If they just provided the filename, look in the backups folder
+    backupPath = path.join(__dirname, '..', 'data', 'backups', backupFilename);
+  }
+  
+  if (backupPath.startsWith('"') && backupPath.endsWith('"')) {
+     backupPath = backupPath.slice(1, -1);
+  }
   
   try {
     const rawData = await fs.readFile(backupPath, 'utf8');
