@@ -21,6 +21,12 @@ async function generateFullReport() {
     try {
         console.log("Starting Full Forensic Audit...");
         
+        // Helper to handle ID format inconsistencies (numbers vs user_ prefix)
+        const normalizeId = (id) => {
+            if (!id) return '';
+            return String(id).replace('user_', '').trim();
+        };
+
         // 1. Load Live Data
         const [userRows] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_users'");
         const [walletRows] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_wallets'");
