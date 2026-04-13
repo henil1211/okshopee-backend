@@ -35,10 +35,25 @@ async function generateFullReport() {
 
         console.log(`Loaded ${liveUsers.length} live users and ${oldWallets.length} users from backup.`);
 
-        // 3. Normalization Helper
-        const normalizeId = (id) => String(id).replace('user_', '').trim();
+        // 4. Discovery Phase: Build a map from Backup Identities to Backup IDs
+        console.log("Discovery Phase: Mapping identities from backup transactions...");
+        const backupIdentityMap = new Map(); // Key: PublicId or Name -> Value: Internal Backup ID
         
-        // 4. Compare and Build Report
+        for (const tx of oldTxs) {
+            // Pattern: "Name (PublicId)"
+            const match = String(tx.description).match(/(.*?)\s?\((.*?)\)/);
+            if (match) {
+                const nameInTx = match[1].trim();
+                const publicIdInTx = match[2].trim();
+                backupIdentityMap.set(nameInTx.toLowerCase(), tx.userId);
+                backupIdentityMap.set(publicIdInTx, tx.userId);
+            }
+            if (tx.userId) {
+                backupIdentityMap.set(normalizeId(tx.userId), tx.userId);
+            }
+        }
+
+        // 5. Compare and Build Report
         const reportData = [];
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const reportDir = path.join(__dirname, '..', 'data', 'reports');
@@ -47,41 +62,36 @@ async function generateFullReport() {
 
         let affectedCount = 0;
 
-        console.log("Deep Reconciling Users (Identity-First Search)...");
+        console.log("Comparing Users (Identity-Discovery Search)...");
 
         for (const user of liveUsers) {
-            const searchTerms = [
-                String(user.userId),
-                String(user.publicUserId),
-                normalizeId(user.userId)
-            ].filter(Boolean);
+            const liveNormId = normalizeId(user.userId);
+            const liveW = liveWallets.find(w => normalizeId(w.userId) === liveNormId);
+            
+            // Link to Backup ID
+            const backupId = 
+                backupIdentityMap.get(String(user.publicUserId)) || 
+                backupIdentityMap.get(String(user.fullName).toLowerCase()) ||
+                backupIdentityMap.get(liveNormId);
 
-            // 1. Find LIVE Wallet (Fuzzy)
-            const liveW = liveWallets.find(w => 
-                searchTerms.some(term => String(w.userId).includes(term))
-            );
-
-            // 2. Find BACKUP Wallet (Fuzzy + Transactional Clues)
-            let oldW = oldWallets.find(w => 
-                searchTerms.some(term => String(w.userId).includes(term))
-            );
-
-            if (!oldW) {
-                // Look for the user's name or ID in backup transactions
-                const relatedTx = oldTxs.find(tx => 
-                    searchTerms.some(term => String(tx.userId).includes(term) || String(tx.description).includes(term)) ||
-                    (user.fullName && String(tx.description).includes(user.fullName))
-                );
-                if (relatedTx) {
-                    oldW = oldWallets.find(w => w.userId === relatedTx.userId);
-                }
+            let oldW = null;
+            if (backupId) {
+                oldW = oldWallets.find(w => String(w.userId) === String(backupId));
+            } else {
+                // Last ditch effort: direct match in backup wallets
+                oldW = oldWallets.find(w => normalizeId(w.userId) === liveNormId);
             }
 
             if (!oldW || !liveW) continue;
 
-            const diffIncome = (liveW.incomeWallet || 0) - (oldW.incomeWallet || 0);
-            const diffActivation = (liveW.activationWallet || 0) - (oldW.activationWallet || 0);
-            const diffRecovery = (liveW.fundRecoveryDue || 0) - (oldW.fundRecoveryDue || 0);
+            const diffIncome = Number(liveW.incomeWallet || 0) - Number(oldW.incomeWallet || 0);
+            const diffActivation = Number(liveW.activationWallet || 0) - Number(oldW.activationWallet || 0);
+            const diffRecovery = Number(liveW.fundRecoveryDue || 0) - Number(oldW.fundRecoveryDue || 0);
+
+            // Print some debugging for Kiran or others if needed
+            if (user.publicUserId === '1330217' || user.fullName.includes('Kiran')) {
+                console.log(`Matched Kiran: LiveID=${user.userId}, BackupID=${backupId}, Diff=${diffIncome}`);
+            }
 
             // Only include in report if there is a difference
             if (diffIncome !== 0 || diffActivation !== 0 || diffRecovery !== 0) {
