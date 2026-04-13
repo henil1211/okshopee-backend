@@ -74,13 +74,26 @@ async function runAudit() {
       if (txs.length > 1) {
         txs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
         for (let i = 1; i < txs.length; i++) {
-          txs[i]._markRemove = true;
+          txs[i]._isReversed = true;
           let w = resolveUser(txs[i].userId, projectedWallets);
           if (w) {
             w.incomeWallet -= Math.abs(txs[i].amount);
             w.totalReceived -= Math.abs(txs[i].amount);
           }
-          auditLog.push(`DUPLICATE DIRECT INCOME: User ${w?.userId || txs[i].userId} received extra $${txs[i].amount} from ${key.split('__')[1]}`);
+          
+          projectedTransactions.push({
+            id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
+            userId: txs[i].userId,
+            type: 'fund_recovery',
+            amount: -Math.abs(txs[i].amount),
+            fromUserId: txs[i].fromUserId,
+            status: 'completed',
+            description: `System Reversed: Duplicate direct income received from ${key.split('__')[1]}`,
+            createdAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          });
+
+          auditLog.push(`DUPLICATE DIRECT INCOME: User ${w?.userId || txs[i].userId} received extra $${txs[i].amount} from ${key.split('__')[1]}. Added Reversal.`);
         }
       }
     }
@@ -117,7 +130,7 @@ async function runAudit() {
 
     // 3. DETECT GHOST & DUPLICATE RECEIVE HELP
     for (const tx of projectedTransactions) {
-      if (tx._markRemove) continue;
+      if (tx._isReversed) continue;
       if (tx.type === 'receive_help' && tx.status === 'completed') {
         const L = resolveTransactionLevel(tx);
         let ghost = false;
@@ -127,7 +140,7 @@ async function runAudit() {
         else if (!fromUser && !validInternalIds.has(tx.fromUserId) && !validUserIds.has(tx.fromUserId)) ghost = true;
 
         if (ghost) {
-          tx._markRemove = true;
+          tx._isReversed = true;
           let w = resolveUser(tx.userId, projectedWallets);
           if (w) {
             // Usually L1 or L2 goes to locked in some matrix rules, but let's check description for "locked"
@@ -136,7 +149,20 @@ async function runAudit() {
             else w.incomeWallet -= Math.abs(tx.amount);
             w.totalReceived -= Math.abs(tx.amount);
           }
-          auditLog.push(`GHOST HELP: User ${w?.userId || tx.userId} got fake $${tx.amount} at Level ${L} from phantom ID: ${tx.fromUserId}`);
+
+          projectedTransactions.push({
+            id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
+            userId: tx.userId,
+            type: 'fund_recovery',
+            amount: -Math.abs(tx.amount),
+            fromUserId: tx.fromUserId,
+            status: 'completed',
+            description: `System Reversed: Ghost receive help at Level ${L} from non-existent user ${tx.fromUserId || 'Unknown'}`,
+            createdAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          });
+
+          auditLog.push(`GHOST HELP: User ${w?.userId || tx.userId} got fake $${tx.amount} at Level ${L} from phantom ID: ${tx.fromUserId}. Added Reversal.`);
         } else {
           // Check for duplicate help at ALL levels
           const realFromUserId = fromUser ? fromUser.id : tx.fromUserId;
@@ -152,7 +178,7 @@ async function runAudit() {
       if (txs.length > 1) {
         txs.sort((a,b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
         for (let i = 1; i < txs.length; i++) {
-          txs[i]._markRemove = true;
+          txs[i]._isReversed = true;
           const extractedLevel = Number(k.split('__')[2].replace('L', ''));
           let w = resolveUser(txs[i].userId, projectedWallets);
           if (w) {
@@ -161,7 +187,20 @@ async function runAudit() {
             else w.incomeWallet -= Math.abs(txs[i].amount);
             w.totalReceived -= Math.abs(txs[i].amount);
           }
-          auditLog.push(`DUPLICATE HELP: User ${w?.userId} got double $${txs[i].amount} at Level ${extractedLevel} from ${k.split('__')[1]}`);
+
+          projectedTransactions.push({
+            id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
+            userId: txs[i].userId,
+            type: 'fund_recovery',
+            amount: -Math.abs(txs[i].amount),
+            fromUserId: txs[i].fromUserId,
+            status: 'completed',
+            description: `System Reversed: Duplicate receive help at Level ${extractedLevel} from ${k.split('__')[1]}`,
+            createdAt: new Date().toISOString(),
+            completedAt: new Date().toISOString()
+          });
+
+          auditLog.push(`DUPLICATE HELP: User ${w?.userId} got double $${txs[i].amount} at Level ${extractedLevel} from ${k.split('__')[1]}. Added Reversal.`);
         }
       }
     }
@@ -171,29 +210,54 @@ async function runAudit() {
        if (w.lockedIncomeWallet < 0) {
          const debt = Math.abs(w.lockedIncomeWallet);
          // FIX: Use w.userId instead of w.id since wallets schema only has userId
-         const theirGives = projectedTransactions.filter(t => t.type === 'give_help' && t.userId === w.userId && !t._markRemove && t.status === 'completed');
+         const theirGives = projectedTransactions.filter(t => t.type === 'give_help' && t.userId === w.userId && !t._isReversed && t.status === 'completed');
          theirGives.sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
          
          let remainingDebt = debt;
          for (let gTx of theirGives) {
            if (remainingDebt <= 0) break;
-           gTx._markRemove = true;
+           gTx._isReversed = true;
            remainingDebt -= Math.abs(gTx.amount);
            w.giveHelpLocked -= Math.abs(gTx.amount);
            w.totalGiven -= Math.abs(gTx.amount);
            w.lockedIncomeWallet += Math.abs(gTx.amount); 
            
+           projectedTransactions.push({
+             id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
+             userId: w.userId,
+             type: 'fund_recovery', // Represents adding funds back to reverse the erroneous give_help
+             amount: Math.abs(gTx.amount), 
+             fromUserId: 'system',
+             status: 'completed',
+             description: `System Reversed: Refund for invalid give_help due to cascaded ghost income`,
+             createdAt: new Date().toISOString(),
+             completedAt: new Date().toISOString()
+           });
+
            auditLog.push(`CASCADING FIX: Reversed give_help of $${Math.abs(gTx.amount)} for User ${w.userId} because their locked balance dropped below zero due to ghost/dup fixes.`);
 
-           const matchedReceive = projectedTransactions.find(t => t.type === 'receive_help' && !t._markRemove && t.fromUserId === w.userId && t.amount === Math.abs(gTx.amount) && Math.abs(new Date(t.createdAt).getTime() - new Date(gTx.createdAt).getTime()) < 5000);
+           const matchedReceive = projectedTransactions.find(t => t.type === 'receive_help' && !t._isReversed && t.fromUserId === w.userId && t.amount === Math.abs(gTx.amount) && Math.abs(new Date(t.createdAt).getTime() - new Date(gTx.createdAt).getTime()) < 5000);
            if (matchedReceive) {
-              matchedReceive._markRemove = true;
+              matchedReceive._isReversed = true;
               let rec_w = resolveUser(matchedReceive.userId, projectedWallets);
               if (rec_w) {
                 if (resolveTransactionLevel(matchedReceive) === 1 || String(matchedReceive.description).toLowerCase().includes('locked')) rec_w.lockedIncomeWallet -= Math.abs(matchedReceive.amount);
                 else rec_w.incomeWallet -= Math.abs(matchedReceive.amount);
                 rec_w.totalReceived -= Math.abs(matchedReceive.amount);
-                auditLog.push(`CASCADING FIX -> Deducted wrongfully received $${matchedReceive.amount} from Upline ${rec_w.userId}`);
+
+                projectedTransactions.push({
+                  id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
+                  userId: rec_w.userId,
+                  type: 'fund_recovery',
+                  amount: -Math.abs(matchedReceive.amount),
+                  fromUserId: matchedReceive.fromUserId,
+                  status: 'completed',
+                  description: `System Reversed: receive_help from ${matchedReceive.fromUserId} invalid due to cascaded ghost deduction`,
+                  createdAt: new Date().toISOString(),
+                  completedAt: new Date().toISOString()
+                });
+
+                auditLog.push(`CASCADING FIX -> Deducted wrongfully received $${matchedReceive.amount} from Upline ${rec_w.userId}. Added Reversal.`);
               }
            }
          }
@@ -203,12 +267,34 @@ async function runAudit() {
     // 5. SPENT RECOVERY (Debt Calculation for all users)
     // Run this as a final pass so all cascading deductions (even on uplines processed earlier) are caught!
     for (let w of projectedWallets) {
+       // Look for any manual administrative "Fund Recovery" transactions the user ALREADY paid
+       // EXCLUDE the automated 'System Reversed' transactions we just created!
+       const manualRecoveries = projectedTransactions.filter(t => 
+           t.type === 'fund_recovery' && 
+           t.userId === w.userId && 
+           t.status === 'completed' && 
+           !(t.description || '').startsWith('System Reversed:')
+       );
+       let historicallyPaid = manualRecoveries.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
+
        if (w.incomeWallet < 0) {
-         w.fundRecoveryDue = (w.fundRecoveryDue || 0) + Math.abs(w.incomeWallet);
+         let deficit = Math.abs(w.incomeWallet);
+         // Forgive the new deficit if they already paid via manual fund_recovery!
+         let forgiven = Math.min(deficit, historicallyPaid);
+         deficit -= forgiven;
+         historicallyPaid -= forgiven;
+
+         w.fundRecoveryDue = (w.fundRecoveryDue || 0) + deficit;
          w.incomeWallet = 0;
        }
+
        if (w.lockedIncomeWallet < 0) {
-         w.fundRecoveryDue = (w.fundRecoveryDue || 0) + Math.abs(w.lockedIncomeWallet);
+         let deficit = Math.abs(w.lockedIncomeWallet);
+         let forgiven = Math.min(deficit, historicallyPaid);
+         deficit -= forgiven;
+         historicallyPaid -= forgiven;
+
+         w.fundRecoveryDue = (w.fundRecoveryDue || 0) + deficit;
          w.lockedIncomeWallet = 0; 
        }
     }
@@ -246,8 +332,11 @@ async function runAudit() {
     const dataDir = path.join(__dirname, '..', 'data');
     await fs.mkdir(dataDir, { recursive: true });
     
-    // Save projections for Script 2
+    // Save projections for Script 2 (nothing deleted, only reversals appended)
     projectedTransactions = projectedTransactions.filter(t => !t._markRemove);
+    // Remove internal mapping properties
+    projectedTransactions.forEach(t => { delete t._isReversed; });
+    
     await fs.writeFile(path.join(dataDir, 'projected-audit-fixes.json'), JSON.stringify({
       transactions: projectedTransactions,
       wallets: projectedWallets,
