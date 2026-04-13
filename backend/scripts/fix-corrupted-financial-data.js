@@ -341,7 +341,7 @@ async function run() {
           }
        }
 
-       const lockedGives = transactions.filter(tx => tx.type === 'give_help' && tx.amount < 0 && String(tx.description).toLowerCase().includes('from locked income'));
+       const lockedGives = transactions.filter(tx => tx.type === 'give_help' && tx.amount < 0 && tx.status === 'completed' && String(tx.description).toLowerCase().includes('from locked income'));
        const invalidGiveIds = new Set();
        const associatedReceiveIds = new Set();
 
