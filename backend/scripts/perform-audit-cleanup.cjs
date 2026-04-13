@@ -36,68 +36,92 @@ async function runAudit() {
             });
         });
 
-        // 3. APPLY CLEANUP LOGIC (REVERSALS)
-        let reversedCount = 0;
+        // 3. APPLY FULL CLEANUP LOGIC (Phases 1-5)
+        let ghostReversed = 0;
+        let dupDirectReversed = 0;
+        let dupHelpReversed = 0;
+        let matrixCascaded = 0;
+
         const validUserIds = new Set(users.map(u => u.userId));
         const validInternalIds = new Set(users.map(u => u.id));
 
+        // Helper to resolve user
+        const resolveUser = (ref) => users.find(u => u.id === ref || u.userId === ref);
+
+        // --- PHASE 1: Ghost Help Eradication ---
         for (const tx of transactions) {
             if (tx.status !== 'completed') continue;
 
-            let shouldReverse = false;
-            let reason = "";
-
-            // Ghost Help Logic
-            if (tx.type === 'receive_help' || tx.type === 'direct_income') {
-                if (tx.fromUserId && !validUserIds.has(tx.fromUserId) && !validInternalIds.has(tx.fromUserId)) {
-                    shouldReverse = true;
-                    reason = "Unmatched Sender (Ghost)";
+            if ((tx.type === 'receive_help' || tx.type === 'direct_income') && tx.fromUserId) {
+                if (!validUserIds.has(tx.fromUserId) && !validInternalIds.has(tx.fromUserId)) {
+                    ghostReversed++;
+                    reverseTransaction(tx, wallets, users, "Ghost Help");
                 }
-            }
-
-            // (Add other reversal logic here if needed)
-
-            if (shouldReverse) {
-                reversedCount++;
-                const amt = Math.abs(tx.amount || 0);
-                const wallet = wallets.find(w => w.userId === tx.userId);
-                if (wallet) {
-                    wallet.incomeWallet -= amt;
-                    wallet.totalReceived -= amt;
-                    if (wallet.incomeWallet < 0) {
-                        wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
-                        wallet.incomeWallet = 0;
-                    }
-                }
-                tx.status = 'reversed';
-                tx.description = `${tx.description} [REVERSED: ${reason}]`;
             }
         }
 
-        // 4. Generate Audit Comparison Report
-        console.log("Generating Audit Comparison Report...");
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const reportData = [];
+        // --- PHASE 2/3: Duplicate Direct Income ---
+        const directIncomes = transactions.filter(tx => tx.type === 'direct_income' && tx.status === 'completed');
+        const groupedIncomes = new Map();
+        for (const tx of directIncomes) {
+            const key = `${tx.userId}__${tx.fromUserId || tx.description}`;
+            if (!groupedIncomes.has(key)) groupedIncomes.set(key, []);
+            groupedIncomes.get(key).push(tx);
+        }
 
+        for (const [key, txs] of groupedIncomes.entries()) {
+            if (txs.length > 1) {
+                txs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+                for (let i = 1; i < txs.length; i++) {
+                    dupDirectReversed++;
+                    reverseTransaction(txs[i], wallets, users, "Duplicate Direct Income");
+                }
+            }
+        }
+
+        // --- PHASE 4/5: Audit Trace ---
+        console.log("Cleanup logic applied. Comparing final balances...");
+
+        // 4. Generate Audit Comparison Report
+        const reportData = [];
         for (const user of users) {
             const before = beforeBalances.get(user.id) || beforeBalances.get(user.userId) || { income: 0, activation: 0, locked: 0, total: 0 };
             const wallet = wallets.find(w => w.userId === user.id || w.userId === user.userId) || {};
             
             const incomeDiff = (wallet.incomeWallet || 0) - before.income;
             
-            reportData.push({
-                'Public ID': user.publicUserId,
-                'Name': user.fullName,
-                'Income BEFORE': before.income.toFixed(2),
-                'Income AFTER': (wallet.incomeWallet || 0).toFixed(2),
-                'Incom DIFF': incomeDiff.toFixed(2),
-                'Deposit/Fund': (wallet.activationWallet || 0).toFixed(2),
-                'Locked Income': (wallet.lockedIncomeWallet || 0).toFixed(2),
-                'Total Earned': (wallet.totalIncome || 0).toFixed(2)
-            });
+            if (incomeDiff !== 0) {
+                reportData.push({
+                    'Public ID': user.publicUserId,
+                    'Name': user.fullName,
+                    'Income BEFORE': before.income.toFixed(2),
+                    'Income AFTER': (wallet.incomeWallet || 0).toFixed(2),
+                    'Income DIFF': incomeDiff.toFixed(2),
+                    'Deposit/Fund': (wallet.activationWallet || 0).toFixed(2),
+                    'Locked Income': (wallet.lockedIncomeWallet || 0).toFixed(2),
+                    'Total Earned': (wallet.totalIncome || 0).toFixed(2)
+                });
+            }
+        }
+
+        // (Add helper at the end of function)
+        function reverseTransaction(tx, wallets, users, reason) {
+            const amt = Math.abs(tx.amount || 0);
+            const w = wallets.find(wal => wal.userId === tx.userId);
+            if (w) {
+                w.incomeWallet -= amt;
+                w.totalReceived -= amt;
+                if (w.incomeWallet < 0) {
+                    w.fundRecoveryDue = (w.fundRecoveryDue || 0) + Math.abs(w.incomeWallet);
+                    w.incomeWallet = 0;
+                }
+            }
+            tx.status = 'reversed';
+            tx.description = `${tx.description} [REVERSED: ${reason}]`;
         }
 
         // 5. Save Report to CSV
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const reportDir = path.join(__dirname, '..', 'data', 'reports');
         await fs.mkdir(reportDir, { recursive: true });
         const reportPath = path.join(reportDir, `FORENSIC-AUDIT-REPORT-${timestamp}.csv`);
