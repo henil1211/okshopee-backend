@@ -36,64 +36,77 @@ async function runAudit() {
             });
         });
 
-        // 3. APPLY FULL CLEANUP LOGIC (Phases 1-5)
+        // 3. APPLY AGGRESSIVE CLEANUP LOGIC
         let ghostReversed = 0;
-        let dupDirectReversed = 0;
-        let dupHelpReversed = 0;
-        let matrixCascaded = 0;
+        let dupReversed = 0;
 
-        const validUserIds = new Set(users.map(u => u.userId));
         const validInternalIds = new Set(users.map(u => u.id));
 
-        // Helper to resolve user
-        const resolveUser = (ref) => users.find(u => u.id === ref || u.userId === ref);
-
-        // --- PHASE 1: Ghost Help Eradication ---
+        // --- PHASE 1: Real Ghost Eradication (In case some are still missing) ---
         for (const tx of transactions) {
             if (tx.status !== 'completed') continue;
+            if (!validInternalIds.has(tx.userId)) continue; // Recipient must exist
 
-            if ((tx.type === 'receive_help' || tx.type === 'direct_income') && tx.fromUserId) {
-                if (!validUserIds.has(tx.fromUserId) && !validInternalIds.has(tx.fromUserId)) {
+            if (tx.fromUserId && !validInternalIds.has(tx.fromUserId)) {
+                // Check if fromUserId is a 7-digit ID instead of internal ID
+                const fromUserObj = users.find(u => u.userId === tx.fromUserId);
+                if (!fromUserObj) {
                     ghostReversed++;
-                    reverseTransaction(tx, wallets, users, "Ghost Help");
+                    reverseTransaction(tx, wallets, users, "Orphaned Sender (Ghost)");
                 }
             }
         }
 
-        // --- PHASE 2/3: Duplicate Direct Income ---
-        const directIncomes = transactions.filter(tx => tx.type === 'direct_income' && tx.status === 'completed');
-        const groupedIncomes = new Map();
-        for (const tx of directIncomes) {
-            const key = `${tx.userId}__${tx.fromUserId || tx.description}`;
-            if (!groupedIncomes.has(key)) groupedIncomes.set(key, []);
-            groupedIncomes.get(key).push(tx);
+        // --- PHASE 2: Time-Windowed Duplicate Detection (The "Fake Money" Fix) ---
+        console.log("Analyzing for duplicate income clusters...");
+        const groups = new Map(); // Key: recipient_amount_normalizedDesc
+        
+        for (const tx of transactions) {
+            if (tx.status !== 'completed' || tx.amount <= 0) continue;
+            if (tx.type !== 'receive_help' && tx.type !== 'direct_income') continue;
+
+            // Normalize description to find patterns like "Income from X"
+            const desc = (tx.description || '').replace(/\d{10,}/g, '').trim(); 
+            const key = `${tx.userId}_${tx.amount}_${desc}`;
+            
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(tx);
         }
 
-        for (const [key, txs] of groupedIncomes.entries()) {
+        for (const [key, txs] of groups.entries()) {
             if (txs.length > 1) {
+                // Cluster by time (within 10 minutes)
                 txs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+                
+                let lastTime = 0;
                 for (let i = 1; i < txs.length; i++) {
-                    dupDirectReversed++;
-                    reverseTransaction(txs[i], wallets, users, "Duplicate Direct Income");
+                    const currentTime = new Date(txs[i].createdAt).getTime();
+                    const prevTime = new Date(txs[i-1].createdAt).getTime();
+                    
+                    if (currentTime - prevTime < 10 * 60 * 1000) { // 10 minute window
+                        dupReversed++;
+                        reverseTransaction(txs[i], wallets, users, "Duplicate Systematic Entry");
+                    }
                 }
             }
         }
 
-        // --- PHASE 4/5: Audit Trace ---
-        console.log("Cleanup logic applied. Comparing final balances...");
-
-        // 4. Generate Audit Comparison Report
+        // 4. Generate Audit Comparison Report (FULL USER LIST)
+        console.log("Generating Comprehensive Audit Report...");
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const reportData = [];
+
         for (const user of users) {
             const before = beforeBalances.get(user.id) || beforeBalances.get(user.userId) || { income: 0, activation: 0, locked: 0, total: 0 };
             const wallet = wallets.find(w => w.userId === user.id || w.userId === user.userId) || {};
             
             const incomeDiff = (wallet.incomeWallet || 0) - before.income;
             
-            if (incomeDiff !== 0) {
+            // Log ALL users who have a balance, to provide a complete report
+            if (before.income > 0 || (wallet.incomeWallet || 0) > 0 || before.activation > 0 || before.locked > 0) {
                 reportData.push({
-                    'Public ID': user.publicUserId,
-                    'Name': user.fullName,
+                    'Public ID': user.userId || user.publicUserId || 'N/A',
+                    'Name': user.fullName || user.username || 'Unknown',
                     'Income BEFORE': before.income.toFixed(2),
                     'Income AFTER': (wallet.incomeWallet || 0).toFixed(2),
                     'Income DIFF': incomeDiff.toFixed(2),
@@ -104,7 +117,25 @@ async function runAudit() {
             }
         }
 
-        // (Add helper at the end of function)
+        // 5. Save Report to CSV
+        const reportDir = path.join(__dirname, '..', 'data', 'reports');
+        await fs.mkdir(reportDir, { recursive: true });
+        const reportPath = path.join(reportDir, `FINAL-VERIFIED-AUDIT-${timestamp}.csv`);
+
+        const headers = Object.keys(reportData[0]).join(',');
+        const rows = reportData.map(row => Object.values(row).map(v => `"${v}"`).join(',')).join('\n');
+        await fs.writeFile(reportPath, headers + '\n' + rows);
+
+        // 6. Save Data back to Database
+        console.log(`Saving fixed data to database...`);
+        await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_transactions'", [JSON.stringify(transactions)]);
+        await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_wallets'", [JSON.stringify(wallets)]);
+
+        console.log(`\n=== AUDIT COMPLETE ===`);
+        console.log(`Total Adjustments Made: ${ghostReversed + dupReversed}`);
+        console.log(`Report created: ${reportPath}`);
+        console.log(`You can now open this file in Excel to see the EXACT changes.`);
+
         function reverseTransaction(tx, wallets, users, reason) {
             const amt = Math.abs(tx.amount || 0);
             const w = wallets.find(wal => wal.userId === tx.userId);
@@ -119,25 +150,6 @@ async function runAudit() {
             tx.status = 'reversed';
             tx.description = `${tx.description} [REVERSED: ${reason}]`;
         }
-
-        // 5. Save Report to CSV
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const reportDir = path.join(__dirname, '..', 'data', 'reports');
-        await fs.mkdir(reportDir, { recursive: true });
-        const reportPath = path.join(reportDir, `FORENSIC-AUDIT-REPORT-${timestamp}.csv`);
-
-        const headers = Object.keys(reportData[0]).join(',');
-        const rows = reportData.map(row => Object.values(row).map(v => `"${v}"`).join(',')).join('\n');
-        await fs.writeFile(reportPath, headers + '\n' + rows);
-
-        // 6. Save Data back to Database
-        console.log(`Saving fixed data to database...`);
-        await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_transactions'", [JSON.stringify(transactions)]);
-        await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_wallets'", [JSON.stringify(wallets)]);
-
-        console.log(`\n=== AUDIT COMPLETE ===`);
-        console.log(`Transactions Reversed: ${reversedCount}`);
-        console.log(`Report created: ${reportPath}`);
         console.log(`You can now open this file in Excel to see the EXACT changes.`);
 
     } catch (err) {
