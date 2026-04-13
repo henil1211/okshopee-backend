@@ -309,6 +309,97 @@ async function run() {
     transactions = transactions.filter(tx => !dupLockedGiveIdsToRemove.has(tx.id) && !dupReceiveIdsToRemove.has(tx.id));
     console.log(`-> Removed ${dupLockedGiveIdsToRemove.size} duplicate give_help and ${dupReceiveIdsToRemove.size} duplicate receive_help.`);
 
+    // ==========================================
+    // PHASE 5: Recursive Matrix Downgrade Cascade
+    // ==========================================
+    let cascadeCount = 0;
+    let loopContinues = true;
+    while (loopContinues) {
+       loopContinues = false;
+
+       // 1. Group valid receive_help by User + Level
+       const validReceives = new Map();
+       for (const tx of transactions) {
+          if (tx.type === 'receive_help' && tx.status === 'completed' && !tx.historyOnly) {
+             const L = resolveTransactionLevel(tx);
+             if (L) {
+                const k = `${tx.userId}_L${L}`;
+                validReceives.set(k, (validReceives.get(k) || 0) + Math.abs(tx.amount || 0));
+             }
+          }
+       }
+
+       const lockedGives = transactions.filter(tx => tx.type === 'give_help' && tx.amount < 0 && String(tx.description).toLowerCase().includes('from locked income'));
+       const invalidGiveIds = new Set();
+       const associatedReceiveIds = new Set();
+
+       for (const gTx of lockedGives) {
+          const L = resolveTransactionLevel(gTx);
+          if (L) {
+             const k = `${gTx.userId}_L${L}`;
+             const validAmt = validReceives.get(k) || 0;
+             const cost = Math.abs(gTx.amount || 0);
+
+             if (validAmt < cost) {
+                invalidGiveIds.add(gTx.id);
+
+                // Find Upline's receive_help
+                const matchingReceive = transactions.find(tx => 
+                   tx.type === 'receive_help' &&
+                   tx.userId === gTx.toUserId &&
+                   tx.fromUserId === gTx.userId &&
+                   resolveTransactionLevel(tx) === L &&
+                   Math.abs(tx.amount || 0) === cost &&
+                   Math.abs(getTransactionTime(tx) - getTransactionTime(gTx)) < 5000 
+                );
+                
+                if (matchingReceive) {
+                   associatedReceiveIds.add(matchingReceive.id);
+                }
+             }
+          }
+       }
+
+       if (invalidGiveIds.size > 0) {
+          loopContinues = true;
+          cascadeCount += invalidGiveIds.size;
+          
+          for (const tx of transactions) {
+             if (invalidGiveIds.has(tx.id)) {
+                const displayUser = resolveUserByRef(tx.userId, users)?.userId || tx.userId;
+                console.log(`[Cascade] Deleting invalid upgrade ${tx.id} for user ${displayUser} at Level ${resolveTransactionLevel(tx)}`);
+                const wallet = wallets.find(w => w.userId === tx.userId || w.userId === resolveUserByRef(tx.userId, users)?.userId);
+                if (wallet) {
+                   wallet.giveHelpLocked -= Math.abs(tx.amount || 0);
+                   wallet.totalGiven -= Math.abs(tx.amount || 0);
+                }
+             }
+             if (associatedReceiveIds.has(tx.id)) {
+                const uplineDisplay = resolveUserByRef(tx.userId, users)?.userId || tx.userId;
+                const amt = Math.abs(tx.amount || 0);
+                console.log(`[Cascade] Reclaiming ${amt} from Upline ${uplineDisplay} (TX: ${tx.id})`);
+                const wallet = wallets.find(w => w.userId === tx.userId || w.userId === resolveUserByRef(tx.userId, users)?.userId);
+                if (wallet) {
+                   wallet.incomeWallet -= amt;
+                   wallet.totalReceived -= amt;
+                   // If the upline's lockedIncomeWallet took the money instead of incomeWallet, we'll try to deduct there too
+                   // But safely fallback to incomeWallet and debt
+                   if (String(tx.description).toLowerCase().includes('locked')) {
+                      wallet.lockedIncomeWallet -= amt;
+                   }
+
+                   if (wallet.incomeWallet < 0) {
+                      wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
+                      wallet.incomeWallet = 0;
+                   }
+                }
+             }
+          }
+          transactions = transactions.filter(tx => !invalidGiveIds.has(tx.id) && !associatedReceiveIds.has(tx.id));
+       }
+    }
+    console.log(`-> Cascaded Matrix Reversal: Reclaimed ${cascadeCount} invalid upgrades from uplines.`);
+
     console.log(`\n=== Final Report ===`);
     console.log(`Original TX Count : ${initialTxCount}`);
     console.log(`Final TX Count    : ${transactions.length}`);
