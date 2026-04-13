@@ -106,13 +106,14 @@ async function run() {
              wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
              wallet.incomeWallet = 0;
           }
++          const ghostSnd = tx.fromUserId || String(tx.description || '').match(/\((\d{7})\)/)?.[1] || 'Unknown';
           correctionTxs.push({
              id: generateTxId('ghost_reversal'),
              userId: tx.userId,
              type: 'admin_correction',
              amount: -amt,
              status: 'completed',
-             description: `System Correction: Reversal of ghost help payment from unmatched user`,
+             description: `System Correction: Reversal of ghost payment from unmatched user (${ghostSnd})`,
              createdAt: new Date().toISOString(),
              completedAt: new Date().toISOString()
           });
@@ -221,13 +222,15 @@ async function run() {
                    wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
                    wallet.incomeWallet = 0;
                 }
++                const refSnd = resolveUserByRef(dup.fromUserId, users);
++                const refDisplay = refSnd ? `${refSnd.fullName} (${refSnd.userId})` : dup.fromUserId;
                 correctionTxs.push({
                    id: generateTxId('duplicate_referral'),
                    userId: dup.userId,
                    type: 'admin_correction',
                    amount: -amt,
                    status: 'completed',
-                   description: `System Correction: Reversal of accidentally duplicated direct referral income`,
+                   description: `System Correction: Reversal of accidentally duplicated direct referral income from ${refDisplay}`,
                    createdAt: new Date().toISOString(),
                    completedAt: new Date().toISOString()
                 });
@@ -315,13 +318,15 @@ async function run() {
                       rWallet.fundRecoveryDue = (rWallet.fundRecoveryDue || 0) + Math.abs(rWallet.incomeWallet);
                       rWallet.incomeWallet = 0;
                    }
++                   const hlpSnd = resolveUserByRef(rTx.fromUserId, users);
++                   const hlpDisplay = hlpSnd ? `${hlpSnd.fullName} (${hlpSnd.userId})` : rTx.fromUserId;
                    correctionTxs.push({
                       id: generateTxId('duplicate_help_reversal'),
                       userId: rTx.userId,
                       type: 'admin_correction',
                       amount: -amt,
                       status: 'completed',
-                      description: `System Correction: Erased accidentally duplicated identical help reception`,
+                      description: `System Correction: Erased accidentally duplicated identical help reception from ${hlpDisplay}`,
                       createdAt: new Date().toISOString(),
                       completedAt: new Date().toISOString()
                    });
@@ -428,13 +433,15 @@ async function run() {
                       wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
                       wallet.incomeWallet = 0;
                    }
++                   const dnSnd = resolveUserByRef(tx.fromUserId, users);
++                   const dnDisplay = dnSnd ? `${dnSnd.fullName} (${dnSnd.userId})` : tx.fromUserId;
                    correctionTxs.push({
                       id: generateTxId('cascade_downgrade'),
                       userId: tx.userId,
                       type: 'admin_correction',
                       amount: -amt,
                       status: 'completed',
-                      description: `System Correction: Refund of unearned matrix progression cascade`,
+                      description: `System Correction: Refund of unearned matrix progression cascade originating from ${dnDisplay}`,
                       createdAt: new Date().toISOString(),
                       completedAt: new Date().toISOString()
                    });
