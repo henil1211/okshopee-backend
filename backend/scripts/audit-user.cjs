@@ -53,22 +53,40 @@ async function auditUser() {
         console.log(`Searching backup for internal ID: ${internalId}...`);
         const backupData = JSON.parse(await fs.readFile(backupPath, 'utf8'));
         const walletsInBackup = backupData.wallets || [];
+        const txsInBackup = backupData.transactions || [];
         
-        const oldWallet = walletsInBackup.find(w => 
+        let oldWallet = walletsInBackup.find(w => 
             String(w.userId) === String(internalId) || 
+            String(w.userId).includes(String(internalId)) ||
             String(w.publicUserId) === String(internalId) ||
-            String(w.id) === String(internalId)
+            String(w.id).includes(String(internalId))
         );
+
+        // Fallback: Check backup transactions to find what ID this user had back then
+        if (!oldWallet) {
+            console.log(`Direct ID match failed. Scanning backup transactions for clues...`);
+            const relatedTx = txsInBackup.find(tx => 
+                String(tx.userId).includes(String(internalId)) || 
+                String(tx.description).includes(String(internalId)) ||
+                String(tx.description).includes(user.fullName)
+            );
+            if (relatedTx) {
+                console.log(`Found a related transaction in backup! Using ID: ${relatedTx.userId}`);
+                oldWallet = walletsInBackup.find(w => String(w.userId) === String(relatedTx.userId));
+            }
+        }
         
         // 3. Load Live State
         const [rows] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_wallets'");
         const liveWallets = JSON.parse(rows[0].state_value || '[]');
-        const liveWallet = liveWallets.find(w => String(w.userId) === String(internalId));
+        const liveWallet = liveWallets.find(w => 
+            String(w.userId) === String(internalId) || 
+            String(w.userId).includes(String(internalId))
+        );
 
         if (!oldWallet) {
-            console.log(`Error: User found in DB but could NOT be found in this specific backup file.`);
-            console.log(`I found ${walletsInBackup.length} wallets in backup. Sample IDs from backup:`, 
-                walletsInBackup.slice(0, 5).map(w => w.userId || w.id));
+            console.log(`Error: Could not find user in backup even with fuzzy matching.`);
+            console.log(`Sample IDs from backup:`, walletsInBackup.slice(0, 3).map(w => w.userId));
             return;
         }
         if (!liveWallet) {
