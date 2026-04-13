@@ -50,8 +50,15 @@ async function auditUser() {
         console.log(`User Identified: ${user.fullName} (Internal ID: ${internalId}, Public ID: ${user.publicUserId})`);
 
         // 2. Load Backup State
+        console.log(`Searching backup for internal ID: ${internalId}...`);
         const backupData = JSON.parse(await fs.readFile(backupPath, 'utf8'));
-        const oldWallet = (backupData.wallets || []).find(w => String(w.userId) === String(internalId));
+        const walletsInBackup = backupData.wallets || [];
+        
+        const oldWallet = walletsInBackup.find(w => 
+            String(w.userId) === String(internalId) || 
+            String(w.publicUserId) === String(internalId) ||
+            String(w.id) === String(internalId)
+        );
         
         // 3. Load Live State
         const [rows] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_wallets'");
@@ -60,6 +67,8 @@ async function auditUser() {
 
         if (!oldWallet) {
             console.log(`Error: User found in DB but could NOT be found in this specific backup file.`);
+            console.log(`I found ${walletsInBackup.length} wallets in backup. Sample IDs from backup:`, 
+                walletsInBackup.slice(0, 5).map(w => w.userId || w.id));
             return;
         }
         if (!liveWallet) {
