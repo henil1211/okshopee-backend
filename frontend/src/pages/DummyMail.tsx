@@ -16,9 +16,11 @@ type SendMailResult = {
   rejected?: string[];
 };
 
-const BACKEND_URL = (
-  (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || 'http://localhost:4000'
-).replace(/\/+$/, '');
+const BACKEND_URL = (() => {
+  const configured = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL;
+  const fallback = typeof window !== 'undefined' ? window.location.origin : '';
+  return (configured || fallback).replace(/\/+$/, '');
+})();
 
 export default function DummyMail() {
   const [to, setTo] = useState('');

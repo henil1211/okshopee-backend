@@ -1108,11 +1108,12 @@ const server = createServer(async (req, res) => {
     try {
       const requestedKeys = (url.searchParams.get('keys') || '')
         .split(',').map((key) => key.trim()).filter(Boolean);
+      const forceFresh = url.searchParams.get('force') === '1';
       if (requestedKeys.length > 0) {
-        const snapshot = await getStateSnapshotCached({ keys: requestedKeys });
+        const snapshot = await getStateSnapshotCached({ keys: requestedKeys, forceFresh });
         sendJson(res, 200, snapshot, req);
       } else {
-        const snapshot = await getStateSnapshotCached();
+        const snapshot = await getStateSnapshotCached({ forceFresh });
         sendStateSnapshot(res, snapshot, req);
       }
     } catch (error) {

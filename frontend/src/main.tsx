@@ -51,7 +51,8 @@ async function bootstrap() {
 
               try {
                 // Call the backend cleanup endpoint directly
-                const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/cleanup-for-rebuild`, {
+                const backendBase = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || window.location.origin;
+                const response = await fetch(`${backendBase.replace(/\/+$/, '')}/api/cleanup-for-rebuild`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' }
                 });
@@ -90,7 +91,7 @@ async function bootstrap() {
                 }
               } catch (e) {
                 if (statusEl) {
-                  statusEl.textContent = '❌ Could not reach backend at localhost:4000. Is it running?';
+                  statusEl.textContent = '❌ Could not reach the backend. Is it running?';
                   statusEl.style.color = '#e94560';
                 }
                 if (btnEl) btnEl.disabled = false;

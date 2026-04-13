@@ -48,6 +48,27 @@ const DB_KEYS = {
 };
 
 const HELP_FLOW_DEBUG_KEY = 'mlm_help_flow_debug';
+const APP_STORAGE_VERSION = '2026-04-14-1';
+const APP_STORAGE_VERSION_KEY = 'mlm_app_storage_version';
+
+function resetBrowserStateOnBuildChange(): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+
+  try {
+    const storedVersion = localStorage.getItem(APP_STORAGE_VERSION_KEY);
+    if (storedVersion === APP_STORAGE_VERSION) return;
+
+    for (const key of Object.values(DB_KEYS)) {
+      localStorage.removeItem(key);
+    }
+    localStorage.removeItem(HELP_FLOW_DEBUG_KEY);
+    localStorage.setItem(APP_STORAGE_VERSION_KEY, APP_STORAGE_VERSION);
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+resetBrowserStateOnBuildChange();
 
 // Generate 7-digit unique ID
 function generateSevenDigitId(): string {
@@ -354,9 +375,11 @@ export interface SensitiveActionSyncGate {
 
 // Generic DB Operations
 class Database {
-  private static readonly REMOTE_SYNC_BASE_URL = (
-    (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || 'http://localhost:4000'
-  ).replace(/\/+$/, '');
+  private static readonly REMOTE_SYNC_BASE_URL = (() => {
+    const configured = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL;
+    const fallback = typeof window !== 'undefined' ? window.location.origin : '';
+    return (configured || fallback).replace(/\/+$/, '');
+  })();
   private static readonly REMOTE_SYNC_KEYS = new Set<string>(
     Object.values(DB_KEYS).filter(
       (key) => key !== DB_KEYS.CURRENT_USER

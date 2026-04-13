@@ -269,9 +269,11 @@ export async function readOptimizedUploadDataUrl(
   }
 }
 
-const BACKEND_UPLOAD_BASE_URL = (
-  (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || 'http://localhost:4000'
-).replace(/\/+$/, '');
+const BACKEND_UPLOAD_BASE_URL = (() => {
+  const configured = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL;
+  const fallback = typeof window !== 'undefined' ? window.location.origin : '';
+  return (configured || fallback).replace(/\/+$/, '');
+})();
 
 export async function uploadDataUrlToBackend(params: {
   scope: string;

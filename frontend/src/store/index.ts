@@ -20,7 +20,7 @@ function getBackendApiBase(): string {
   if (typeof window !== 'undefined') {
     return window.location.origin.replace(/\/+$/, '');
   }
-  return 'http://127.0.0.1:4000';
+  return '';
 }
 
 function normalizeRemoteRebuildError(payload: Record<string, unknown>, fallback: string): string {
@@ -148,14 +148,12 @@ async function dispatchSystemEmail(params: {
   const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
   const configuredMailApi = typeof env.VITE_MAIL_API_URL === 'string' ? env.VITE_MAIL_API_URL.trim() : '';
   const backendBase = typeof env.VITE_BACKEND_URL === 'string' ? env.VITE_BACKEND_URL.trim() : '';
-  const isProd = env.PROD === true || env.PROD === 'true';
   const backendMailApi = backendBase ? `${backendBase.replace(/\/+$/, '')}/api/send-mail` : '';
-  const localhostApi = 'http://127.0.0.1:4000/api/send-mail';
   // Only use the same-origin URL if no backend URL is configured at all
   const hasExplicitBackend = !!(configuredMailApi || backendMailApi);
   const sameOriginApi = !hasExplicitBackend && typeof window !== 'undefined' ? `${window.location.origin.replace(/\/+$/, '')}/api/send-mail` : '';
   const requestTimeoutMs = Number.isFinite(Number(params.timeoutMs)) ? Math.max(1500, Number(params.timeoutMs)) : 8000;
-  const candidates = [configuredMailApi, backendMailApi, sameOriginApi, !isProd ? localhostApi : ''].filter(Boolean);
+  const candidates = [configuredMailApi, backendMailApi, sameOriginApi].filter(Boolean);
   const seen = new Set<string>();
   const apiUrls = candidates.filter((u) => {
     if (seen.has(u)) return false;
