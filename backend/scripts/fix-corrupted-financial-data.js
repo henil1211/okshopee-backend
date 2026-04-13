@@ -43,20 +43,20 @@ async function run() {
   });
 
   try {
-    const [usersRow] = await pool.query("SELECT store_value FROM state_store WHERE store_key = 'mlm_users'");
-    const [txsRow] = await pool.query("SELECT store_value FROM state_store WHERE store_key = 'mlm_transactions'");
-    const [walletsRow] = await pool.query("SELECT store_value FROM state_store WHERE store_key = 'mlm_wallets'");
-    const [matrixRow] = await pool.query("SELECT store_value FROM state_store WHERE store_key = 'mlm_matrix'");
+    const [usersRow] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_users'");
+    const [txsRow] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_transactions'");
+    const [walletsRow] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_wallets'");
+    const [matrixRow] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_matrix'");
 
     if (!usersRow.length || !txsRow.length || !walletsRow.length) {
       console.log('Error: Could not retrieve state_store keys. Are they populated?');
       return;
     }
 
-    let users = JSON.parse(usersRow[0].store_value || '[]');
-    let transactions = JSON.parse(txsRow[0].store_value || '[]');
-    let wallets = JSON.parse(walletsRow[0].store_value || '[]');
-    let matrix = JSON.parse(matrixRow[0] ? matrixRow[0].store_value : '[]');
+    let users = JSON.parse(usersRow[0].state_value || '[]');
+    let transactions = JSON.parse(txsRow[0].state_value || '[]');
+    let wallets = JSON.parse(walletsRow[0].state_value || '[]');
+    let matrix = JSON.parse(matrixRow[0] ? matrixRow[0].state_value : '[]');
 
     const initialTxCount = transactions.length;
     let retainedTransactions = [];
@@ -316,14 +316,14 @@ async function run() {
        
        await fs.mkdir(path.dirname(backupPath), { recursive: true });
        await fs.writeFile(backupPath, JSON.stringify({
-          transactions: JSON.parse(txsRow[0].store_value || '[]'),
-          wallets: JSON.parse(walletsRow[0].store_value || '[]')
+          transactions: JSON.parse(txsRow[0].state_value || '[]'),
+          wallets: JSON.parse(walletsRow[0].state_value || '[]')
        }));
        console.log(`Backup saved to ${backupPath}`);
 
        console.log(`Saving clean data to MySQL...`);
-       await pool.query("UPDATE state_store SET store_value = ?, updated_at = NOW() WHERE store_key = 'mlm_transactions'", [JSON.stringify(transactions)]);
-       await pool.query("UPDATE state_store SET store_value = ?, updated_at = NOW() WHERE store_key = 'mlm_wallets'", [JSON.stringify(wallets)]);
+       await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_transactions'", [JSON.stringify(transactions)]);
+       await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_wallets'", [JSON.stringify(wallets)]);
        console.log('Successfully applied all fixes to DB.');
     }
 
