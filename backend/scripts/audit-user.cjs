@@ -24,35 +24,38 @@ async function auditUser() {
     try {
         console.log(`\n=== Forensic Audit for User ID: ${targetId} ===`);
 
-        // 1. Load Backup State
-        const backupData = JSON.parse(await fs.readFile(backupPath, 'utf8'));
-        const searchId = String(targetId).trim();
+        // 1. Resolve User from Live DB first (to get the mapping)
+        const [userRows] = await pool.query(
+            "SELECT userId, publicUserId, fullName, email FROM users WHERE userId = ? OR publicUserId = ? OR email = ?",
+            [targetId, targetId, targetId]
+        );
 
-        const findInList = (list) => {
-            return list.find(u => 
-                String(u.userId) === searchId || 
-                String(u.publicUserId) === searchId ||
-                String(u.fullName || '').toLowerCase().includes(searchId.toLowerCase())
-            );
-        };
-
-        const oldWallet = findInList(backupData.wallets || []);
-        
-        // 2. Load Live State
-        const [rows] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_wallets'");
-        const liveWallets = JSON.parse(rows[0].state_value || '[]');
-        const liveWallet = findInList(liveWallets);
-
-        if (!oldWallet) {
-            console.log(`Error: Could not find user "${targetId}" in the BACKUP file.`);
-            return;
-        }
-        if (!liveWallet) {
+        if (userRows.length === 0) {
             console.log(`Error: Could not find user "${targetId}" in the LIVE database.`);
             return;
         }
 
-        console.log(`User Found: ${liveWallet.fullName} (ID: ${liveWallet.userId})`);
+        const user = userRows[0];
+        const internalId = user.userId;
+        console.log(`User Identified: ${user.fullName} (Internal ID: ${internalId}, Public ID: ${user.publicUserId})`);
+
+        // 2. Load Backup State
+        const backupData = JSON.parse(await fs.readFile(backupPath, 'utf8'));
+        const oldWallet = (backupData.wallets || []).find(w => String(w.userId) === String(internalId));
+        
+        // 3. Load Live State
+        const [rows] = await pool.query("SELECT state_value FROM state_store WHERE state_key = 'mlm_wallets'");
+        const liveWallets = JSON.parse(rows[0].state_value || '[]');
+        const liveWallet = liveWallets.find(w => String(w.userId) === String(internalId));
+
+        if (!oldWallet) {
+            console.log(`Error: User found in DB but could NOT be found in this specific backup file.`);
+            return;
+        }
+        if (!liveWallet) {
+            console.log(`Error: Wallet for ${user.fullName} is missing in the live state_store.`);
+            return;
+        }
 
         console.log(`\nWALLET BALANCES:`);
         console.log(`--------------------------------------------------`);
