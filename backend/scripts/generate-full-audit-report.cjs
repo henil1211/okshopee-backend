@@ -44,6 +44,9 @@ async function generateFullReport() {
             liveMap.set(normalizeId(w.userId), w);
         });
 
+        // Mapping Cache (Backup ID -> Live ID)
+        const identificationMap = new Map();
+
         // 4. Compare and Build Report
         const reportData = [];
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -53,12 +56,26 @@ async function generateFullReport() {
 
         let affectedCount = 0;
 
+        console.log("Reconciling Users (this may take a moment)...");
+
         for (const user of liveUsers) {
             const normId = normalizeId(user.userId);
             const liveW = liveMap.get(normId);
             
             // Try to find in backup
-            const oldW = oldWallets.find(w => normalizeId(w.userId) === normId);
+            let oldW = oldWallets.find(w => normalizeId(w.userId) === normId);
+
+            // Fuzzy Fallback: Search in transactions for clues
+            if (!oldW) {
+                const searchStr = user.publicUserId || user.userId;
+                const relatedTx = oldTxs.find(tx => 
+                    String(tx.userId).includes(String(searchStr)) || 
+                    String(tx.description).includes(String(searchStr))
+                );
+                if (relatedTx) {
+                    oldW = oldWallets.find(w => w.userId === relatedTx.userId);
+                }
+            }
 
             if (!oldW || !liveW) continue;
 
