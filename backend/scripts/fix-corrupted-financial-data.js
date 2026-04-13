@@ -106,7 +106,7 @@ async function run() {
              wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
              wallet.incomeWallet = 0;
           }
-+          const ghostSnd = tx.fromUserId || String(tx.description || '').match(/\((\d{7})\)/)?.[1] || 'Unknown';
+          const ghostSnd = tx.fromUserId || String(tx.description || '').match(/\((\d{7})\)/)?.[1] || 'Unknown';
           correctionTxs.push({
              id: generateTxId('ghost_reversal'),
              userId: tx.userId,
@@ -222,8 +222,8 @@ async function run() {
                    wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
                    wallet.incomeWallet = 0;
                 }
-+                const refSnd = resolveUserByRef(dup.fromUserId, users);
-+                const refDisplay = refSnd ? `${refSnd.fullName} (${refSnd.userId})` : dup.fromUserId;
+                const refSnd = resolveUserByRef(dup.fromUserId, users);
+                const refDisplay = refSnd ? `${refSnd.fullName} (${refSnd.userId})` : dup.fromUserId;
                 correctionTxs.push({
                    id: generateTxId('duplicate_referral'),
                    userId: dup.userId,
@@ -318,8 +318,8 @@ async function run() {
                       rWallet.fundRecoveryDue = (rWallet.fundRecoveryDue || 0) + Math.abs(rWallet.incomeWallet);
                       rWallet.incomeWallet = 0;
                    }
-+                   const hlpSnd = resolveUserByRef(rTx.fromUserId, users);
-+                   const hlpDisplay = hlpSnd ? `${hlpSnd.fullName} (${hlpSnd.userId})` : rTx.fromUserId;
+                   const hlpSnd = resolveUserByRef(rTx.fromUserId, users);
+                   const hlpDisplay = hlpSnd ? `${hlpSnd.fullName} (${hlpSnd.userId})` : rTx.fromUserId;
                    correctionTxs.push({
                       id: generateTxId('duplicate_help_reversal'),
                       userId: rTx.userId,
@@ -433,8 +433,8 @@ async function run() {
                       wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
                       wallet.incomeWallet = 0;
                    }
-+                   const dnSnd = resolveUserByRef(tx.fromUserId, users);
-+                   const dnDisplay = dnSnd ? `${dnSnd.fullName} (${dnSnd.userId})` : tx.fromUserId;
+                   const dnSnd = resolveUserByRef(tx.fromUserId, users);
+                   const dnDisplay = dnSnd ? `${dnSnd.fullName} (${dnSnd.userId})` : tx.fromUserId;
                    correctionTxs.push({
                       id: generateTxId('cascade_downgrade'),
                       userId: tx.userId,
