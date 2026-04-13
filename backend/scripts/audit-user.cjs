@@ -24,18 +24,28 @@ async function auditUser() {
     try {
         console.log(`\n=== Forensic Audit for User ID: ${targetId} ===`);
 
-        // 1. Resolve User from Live DB first (to get the mapping)
-        const [userRows] = await pool.query(
-            "SELECT userId, publicUserId, fullName, email FROM users WHERE userId = ? OR publicUserId = ? OR email = ?",
-            [targetId, targetId, targetId]
+        // 1. Resolve User from state_store (mlm_users)
+        const [stateRows] = await pool.query(
+            "SELECT state_value FROM state_store WHERE state_key = 'mlm_users'"
         );
 
-        if (userRows.length === 0) {
-            console.log(`Error: Could not find user "${targetId}" in the LIVE database.`);
+        if (stateRows.length === 0) {
+            console.log(`Error: Could not find "mlm_users" in state_store.`);
             return;
         }
 
-        const user = userRows[0];
+        const allUsers = JSON.parse(stateRows[0].state_value || '[]');
+        const user = allUsers.find(u => 
+            String(u.userId) === String(targetId) || 
+            String(u.publicUserId) === String(targetId) ||
+            String(u.email || '').toLowerCase() === String(targetId).toLowerCase()
+        );
+
+        if (!user) {
+            console.log(`Error: Could not find user "${targetId}" in the live database.`);
+            return;
+        }
+
         const internalId = user.userId;
         console.log(`User Identified: ${user.fullName} (Internal ID: ${internalId}, Public ID: ${user.publicUserId})`);
 
