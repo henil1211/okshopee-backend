@@ -1,0 +1,15 @@
+﻿
+> my-app@0.0.0 build
+> tsc -b && vite build
+
+src/db/index.ts(4233,9): error TS2353: Object literal may only specify known properties, and 'directReferralIncome' does not exist in type 'LevelWiseReport'.
+src/pages/Admin.tsx(855,11): error TS6133: 'counts' is declared but its value is never read.
+src/pages/Admin.tsx(866,9): error TS18004: No value exists in scope for the shorthand property 'level'. Either declare one or provide an initializer.
+src/pages/Admin.tsx(963,27): error TS2339: Property 'smartWatch' does not exist on type 'UserAchievements'.
+src/pages/Admin.tsx(965,11): error TS2353: Object literal may only specify known properties, and 'id' does not exist in type 'OfferAchieverReportRow'.
+src/pages/Admin.tsx(966,38): error TS2339: Property 'smartWatchDate' does not exist on type 'UserAchievements'.
+src/pages/Admin.tsx(973,11): error TS2353: Object literal may only specify known properties, and 'id' does not exist in type 'OfferAchieverReportRow'.
+src/pages/Admin.tsx(981,11): error TS2353: Object literal may only specify known properties, and 'id' does not exist in type 'OfferAchieverReportRow'.
+src/pages/Admin.tsx(989,11): error TS2353: Object literal may only specify known properties, and 'id' does not exist in type 'OfferAchieverReportRow'.
+src/pages/Admin.tsx(1030,26): error TS2339: Property 'transactionHash' does not exist on type 'Payment'.
+src/pages/Admin.tsx(2817,40): error TS2339: Property 'id' does not exist on type 'OfferAchieverReportRow'.

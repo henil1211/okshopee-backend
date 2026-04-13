@@ -1,0 +1,6 @@
+﻿
+> my-app@0.0.0 build
+> tsc -b && vite build
+
+src/db/index.ts(4233,9): error TS2353: Object literal may only specify known properties, and 'directReferralIncome' does not exist in type 'LevelWiseReport'.
+src/pages/Admin.tsx(2812,40): error TS2339: Property 'id' does not exist on type 'OfferAchieverReportRow'.

@@ -8162,6 +8162,33 @@ export default function Admin() {
                   >
                     Backfill Sender IDs
                   </Button>
+                  <Button
+                    variant="outline"
+                    className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-400/10"
+                    onClick={() => {
+                      const result = Database.repairHistoricalReferralAndHelpMismatches();
+                      const changedCount =
+                        result.ghostReceiveHelpReversed
+                        + result.invalidRestoredReceiveHelpReversed
+                        + result.referralIncomeRecovered
+                        + result.levelOneHelpRecovered
+                        + result.missingIncomingReceiveHelpRecovered;
+
+                      if (changedCount <= 0) {
+                        toast.success('Historical repair found no mismatches to correct.');
+                        return;
+                      }
+
+                      toast.success(
+                        `Historical repair complete: ${changedCount} corrections across ${result.usersTouched} user(s).`
+                      );
+                      loadAllTransactions();
+                      loadStats();
+                      setGhostRepairLogTick((tick) => tick + 1);
+                    }}
+                  >
+                    Repair Historical Referral/Help
+                  </Button>
                   <p className="text-xs text-white/40">
                     Removes receive-help entries missing a valid sender and recalculates affected wallets/locks.
                   </p>

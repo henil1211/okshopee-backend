@@ -1,0 +1,92 @@
+﻿
+> my-app@0.0.0 build
+> tsc -b && vite build
+
+[36mvite v7.3.0 [32mbuilding client environment for production...[36m[39m
+transforming...
+[32mΓ£ô[39m 49 modules transformed.
+node.exe : [31mΓ£ù[39m 
+Build failed in 3.91s
+At line:1 char:1
++ & "C:\Program 
+Files\nodejs/node.exe" 
+"C:\Program 
+Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~
+    + CategoryInfo         
+     : NotSpecified: ([3  
+  1mΓ£ù[39m Build faile   
+ d in 3.91s:String) [],    
+ RemoteException
+    + FullyQualifiedErrorI 
+   d : NativeCommandError
+ 
+[31merror during build:
+[31m[vite:esbuild] 
+Transform failed with 1 
+error:
+E:/Again Updated/live-proje
+ct/frontend/src/pages/Admin
+.tsx:1202:8: ERROR: 
+Unexpected closing 
+"header" tag does not 
+match opening "heade" 
+tag[31m
+file: [36mE:/Again Updated
+/live-project/frontend/src/
+pages/Admin.tsx:1202:8[31m
+[33m
+[33mUnexpected closing 
+"header" tag does not 
+match opening "heade" 
+tag[33m
+1200 |            </div>
+1201 |          </div>
+1202 |        </header >
+     |          ^
+1203 |  
+1204 |        <main code-pa
+th="src\pages\Admin.tsx:120
+4:7" className="max-w-7xl 
+mx-auto px-4 sm:px-6 
+lg:px-8 py-6 sm:py-8">
+[31m
+    at failureErrorWithLog 
+(E:\Again Updated\live-proj
+ect\frontend\node_modules\e
+sbuild\lib\main.js:1467:15)
+    at E:\Again Updated\liv
+e-project\frontend\node_mod
+ules\esbuild\lib\main.js:73
+6:50
+    at responseCallbacks.<c
+omputed> (E:\Again Updated\
+live-project\frontend\node_
+modules\esbuild\lib\main.js
+:603:9)
+    at 
+handleIncomingPacket 
+(E:\Again Updated\live-proj
+ect\frontend\node_modules\e
+sbuild\lib\main.js:658:12)
+    at 
+Socket.readFromStdout 
+(E:\Again Updated\live-proj
+ect\frontend\node_modules\e
+sbuild\lib\main.js:581:7)
+    at Socket.emit 
+(node:events:508:28)
+    at addChunk (node:inter
+nal/streams/readable:563:12
+)
+    at readableAddChunkPush
+ByteMode (node:internal/str
+eams/readable:514:3)
+    at Readable.push (node:
+internal/streams/readable:3
+94:5)
+    at Pipe.onStreamRead (n
+ode:internal/stream_base_co
+mmons:189:23)[39m

@@ -1534,6 +1534,7 @@ class Database {
     const normalizedName = this.normalizeIdentityText(params.fullName);
     const normalizedEmail = String(params.email || '').trim().toLowerCase();
     const normalizedPhone = this.normalizeIdentityPhone(params.phone);
+    const sponsorUser = this.resolveUserByRef(params.sponsorInternalId);
     const referenceTime = new Date(params.referenceTime || '').getTime();
     const windowMs = Math.max(60_000, Number(params.matchWindowMs || 10 * 60 * 1000));
     const hasStrongIdentityParams = !!(
@@ -1544,7 +1545,13 @@ class Database {
     );
 
     return this.getTransactions().some((tx) => {
-      if (tx.type !== 'direct_income' || tx.status !== 'completed' || tx.userId !== params.sponsorInternalId) {
+      if (tx.type !== 'direct_income' || tx.status !== 'completed') {
+        return false;
+      }
+
+      if (sponsorUser) {
+        if (!this.transactionRefMatchesUser(tx.userId, sponsorUser)) return false;
+      } else if (tx.userId !== params.sponsorInternalId) {
         return false;
       }
 
@@ -3826,6 +3833,10 @@ class Database {
       level = detectedLevel;
     }
 
+    if (!this.isValidMatrixSenderForRecipientLevel(recipient, sender, level)) {
+      throw new Error(`Sender is not in recipient matrix at level ${level}`);
+    }
+
     const amount = helpDistributionTable[level - 1]?.perUserHelp || 0;
     const toTime = (tx: Transaction): number => {
       const raw = tx.completedAt || tx.createdAt || '';
@@ -3847,10 +3858,10 @@ class Database {
 
     const relevantReceiveTxs = allTransactions
       .filter((tx) =>
-        tx.userId === recipient.id
+        this.transactionRefMatchesUser(tx.userId, recipient)
         && tx.type === 'receive_help'
         && tx.status === 'completed'
-        && tx.level === level
+        && Number(tx.level) === level
         && tx.amount > 0
         && this.transactionRefMatchesUser(tx.fromUserId, sender)
         && Math.abs(tx.amount || 0) === amount
@@ -3944,6 +3955,10 @@ class Database {
       level = detectedLevel;
     }
 
+    if (!this.isValidMatrixSenderForRecipientLevel(recipient, sender, level)) {
+      throw new Error(`Sender is not in recipient matrix at level ${level}`);
+    }
+
     const fromSuffix = ` from ${sender.fullName} (${sender.userId})`;
     const displayAmount = helpDistributionTable[level - 1]?.perUserHelp || 0;
     const toTime = (tx: Transaction): number => {
@@ -3966,10 +3981,10 @@ class Database {
 
     const relevantReceiveTxs = allTransactions
       .filter((tx) =>
-        tx.userId === recipient.id
+        this.transactionRefMatchesUser(tx.userId, recipient)
         && tx.type === 'receive_help'
         && tx.status === 'completed'
-        && tx.level === level
+        && Number(tx.level) === level
         && this.transactionRefMatchesUser(tx.fromUserId, sender)
         && Math.abs((tx.displayAmount ?? tx.amount) || 0) === displayAmount
       )
@@ -5212,7 +5227,7 @@ class Database {
 
     const receiveTxsByKey = new Map<string, Transaction[]>();
     for (const tx of transactions) {
-      if (tx.userId !== userId) continue;
+      if (!this.transactionRefMatchesUser(tx.userId, recipient)) continue;
       if (tx.type !== 'receive_help' || tx.status !== 'completed' || !(tx.amount > 0)) continue;
       const level = this.resolveTransactionLevel(tx);
       if (!level || !tx.fromUserId) continue;
@@ -5282,6 +5297,61 @@ class Database {
     }
 
     return { scanned: incomingGiveTxs.length, created, existing };
+  }
+
+  static repairHistoricalReferralAndHelpMismatches(): {
+    usersScanned: number;
+    usersTouched: number;
+    ghostReceiveHelpReversed: number;
+    invalidRestoredReceiveHelpReversed: number;
+    referralIncomeRecovered: number;
+    levelOneHelpRecovered: number;
+    missingIncomingReceiveHelpRecovered: number;
+  } {
+    const canonicalUsers = new Map<string, User>();
+    for (const user of this.getUsers()) {
+      if (!user?.userId) continue;
+      if (!canonicalUsers.has(user.userId)) {
+        canonicalUsers.set(user.userId, this.getUserByUserId(user.userId) || user);
+      }
+    }
+
+    const reverseInvalid = this.reverseInvalidRestoredReceiveHelp();
+    const ghostRepair = this.repairGhostReceiveHelpTransactions();
+
+    let usersTouched = 0;
+    let referralIncomeRecovered = 0;
+    let levelOneHelpRecovered = 0;
+    let missingIncomingReceiveHelpRecovered = 0;
+
+    for (const user of canonicalUsers.values()) {
+      const referralAndHelp = this.recoverMissingReferralAndLevelOneHelp(user.id);
+      const incomingHelp = this.repairMissingIncomingReceiveHelp(user.id);
+
+      const touched = (
+        referralAndHelp.directIncomeCreated
+        + referralAndHelp.levelOneHelpCreated
+        + incomingHelp.created
+      ) > 0;
+
+      if (touched) usersTouched += 1;
+      referralIncomeRecovered += referralAndHelp.directIncomeCreated;
+      levelOneHelpRecovered += referralAndHelp.levelOneHelpCreated;
+      missingIncomingReceiveHelpRecovered += incomingHelp.created;
+    }
+
+    this.repairIncomeWalletConsistency();
+    this.syncLockedIncomeWallet();
+
+    return {
+      usersScanned: canonicalUsers.size,
+      usersTouched,
+      ghostReceiveHelpReversed: ghostRepair.repaired,
+      invalidRestoredReceiveHelpReversed: reverseInvalid.reversed,
+      referralIncomeRecovered,
+      levelOneHelpRecovered,
+      missingIncomingReceiveHelpRecovered
+    };
   }
 
 
@@ -7994,60 +8064,47 @@ class Database {
     }
 
     const mergedWallet = { ...existingWallet, ...updates };
-    const depositIncrease = Math.max(0, Number(mergedWallet.depositWallet || 0) - Number(existingWallet.depositWallet || 0));
-    const incomeIncrease = Math.max(0, Number(mergedWallet.incomeWallet || 0) - Number(existingWallet.incomeWallet || 0));
-    const recoveryDueBefore = Math.max(0, Number(existingWallet.fundRecoveryDue || 0));
-
-    const recoveryReason = String(existingWallet.fundRecoveryReason || 'unsupported direct PIN buys').trim() || 'unsupported direct PIN buys';
-    const recoveryEvents: Array<{ wallet: 'fund' | 'income'; amount: number }> = [];
-
-    if ((depositIncrease > 0.0001 || incomeIncrease > 0.0001) && recoveryDueBefore > 0.0001) {
-      let remainingDue = recoveryDueBefore;
-
-      if (depositIncrease > 0.0001 && remainingDue > 0.0001) {
-        const recoveryAmount = Math.min(depositIncrease, remainingDue);
-        mergedWallet.depositWallet = Math.round(((mergedWallet.depositWallet || 0) - recoveryAmount) * 100) / 100;
-        recoveryEvents.push({ wallet: 'fund', amount: recoveryAmount });
-        remainingDue = Math.round((remainingDue - recoveryAmount) * 100) / 100;
-      }
-
-      if (incomeIncrease > 0.0001 && remainingDue > 0.0001) {
-        const recoveryAmount = Math.min(incomeIncrease, remainingDue);
-        mergedWallet.incomeWallet = Math.round(((mergedWallet.incomeWallet || 0) - recoveryAmount) * 100) / 100;
-        recoveryEvents.push({ wallet: 'income', amount: recoveryAmount });
-        remainingDue = Math.round((remainingDue - recoveryAmount) * 100) / 100;
-      }
-
-      const recoveredTotal = recoveryEvents.reduce((sum, event) => sum + event.amount, 0);
-      mergedWallet.fundRecoveryDue = remainingDue;
-      mergedWallet.fundRecoveryRecoveredTotal = Math.round(((existingWallet.fundRecoveryRecoveredTotal || 0) + recoveredTotal) * 100) / 100;
-      if (remainingDue <= 0.0001) {
-        mergedWallet.fundRecoveryReason = null;
-      } else {
-        mergedWallet.fundRecoveryReason = recoveryReason;
-      }
-    }
-
     wallets[index] = mergedWallet;
     this.saveWallets(wallets);
-    if (recoveryEvents.length > 0 && !this._bulkRebuildMode) {
-      const remainingDue = Math.max(0, wallets[index].fundRecoveryDue || 0);
-      for (const event of recoveryEvents) {
-        this.addToSafetyPool(event.amount, userId, `Recovery from ${recoveryReason} via ${event.wallet} wallet credit`);
-        this.createTransaction({
-          id: generateEventId('tx', `fund_recovery_auto_${event.wallet}`),
-          userId,
-          type: 'fund_recovery',
-          amount: -event.amount,
-          status: 'completed',
-          description: `Auto-deducted from ${event.wallet} wallet credit toward admin recovery due for ${recoveryReason}. Remaining recovery due: $${remainingDue.toFixed(2)}`,
-          createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          adminReason: recoveryReason
-        });
-      }
-    }
     return wallets[index];
+  }
+
+  private static executeAutoFundRecovery(userId: string, amount: number, walletType: 'income' | 'fund', currentDebt: number, reason: string): void {
+    const wallet = this.getWallet(userId);
+    if (!wallet || amount <= 0.0001) return;
+
+    const recoveryAmount = Math.min(amount, currentDebt);
+    const updates: Partial<Wallet> = {
+      fundRecoveryDue: Math.round((currentDebt - recoveryAmount) * 100) / 100,
+      fundRecoveryRecoveredTotal: Math.round(((wallet.fundRecoveryRecoveredTotal || 0) + recoveryAmount) * 100) / 100
+    };
+
+    if (walletType === 'income') {
+      updates.incomeWallet = Math.round(((wallet.incomeWallet || 0) - recoveryAmount) * 100) / 100;
+    } else {
+      updates.depositWallet = Math.round(((wallet.depositWallet || 0) - recoveryAmount) * 100) / 100;
+    }
+
+    if ((updates.fundRecoveryDue ?? 0) <= 0.0001) {
+      updates.fundRecoveryReason = null;
+    }
+
+    // Direct mutation of the cached wallet and saving
+    this.updateWallet(userId, updates);
+
+    // Record the deduction transaction
+    this.addToSafetyPool(recoveryAmount, userId, `Auto-Recovery from ${reason} via ${walletType} wallet credit`);
+    this.createTransaction({
+      id: generateEventId('tx', `fund_recovery_auto_${walletType}`),
+      userId,
+      type: 'fund_recovery',
+      amount: -recoveryAmount,
+      status: 'completed',
+      description: `Auto-deducted from ${walletType} wallet credit toward admin recovery due for ${reason}. Remaining recovery due: $${Number(updates.fundRecoveryDue).toFixed(2)}`,
+      createdAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      adminReason: reason
+    });
   }
 
   // ==================== MONTHLY SYSTEM FEE ====================
@@ -9862,6 +9919,30 @@ class Database {
     }
     transactions.push(normalized);
     this.saveTransactions(transactions);
+
+    // PROACTIVE AUTO-FUND RECOVERY TRIGGER
+    // If this is a credit transaction and user has debt, swallow it immediately
+    if (!this._bulkRebuildMode && normalized.status === 'completed' && normalized.amount > 0) {
+      const creditType = normalized.type;
+      const isIncomeCredit = ['direct_income', 'level_income', 'receive_help', 'royalty_income', 'admin_credit'].includes(creditType);
+      const isFundCredit = ['deposit', 'p2p_transfer'].includes(creditType);
+
+      if (isIncomeCredit || isFundCredit) {
+         const wallet = this.getWallet(normalized.userId);
+         const debt = Number(wallet?.fundRecoveryDue || 0);
+         if (debt > 0.0001) {
+            const reason = String(wallet?.fundRecoveryReason || 'system correction').trim();
+            this.executeAutoFundRecovery(
+              normalized.userId, 
+              normalized.amount, 
+              isIncomeCredit ? 'income' : 'fund', 
+              debt, 
+              reason
+            );
+         }
+      }
+    }
+
     return normalized;
   }
 
