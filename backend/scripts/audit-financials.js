@@ -59,7 +59,7 @@ async function runAudit() {
 
     // 1. DETECT DUPLICATE DIRECT INCOME
     for (const tx of projectedTransactions) {
-      if (tx.type === 'direct_income' && tx.status === 'completed') {
+      if ((tx.type === 'direct_income' || tx.type === 'referral_income' || tx.type === 'sponsor_income') && tx.status === 'completed') {
         const idMatch = String(tx.description || '').match(/\((\d{7})\)/);
         let fromUserId = tx.fromUserId || (idMatch ? idMatch[1] : null);
         if (fromUserId) {
@@ -109,7 +109,7 @@ async function runAudit() {
             projectedTransactions.push({
               id: `tx_${Date.now()}_missing_${u.id}`,
               userId: sponsor.id,
-              type: 'direct_income',
+              type: 'referral_income',
               amount: tAmount,
               fromUserId: u.id,
               status: 'completed',
@@ -211,10 +211,13 @@ async function runAudit() {
       }
     }
 
-    // 4. CASCADE REVERSALS (If Locked Income goes < 0)
+    // 4. CASCADE REVERSALS (If either Wallet goes < 0)
     for (let w of projectedWallets) {
-       if (w.lockedIncomeWallet < 0) {
-         const debt = Math.abs(w.lockedIncomeWallet);
+       if (w.lockedIncomeWallet < 0 || w.incomeWallet < 0) {
+         const lockedDebt = w.lockedIncomeWallet < 0 ? Math.abs(w.lockedIncomeWallet) : 0;
+         const incomeDebt = w.incomeWallet < 0 ? Math.abs(w.incomeWallet) : 0;
+         const debt = lockedDebt + incomeDebt;
+         
          // FIX: Use w.userId instead of w.id since wallets schema only has userId
          // FIX: DO NOT reverse Level 1 gives, because Level 1 $5 auto-give happens at activation and doesn't come from lockedIncomeWallet!
          const theirGives = projectedTransactions.filter(t => 
@@ -233,8 +236,17 @@ async function runAudit() {
            remainingDebt -= Math.abs(gTx.amount);
            w.giveHelpLocked -= Math.abs(gTx.amount);
            w.totalGiven -= Math.abs(gTx.amount);
+           
+           // Refund the original lockedIncomeWallet amount (since upgrades are usually taken from there)
            w.lockedIncomeWallet += Math.abs(gTx.amount); 
            
+           // Balance the wallets since the refund goes to locked, but debt might have been in income!
+           if (w.lockedIncomeWallet > 0 && w.incomeWallet < 0) {
+              const transferAmount = Math.min(w.lockedIncomeWallet, Math.abs(w.incomeWallet));
+              w.lockedIncomeWallet -= transferAmount;
+              w.incomeWallet += transferAmount;
+           }
+
            projectedTransactions.push({
              id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
              userId: w.userId,
@@ -247,7 +259,7 @@ async function runAudit() {
              completedAt: new Date().toISOString()
            });
 
-           auditLog.push(`CASCADING FIX: Reversed give_help of $${Math.abs(gTx.amount)} for User ${w.userId} because their locked balance dropped below zero due to ghost/dup fixes.`);
+           auditLog.push(`CASCADING FIX: Reversed give_help of $${Math.abs(gTx.amount)} for User ${w.userId} because their balance dropped below zero due to ghost/dup fixes.`);
 
            const matchedReceive = projectedTransactions.find(t => t.type === 'receive_help' && !t._isReversed && t.fromUserId === w.userId && t.amount === Math.abs(gTx.amount) && Math.abs(new Date(t.createdAt).getTime() - new Date(gTx.createdAt).getTime()) < 5000);
            if (matchedReceive) {
