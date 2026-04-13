@@ -30,6 +30,10 @@ function resolveTransactionLevel(tx) {
   return match ? Number(match[1]) : undefined;
 }
 
+function generateTxId(prefix) {
+  return `tx_${Date.now()}_${prefix}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
 async function run() {
   console.log(`Starting Data Cleanup Script ${DRY_RUN ? '(DRY RUN)' : '(LIVE MODE DANGER)'}`);
 
@@ -62,6 +66,8 @@ async function run() {
     let retainedTransactions = [];
     const validUserIds = new Set(users.map(u => u.userId));
     const validInternalIds = new Set(users.map(u => u.id));
+
+    const correctionTxs = [];
 
     console.log(`\nLoaded ${users.length} users, ${transactions.length} transactions, ${wallets.length} wallets.`);
 
@@ -100,6 +106,16 @@ async function run() {
              wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
              wallet.incomeWallet = 0;
           }
+          correctionTxs.push({
+             id: generateTxId('ghost_reversal'),
+             userId: tx.userId,
+             type: 'admin_correction',
+             amount: -amt,
+             status: 'completed',
+             description: `System Correction: Reversal of ghost help payment from unmatched user`,
+             createdAt: new Date().toISOString(),
+             completedAt: new Date().toISOString()
+          });
         }
       } else {
         retainedTransactions.push(tx);
@@ -205,6 +221,16 @@ async function run() {
                    wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
                    wallet.incomeWallet = 0;
                 }
+                correctionTxs.push({
+                   id: generateTxId('duplicate_referral'),
+                   userId: dup.userId,
+                   type: 'admin_correction',
+                   amount: -amt,
+                   status: 'completed',
+                   description: `System Correction: Reversal of accidentally duplicated direct referral income`,
+                   createdAt: new Date().toISOString(),
+                   completedAt: new Date().toISOString()
+                });
              }
           }
        }
@@ -289,6 +315,16 @@ async function run() {
                       rWallet.fundRecoveryDue = (rWallet.fundRecoveryDue || 0) + Math.abs(rWallet.incomeWallet);
                       rWallet.incomeWallet = 0;
                    }
+                   correctionTxs.push({
+                      id: generateTxId('duplicate_help_reversal'),
+                      userId: rTx.userId,
+                      type: 'admin_correction',
+                      amount: -amt,
+                      status: 'completed',
+                      description: `System Correction: Erased accidentally duplicated identical help reception`,
+                      createdAt: new Date().toISOString(),
+                      completedAt: new Date().toISOString()
+                   });
                 }
              }
           }
@@ -392,12 +428,28 @@ async function run() {
                       wallet.fundRecoveryDue = (wallet.fundRecoveryDue || 0) + Math.abs(wallet.incomeWallet);
                       wallet.incomeWallet = 0;
                    }
+                   correctionTxs.push({
+                      id: generateTxId('cascade_downgrade'),
+                      userId: tx.userId,
+                      type: 'admin_correction',
+                      amount: -amt,
+                      status: 'completed',
+                      description: `System Correction: Refund of unearned matrix progression cascade`,
+                      createdAt: new Date().toISOString(),
+                      completedAt: new Date().toISOString()
+                   });
                 }
              }
           }
-          transactions = transactions.filter(tx => !invalidGiveIds.has(tx.id) && !associatedReceiveIds.has(tx.id));
+    transactions = transactions.filter(tx => !invalidGiveIds.has(tx.id) && !associatedReceiveIds.has(tx.id));
        }
     }
+    
+    if (correctionTxs.length > 0) {
+       console.log(`\nAdding ${correctionTxs.length} explicit System Correction logs to the database...`);
+       transactions.push(...correctionTxs);
+    }
+    
     console.log(`-> Cascaded Matrix Reversal: Reclaimed ${cascadeCount} invalid upgrades from uplines.`);
 
     console.log(`\n=== Final Report ===`);
