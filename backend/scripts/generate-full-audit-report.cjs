@@ -38,6 +38,15 @@ async function generateFullReport() {
         // 3. Normalization Helper
         const normalizeId = (id) => String(id).replace('user_', '').trim();
         
+        // 4. Compare and Build Report
+        const reportData = [];
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const reportDir = path.join(__dirname, '..', 'data', 'reports');
+        await fs.mkdir(reportDir, { recursive: true });
+        const reportPath = path.join(reportDir, `full-financial-audit-${timestamp}.csv`);
+
+        let affectedCount = 0;
+
         console.log("Deep Reconciling Users (Identity-First Search)...");
 
         for (const user of liveUsers) {
