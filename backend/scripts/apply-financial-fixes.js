@@ -57,8 +57,14 @@ async function applyFixes() {
     // 2. NOW APPLY THE NEW PROJECTED STATE
     console.log("\nApplying Fixed Data to Live Database...");
     
-    await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_transactions'", [JSON.stringify(transactions)]);
-    await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_wallets'", [JSON.stringify(wallets)]);
+    function toMySQLDatetime(isoString) {
+      if (!isoString) return null;
+      return isoString.replace('T', ' ').replace('Z', '');
+    }
+    const updateTime = toMySQLDatetime(new Date().toISOString());
+
+    await pool.query("UPDATE state_store SET state_value = ?, updated_at = ? WHERE state_key = 'mlm_transactions'", [JSON.stringify(transactions), updateTime]);
+    await pool.query("UPDATE state_store SET state_value = ?, updated_at = ? WHERE state_key = 'mlm_wallets'", [JSON.stringify(wallets), updateTime]);
 
     console.log("✅ FINISHED! All financial fixes, ghost eliminations, and wallet reversals have been applied to the live database.");
 
