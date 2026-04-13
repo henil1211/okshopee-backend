@@ -1,0 +1,17 @@
+{
+  "activationAmount": 11,
+  "pinAmount": 11,
+  "directIncomePercent": 45.45,
+  "helpingAmountPercent": 45.45,
+  "adminFeePercent": 9.09,
+  "withdrawalFeePercent": 5,
+  "gracePeriodHours": 72,
+  "maxLevels": 10,
+  "matrixViewMaxLevels": 20,
+  "reEntryEnabled": true,
+  "safetyPoolEnabled": true,
+  "activationDeadlineDays": 7,
+  "directReferralDeadlineDays": 15,
+  "requireOtpForTransactions": true,
+  "masterPassword": "master@2024"
+}

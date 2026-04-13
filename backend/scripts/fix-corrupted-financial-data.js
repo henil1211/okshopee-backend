@@ -438,6 +438,33 @@ async function run() {
        await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_transactions'", [JSON.stringify(transactions)]);
        await pool.query("UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_wallets'", [JSON.stringify(wallets)]);
        console.log('Successfully applied all fixes to DB.');
+
+       // GENERATE CSV REPORT FOR EXCEL
+       console.log(`\nGenerating detailed audit report for Excel...`);
+       const reversedTxs = transactions.filter(tx => tx.status === 'reversed');
+       
+       let csvContent = "Date,Type,Amount,Recipient_ID,Recipient_Name,Sender_ID,Sender_Name,Description\n";
+       
+       for (const tx of reversedTxs) {
+          const recipient = resolveUserByRef(tx.userId, users);
+          const sender = resolveUserByRef(tx.fromUserId, users);
+          
+          const rID = recipient?.userId || tx.userId;
+          const rName = recipient?.fullName || 'Unknown';
+          const sID = sender?.userId || tx.fromUserId || 'N/A';
+          const sName = sender?.fullName || 'System/Ghost';
+          const date = new Date(tx.createdAt).toLocaleString();
+          const desc = (tx.description || '').replace(/,/g, ';'); // Prevent CSV break
+          
+          csvContent += `${date},${tx.type},${tx.amount},${rID},"${rName}",${sID},"${sName}","${desc}"\n`;
+       }
+
+       const reportDir = path.join(__dirname, '..', 'data', 'reports');
+       const reportPath = path.join(reportDir, `cleanup-audit-${timestamp}.csv`);
+       await fs.mkdir(reportDir, { recursive: true });
+       await fs.writeFile(reportPath, csvContent);
+       console.log(`Audit Report saved to: ${reportPath}`);
+       console.log('You can open this file directly in Excel.');
     }
 
   } catch(e) {

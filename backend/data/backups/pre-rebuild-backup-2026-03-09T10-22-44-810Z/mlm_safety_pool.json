@@ -1,0 +1,446 @@
+{
+  "totalAmount": 223,
+  "transactions": [
+    {
+      "id": "sp_1772636287372",
+      "amount": 1,
+      "fromUserId": "user_1772636287372_0",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.372Z"
+    },
+    {
+      "id": "sp_1772636287374",
+      "amount": 1,
+      "fromUserId": "user_1772636287374_1",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.374Z"
+    },
+    {
+      "id": "sp_1772636287376",
+      "amount": 1,
+      "fromUserId": "user_1772636287376_2",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.376Z"
+    },
+    {
+      "id": "sp_1772636287377",
+      "amount": 1,
+      "fromUserId": "user_1772636287377_3",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.377Z"
+    },
+    {
+      "id": "sp_1772636287378",
+      "amount": 1,
+      "fromUserId": "user_1772636287378_4",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.378Z"
+    },
+    {
+      "id": "sp_1772636287379",
+      "amount": 1,
+      "fromUserId": "user_1772636287379_5",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.379Z"
+    },
+    {
+      "id": "sp_1772636287381",
+      "amount": 1,
+      "fromUserId": "user_1772636287381_6",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.381Z"
+    },
+    {
+      "id": "sp_1772636287382",
+      "amount": 1,
+      "fromUserId": "user_1772636287382_7",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.382Z"
+    },
+    {
+      "id": "sp_1772636287384",
+      "amount": 1,
+      "fromUserId": "user_1772636287384_8",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.384Z"
+    },
+    {
+      "id": "sp_1772636287386",
+      "amount": 1,
+      "fromUserId": "user_1772636287386_9",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.386Z"
+    },
+    {
+      "id": "sp_1772636287388",
+      "amount": 1,
+      "fromUserId": "user_1772636287388_10",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.388Z"
+    },
+    {
+      "id": "sp_1772636287390",
+      "amount": 1,
+      "fromUserId": "user_1772636287389_11",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.390Z"
+    },
+    {
+      "id": "sp_1772636287392",
+      "amount": 1,
+      "fromUserId": "user_1772636287392_12",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.392Z"
+    },
+    {
+      "id": "sp_1772636287394",
+      "amount": 1,
+      "fromUserId": "user_1772636287393_13",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.394Z"
+    },
+    {
+      "id": "sp_1772636287396",
+      "amount": 1,
+      "fromUserId": "user_1772636287396_14",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.396Z"
+    },
+    {
+      "id": "sp_1772636287398",
+      "amount": 1,
+      "fromUserId": "user_1772636287398_15",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.398Z"
+    },
+    {
+      "id": "sp_1772636287400",
+      "amount": 1,
+      "fromUserId": "user_1772636287400_16",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.400Z"
+    },
+    {
+      "id": "sp_1772636287403",
+      "amount": 1,
+      "fromUserId": "user_1772636287403_17",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.403Z"
+    },
+    {
+      "id": "sp_1772636287407",
+      "amount": 1,
+      "fromUserId": "user_1772636287406_18",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.407Z"
+    },
+    {
+      "id": "sp_1772636287409",
+      "amount": 1,
+      "fromUserId": "user_1772636287408_19",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.409Z"
+    },
+    {
+      "id": "sp_1772636287411",
+      "amount": 1,
+      "fromUserId": "user_1772636287411_20",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.411Z"
+    },
+    {
+      "id": "sp_1772636287414",
+      "amount": 1,
+      "fromUserId": "user_1772636287413_21",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.414Z"
+    },
+    {
+      "id": "sp_1772636287417",
+      "amount": 1,
+      "fromUserId": "user_1772636287417_22",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.417Z"
+    },
+    {
+      "id": "sp_1772636287420",
+      "amount": 1,
+      "fromUserId": "user_1772636287419_23",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.420Z"
+    },
+    {
+      "id": "sp_1772636287423",
+      "amount": 1,
+      "fromUserId": "user_1772636287423_24",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.423Z"
+    },
+    {
+      "id": "sp_1772636287506",
+      "amount": 1,
+      "fromUserId": "user_1772636287506_25",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.506Z"
+    },
+    {
+      "id": "sp_1772636287511",
+      "amount": 1,
+      "fromUserId": "user_1772636287510_26",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.511Z"
+    },
+    {
+      "id": "sp_1772636287513",
+      "amount": 1,
+      "fromUserId": "user_1772636287513_27",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.513Z"
+    },
+    {
+      "id": "sp_1772636287517",
+      "amount": 1,
+      "fromUserId": "user_1772636287517_28",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.517Z"
+    },
+    {
+      "id": "sp_1772636287520",
+      "amount": 1,
+      "fromUserId": "user_1772636287520_29",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.520Z"
+    },
+    {
+      "id": "sp_1772636287524",
+      "amount": 1,
+      "fromUserId": "user_1772636287524_30",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.524Z"
+    },
+    {
+      "id": "sp_1772636287528",
+      "amount": 1,
+      "fromUserId": "user_1772636287528_31",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.528Z"
+    },
+    {
+      "id": "sp_1772636287532",
+      "amount": 1,
+      "fromUserId": "user_1772636287532_32",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.532Z"
+    },
+    {
+      "id": "sp_1772636287535",
+      "amount": 1,
+      "fromUserId": "user_1772636287535_33",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.535Z"
+    },
+    {
+      "id": "sp_1772636287540",
+      "amount": 1,
+      "fromUserId": "user_1772636287539_34",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.540Z"
+    },
+    {
+      "id": "sp_1772636287543",
+      "amount": 1,
+      "fromUserId": "user_1772636287543_35",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.543Z"
+    },
+    {
+      "id": "sp_1772636287546",
+      "amount": 1,
+      "fromUserId": "user_1772636287546_36",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.546Z"
+    },
+    {
+      "id": "sp_1772636287549",
+      "amount": 1,
+      "fromUserId": "user_1772636287549_37",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.549Z"
+    },
+    {
+      "id": "sp_1772636287553",
+      "amount": 1,
+      "fromUserId": "user_1772636287553_38",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.553Z"
+    },
+    {
+      "id": "sp_1772636287557",
+      "amount": 1,
+      "fromUserId": "user_1772636287556_39",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.557Z"
+    },
+    {
+      "id": "sp_1772636287562",
+      "amount": 1,
+      "fromUserId": "user_1772636287561_40",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.562Z"
+    },
+    {
+      "id": "sp_1772636287565",
+      "amount": 1,
+      "fromUserId": "user_1772636287565_41",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.565Z"
+    },
+    {
+      "id": "sp_1772636287570",
+      "amount": 1,
+      "fromUserId": "user_1772636287570_42",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.570Z"
+    },
+    {
+      "id": "sp_1772636287573",
+      "amount": 1,
+      "fromUserId": "user_1772636287573_43",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.573Z"
+    },
+    {
+      "id": "sp_1772636287579",
+      "amount": 1,
+      "fromUserId": "user_1772636287579_44",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T14:58:07.579Z"
+    },
+    {
+      "id": "sp_1772644866396",
+      "amount": 1,
+      "fromUserId": "user_1772644866391",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-04T17:21:06.396Z"
+    },
+    {
+      "id": "sp_1772691807275",
+      "amount": 1,
+      "fromUserId": "user_1772691807273_0",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.275Z"
+    },
+    {
+      "id": "sp_1772691807282",
+      "amount": 1,
+      "fromUserId": "user_1772691807281_1",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.282Z"
+    },
+    {
+      "id": "sp_1772691807290",
+      "amount": 1,
+      "fromUserId": "user_1772691807289_2",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.290Z"
+    },
+    {
+      "id": "sp_1772691807296",
+      "amount": 1,
+      "fromUserId": "user_1772691807295_3",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.296Z"
+    },
+    {
+      "id": "sp_1772691807307",
+      "amount": 1,
+      "fromUserId": "user_1772691807307_4",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.307Z"
+    },
+    {
+      "id": "sp_1772691807314",
+      "amount": 1,
+      "fromUserId": "user_1772691807313_5",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.314Z"
+    },
+    {
+      "id": "sp_1772691807325",
+      "amount": 1,
+      "fromUserId": "user_1772691807324_6",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.325Z"
+    },
+    {
+      "id": "sp_1772691807329",
+      "amount": 1,
+      "fromUserId": "user_1772691807328_7",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.329Z"
+    },
+    {
+      "id": "sp_1772691807338",
+      "amount": 1,
+      "fromUserId": "user_1772691807337_8",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.338Z"
+    },
+    {
+      "id": "sp_1772691807342",
+      "amount": 1,
+      "fromUserId": "user_1772691807341_9",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.342Z"
+    },
+    {
+      "id": "sp_1772691807349",
+      "amount": 1,
+      "fromUserId": "user_1772691807348_10",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.349Z"
+    },
+    {
+      "id": "sp_1772691807354",
+      "amount": 1,
+      "fromUserId": "user_1772691807354_11",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.354Z"
+    },
+    {
+      "id": "sp_1772691807362",
+      "amount": 1,
+      "fromUserId": "user_1772691807361_12",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.362Z"
+    },
+    {
+      "id": "sp_1772691807367",
+      "amount": 1,
+      "fromUserId": "user_1772691807367_13",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.367Z"
+    },
+    {
+      "id": "sp_1772691807376",
+      "amount": 1,
+      "fromUserId": "user_1772691807375_14",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T06:23:27.376Z"
+    },
+    {
+      "id": "sp_1772733684532_1_59p4pc_Admin_fee",
+      "amount": 1,
+      "fromUserId": "user_1772733684531_0",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T18:01:24.532Z"
+    },
+    {
+      "id": "sp_1772733684543_5_6vvmse_Admin_fee",
+      "amount": 1,
+      "fromUserId": "user_1772733684542_1",
+      "reason": "Admin fee",
+      "createdAt": "2026-03-05T18:01:24.543Z"
+    }
+  ]
+}

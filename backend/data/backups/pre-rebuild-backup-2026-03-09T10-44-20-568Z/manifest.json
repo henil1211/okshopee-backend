@@ -1,0 +1,99 @@
+{
+  "formatVersion": 2,
+  "createdAt": "2026-03-09T10:44:20.568Z",
+  "source": "automatic",
+  "reason": "pre_rebuild_matrix",
+  "updatedAt": "2026-03-09T10:44:17.377Z",
+  "keys": [
+    "mlm_users",
+    "mlm_wallets",
+    "mlm_transactions",
+    "mlm_matrix",
+    "mlm_safety_pool",
+    "mlm_notifications",
+    "mlm_settings",
+    "mlm_payment_methods",
+    "mlm_pins",
+    "mlm_help_trackers",
+    "mlm_matrix_pending_contributions"
+  ],
+  "files": [
+    {
+      "stateKey": "mlm_users",
+      "collection": "users",
+      "fileName": "mlm_users.json",
+      "updatedAt": "2026-03-09T10:43:02.589Z",
+      "itemCount": 102
+    },
+    {
+      "stateKey": "mlm_wallets",
+      "collection": "wallets",
+      "fileName": "mlm_wallets.json",
+      "updatedAt": "2026-03-09T10:43:02.589Z",
+      "itemCount": 102
+    },
+    {
+      "stateKey": "mlm_transactions",
+      "collection": "transactions",
+      "fileName": "mlm_transactions.json",
+      "updatedAt": "2026-03-09T10:42:43.152Z",
+      "itemCount": 416
+    },
+    {
+      "stateKey": "mlm_matrix",
+      "collection": "matrix",
+      "fileName": "mlm_matrix.json",
+      "updatedAt": "2026-03-09T10:43:02.589Z",
+      "itemCount": 101
+    },
+    {
+      "stateKey": "mlm_safety_pool",
+      "collection": "safety_pool",
+      "fileName": "mlm_safety_pool.json",
+      "updatedAt": "2026-03-09T10:42:42.966Z",
+      "itemCount": 2
+    },
+    {
+      "stateKey": "mlm_notifications",
+      "collection": "notifications",
+      "fileName": "mlm_notifications.json",
+      "updatedAt": "2026-03-09T10:42:42.966Z",
+      "itemCount": 100
+    },
+    {
+      "stateKey": "mlm_settings",
+      "collection": "settings",
+      "fileName": "mlm_settings.json",
+      "updatedAt": "2026-03-09T10:42:27.458Z",
+      "itemCount": 15
+    },
+    {
+      "stateKey": "mlm_payment_methods",
+      "collection": "payment_methods",
+      "fileName": "mlm_payment_methods.json",
+      "updatedAt": "2026-03-09T10:42:27.458Z",
+      "itemCount": 1
+    },
+    {
+      "stateKey": "mlm_pins",
+      "collection": "pins",
+      "fileName": "mlm_pins.json",
+      "updatedAt": "2026-03-09T10:43:02.589Z",
+      "itemCount": 20
+    },
+    {
+      "stateKey": "mlm_help_trackers",
+      "collection": "help_trackers",
+      "fileName": "mlm_help_trackers.json",
+      "updatedAt": "2026-03-09T10:44:17.377Z",
+      "itemCount": 103
+    },
+    {
+      "stateKey": "mlm_matrix_pending_contributions",
+      "collection": "matrix_pending_contributions",
+      "fileName": "mlm_matrix_pending_contributions.json",
+      "updatedAt": "2026-03-09T10:42:42.966Z",
+      "itemCount": 386
+    }
+  ]
+}

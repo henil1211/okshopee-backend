@@ -1,0 +1,3 @@
+[
+  {"id":"crypto_usdt","name":"USDT (BEP-20)","type":"crypto","icon":"usdt","description":"Pay with USDT BEP-20","instructions":"Send USDT BEP-20 to the provided wallet address. Upload transaction proof for verification.","walletAddress":"0x1234567890abcdef1234567890abcdef12345678","isActive":true,"minAmount":11,"maxAmount":50000,"processingFee":0,"processingTime":"Within 24 hours"}
+]
