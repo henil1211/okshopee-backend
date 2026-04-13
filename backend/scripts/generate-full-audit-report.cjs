@@ -38,39 +38,30 @@ async function generateFullReport() {
         // 3. Normalization Helper
         const normalizeId = (id) => String(id).replace('user_', '').trim();
         
-        // Create a map of live data for easy lookup
-        const liveMap = new Map();
-        liveWallets.forEach(w => {
-            liveMap.set(normalizeId(w.userId), w);
-        });
-
-        // Mapping Cache (Backup ID -> Live ID)
-        const identificationMap = new Map();
-
-        // 4. Compare and Build Report
-        const reportData = [];
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const reportDir = path.join(__dirname, '..', 'data', 'reports');
-        await fs.mkdir(reportDir, { recursive: true });
-        const reportPath = path.join(reportDir, `full-financial-audit-${timestamp}.csv`);
-
-        let affectedCount = 0;
-
-        console.log("Reconciling Users (this may take a moment)...");
+        console.log("Deep Reconciling Users (Identity-First Search)...");
 
         for (const user of liveUsers) {
-            const normId = normalizeId(user.userId);
-            const liveW = liveMap.get(normId);
-            
-            // Try to find in backup
-            let oldW = oldWallets.find(w => normalizeId(w.userId) === normId);
+            const searchTerms = [
+                String(user.userId),
+                String(user.publicUserId),
+                normalizeId(user.userId)
+            ].filter(Boolean);
 
-            // Fuzzy Fallback: Search in transactions for clues
+            // 1. Find LIVE Wallet (Fuzzy)
+            const liveW = liveWallets.find(w => 
+                searchTerms.some(term => String(w.userId).includes(term))
+            );
+
+            // 2. Find BACKUP Wallet (Fuzzy + Transactional Clues)
+            let oldW = oldWallets.find(w => 
+                searchTerms.some(term => String(w.userId).includes(term))
+            );
+
             if (!oldW) {
-                const searchStr = user.publicUserId || user.userId;
+                // Look for the user's name or ID in backup transactions
                 const relatedTx = oldTxs.find(tx => 
-                    String(tx.userId).includes(String(searchStr)) || 
-                    String(tx.description).includes(String(searchStr))
+                    searchTerms.some(term => String(tx.userId).includes(term) || String(tx.description).includes(term)) ||
+                    (user.fullName && String(tx.description).includes(user.fullName))
                 );
                 if (relatedTx) {
                     oldW = oldWallets.find(w => w.userId === relatedTx.userId);
