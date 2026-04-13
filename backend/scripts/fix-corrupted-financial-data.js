@@ -87,7 +87,10 @@ async function run() {
         ghostCount++;
         const amt = Math.abs(tx.amount || 0);
         deducedGhostIncome += amt;
-        console.log(`[Ghost Eradic] Removing TX ${tx.id} for recipient ${tx.userId}. Amt: ${amt}. Desc: ${tx.description}`);
+        const recip = resolveUserByRef(tx.userId, users);
+        const displayId = recip ? recip.userId : tx.userId;
+        const displayName = recip ? recip.fullName : 'Unknown';
+        console.log(`[Ghost Eradic] Removing TX ${tx.id} for recipient ${displayName} (${displayId}). Amt: ${amt}. Desc: ${tx.description}`);
 
         const wallet = wallets.find(w => w.userId === tx.userId || w.userId === resolveUserByRef(tx.userId, users)?.userId);
         if (wallet) {
@@ -189,7 +192,10 @@ async function run() {
              trueDuplicatesRemoved++;
              trueDupAmt += Math.abs(dup.amount || 0);
 
-             console.log(`[DuplicateReferral] Removing exact duplicate ${dup.id} for sponsor ${dup.userId}`);
+             const spon = resolveUserByRef(dup.userId, users);
+             const displayId = spon ? spon.userId : dup.userId;
+             const displayName = spon ? spon.fullName : 'Unknown';
+             console.log(`[DuplicateReferral] Removing exact duplicate ${dup.id} for sponsor ${displayName} (${displayId})`);
              const wallet = wallets.find(w => w.userId === dup.userId || w.userId === resolveUserByRef(dup.userId, users)?.userId);
              if (wallet) {
                 const amt = Math.abs(dup.amount || 0);
