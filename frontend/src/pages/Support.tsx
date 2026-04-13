@@ -12,7 +12,7 @@ import type {
   SupportTicketPriority,
   SupportTicketStatus
 } from '@/types';
-import { readOptimizedUploadDataUrl } from '@/utils/helpers';
+import { uploadOptimizedFileToBackend } from '@/utils/helpers';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -67,17 +67,19 @@ const statusClassMap: Record<SupportTicketStatus, string> = {
 };
 
 async function toAttachment(file: File, uploadedBy: string): Promise<SupportTicketAttachment> {
-  const dataUrl = await readOptimizedUploadDataUrl(file, {
+  const uploaded = await uploadOptimizedFileToBackend(file, {
+    scope: 'support-attachments',
     maxDimension: 1800,
     targetBytes: 650 * 1024,
     quality: 0.86
   });
   return {
     id: `support_att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    file_name: file.name,
-    file_type: file.type || 'application/octet-stream',
-    file_size: file.size,
-    data_url: dataUrl,
+    file_name: uploaded.fileName,
+    file_type: uploaded.mimeType || file.type || 'application/octet-stream',
+    file_size: uploaded.sizeBytes || file.size,
+    data_url: '',
+    file_url: uploaded.fileUrl,
     uploaded_by: uploadedBy,
     uploaded_at: new Date().toISOString()
   };
@@ -155,8 +157,12 @@ export default function Support() {
       toast.error('Attachment size must be under 5MB');
       return;
     }
-    const attachment = await toAttachment(file, displayUser.userId);
-    setSubmitAttachment(attachment);
+    try {
+      const attachment = await toAttachment(file, displayUser.userId);
+      setSubmitAttachment(attachment);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to upload attachment');
+    }
   };
 
   const handleReplyFile = async (file: File | null) => {
@@ -168,8 +174,12 @@ export default function Support() {
       toast.error('Attachment size must be under 5MB');
       return;
     }
-    const attachment = await toAttachment(file, displayUser.userId);
-    setReplyAttachment(attachment);
+    try {
+      const attachment = await toAttachment(file, displayUser.userId);
+      setReplyAttachment(attachment);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to upload attachment');
+    }
   };
 
   const handleSubmitTicket = async () => {
@@ -624,24 +634,28 @@ export default function Support() {
                           )}
                           {msg.attachments.length > 0 && (
                             <div className="mt-2 space-y-2 pt-2 border-t border-white/10">
-                              {msg.attachments.map((att) => (
-                                <div key={att.id}>
-                                  {(att.file_type?.startsWith('image/') || att.data_url?.startsWith('data:image/')) ? (
-                                    <a href={att.data_url} target="_blank" rel="noreferrer" className="block">
+                                {msg.attachments.map((att) => (
+                                  <div key={att.id}>
+                                  {(() => {
+                                    const attachmentUrl = att.file_url || att.data_url;
+                                    const isImage = att.file_type?.startsWith('image/') || attachmentUrl?.startsWith('data:image/');
+                                    return isImage ? (
+                                    <a href={attachmentUrl} target="_blank" rel="noreferrer" className="block">
                                       <img
-                                        src={att.data_url}
+                                        src={attachmentUrl}
                                         alt={att.file_name}
                                         className="max-w-[260px] max-h-[180px] rounded-lg border border-white/10 object-contain cursor-pointer hover:opacity-80 transition-opacity"
                                       />
                                       <p className="text-xs text-[#7cc9ff] mt-1">{att.file_name}</p>
                                     </a>
                                   ) : (
-                                    <a href={att.data_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs text-[#7cc9ff] hover:underline bg-white/5 rounded-lg px-3 py-1.5">
+                                    <a href={attachmentUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-xs text-[#7cc9ff] hover:underline bg-white/5 rounded-lg px-3 py-1.5">
                                       <Paperclip className="w-3 h-3" /> {att.file_name}
                                     </a>
-                                  )}
-                                </div>
-                              ))}
+                                  );
+                                  })()}
+                                  </div>
+                                ))}
                             </div>
                           )}
                         </div>

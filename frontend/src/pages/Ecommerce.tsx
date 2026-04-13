@@ -4,7 +4,8 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import {
   ArrowLeft, Check, ChevronLeft, ChevronRight, Copy, ExternalLink, LogOut, Search, ShoppingBag,
   Star, GraduationCap, Laptop, Shirt, Landmark, Briefcase, Plane, Pill, UtensilsCrossed, Heart, Home,
-  Gift, Music, Camera, Gamepad2, Dumbbell, Baby, Car, Smartphone, Share2, Tag, Zap, TrendingUp,
+  Gift, Music, Camera, Gamepad2, Dumbbell, Baby, Car, Smartphone, Handbag, Sparkles, Gem, SprayCan,
+  Venus, Mars, WandSparkles, CookingPot, BadgeCent, Flower2, SoapDispenserDroplet, Store, Share2, Tag, Zap, TrendingUp,
   ArrowRight, Award, Upload, FileText, Clock, CheckCircle, XCircle, Send, type LucideIcon
 } from 'lucide-react';
 import { copyToClipboard, formatAmountForCountryCurrency, getCurrencyLabelForCountry, readOptimizedUploadDataUrl } from '@/utils/helpers';
@@ -53,6 +54,7 @@ async function uploadMarketplaceFile(dataUrl: string, fileName: string, mimeType
 const ICON_MAP: Record<string, LucideIcon> = {
   Star, GraduationCap, Laptop, Shirt, Landmark, Briefcase, Plane, Pill, UtensilsCrossed, Heart, Home,
   ShoppingBag, Gift, Music, Camera, Gamepad2, Dumbbell, Baby, Car, Smartphone,
+  Handbag, Sparkles, Gem, SprayCan, Venus, Mars, WandSparkles, CookingPot, BadgeCent, Flower2, SoapDispenserDroplet, Store,
 };
 
 function DynamicIcon({ name, className }: { name: string; className?: string }) {
@@ -1444,15 +1446,18 @@ function RetailerCard({ retailer, copiedId, onShop, onShare, onCopy }: {
     >
       {/* Discount ribbon */}
       {badgeText && (
-        <div className="absolute top-0 right-0 z-10">
-          <div className="relative px-3 py-1 text-[10px] font-bold text-white" style={{ background: 'linear-gradient(135deg, #10b981, #059669)', borderBottomLeftRadius: '10px' }}>
+        <div className="absolute inset-x-0 top-0 z-10">
+          <div
+            className="flex min-h-[2.5rem] w-full items-center justify-center px-4 py-2 text-center text-[10px] font-bold text-white"
+            style={{ background: 'linear-gradient(135deg, #10b981, #059669)' }}
+          >
             {badgeText}
           </div>
         </div>
       )}
 
       {/* Card content */}
-      <div className="pt-6 pb-3 px-4">
+      <div className={`px-4 pb-3 ${badgeText ? 'pt-16' : 'pt-6'}`}>
         {/* Logo area */}
         <div className="flex flex-col items-center">
           <button

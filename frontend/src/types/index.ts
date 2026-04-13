@@ -112,6 +112,9 @@ export interface Wallet {
   userId: string;
   // Three main wallets
   depositWallet: number;    // For deposits and withdrawals
+  fundRecoveryDue: number;  // Amount to auto-recover from future fund-wallet credits
+  fundRecoveryRecoveredTotal: number;
+  fundRecoveryReason?: string | null;
   pinWallet: number;        // Tracks current unused PIN count
   incomeWallet: number;     // For earnings and income
   royaltyWallet: number;    // Admin-only royalty credits
@@ -149,6 +152,7 @@ export type TransactionType =
   | 'royalty_income'
   | 'admin_credit'
   | 'admin_debit'
+  | 'fund_recovery'
   | 'system_fee';
 
 export type TransactionStatus = 'pending' | 'completed' | 'failed' | 'cancelled' | 'reversed';
@@ -395,6 +399,7 @@ export interface AdminSettings {
   requireOtpForTransactions: boolean;
   masterPassword: string; // For admin to login as any user
   matrixViewMaxLevels: number;
+  lockedIncomeStrictFrom?: string; // ISO timestamp when strict level-only consumption starts
 }
 
 // Network Types
@@ -567,6 +572,7 @@ export interface SupportTicketAttachment {
   file_type: string;
   file_size: number;
   data_url: string;
+  file_url?: string;
   uploaded_by: string;
   uploaded_at: string;
   message_id?: string;
@@ -615,7 +621,7 @@ export interface MarketplaceCategory {
 export interface MarketplaceRetailer {
   id: string;
   name: string;
-  logoUrl: string; // base64 data URL or external URL
+  logoUrl: string; // backend file URL or external URL
   badgeText?: string; // top-right ribbon text, e.g. "80% OFF"
   discountPercent: number;
   discountText: string; // e.g. "Up to 30% Cashback"
@@ -631,7 +637,7 @@ export interface MarketplaceBanner {
   id: string;
   title: string;
   subtitle: string;
-  imageUrl: string; // base64 data URL or gradient CSS
+  imageUrl: string; // backend file URL, external URL, or gradient CSS
   linkUrl: string;
   sortOrder: number;
   isActive: boolean;
@@ -641,7 +647,7 @@ export interface MarketplaceDeal {
   id: string;
   title: string;
   description: string;
-  imageUrl: string;
+  imageUrl: string; // backend file URL or external URL
   linkUrl: string;
   retailerId: string;
   badgeText: string; // e.g. "Hot Deal", "New"

@@ -199,7 +199,11 @@ export default function Dashboard() {
     setIsSendingWithdrawOtp(false);
     if (result.success) {
       setIsWithdrawOtpSent(true);
-      toast.success('OTP sent to your registered email');
+      if (result.status === 'pending') {
+        toast.warning(result.message);
+      } else {
+        toast.success(result.message);
+      }
     } else {
       toast.error(result.message);
     }
@@ -281,33 +285,55 @@ export default function Dashboard() {
     }
   };
 
-  const downlineStats = displayUser ? getDownlineStats(displayUser.userId) : { left: 0, right: 0, leftActive: 0, rightActive: 0 };
-  const sponsorUser = displayUser?.sponsorId ? Database.getUserByUserId(displayUser.sponsorId) : null;
-  const directReferralUsers = displayUser
-    ? (() => {
-        const rawUsers = Database.getUsers().filter((u) => u.sponsorId === displayUser.userId);
-        const seen = new Set<string>();
-        return rawUsers
-          .map((u) => Database.getUserByUserId(u.userId) || u)
-          .filter((u) => {
-            if (seen.has(u.userId)) return false;
-            seen.add(u.userId);
-            return true;
-          });
-      })()
-    : [];
-  const filteredDirectReferrals = directReferralUsers.filter((u) =>
-    u.userId.includes(directReferralSearch.trim()) ||
-    u.fullName.toLowerCase().includes(directReferralSearch.trim().toLowerCase())
+  const downlineStats = useMemo(
+    () => (displayUser ? getDownlineStats(displayUser.userId) : { left: 0, right: 0, leftActive: 0, rightActive: 0 }),
+    [displayUser?.userId, getDownlineStats]
   );
-  const sortedDirectReferrals = [...filteredDirectReferrals].sort((a, b) => {
-    const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    return directReferralSort === 'asc' ? diff : -diff;
-  });
-  const currentLevelDisplay = displayUser ? Database.getCurrentMatrixLevel(displayUser.id) : 0;
-  const qualifiedLevel = displayUser ? Database.getQualifiedLevel(displayUser.id) : 0;
-  const lockedIncomeBreakdown = displayUser ? Database.getLockedIncomeBreakdown(displayUser.id) : [];
-  const effectiveDirectCount = displayUser ? Database.getEffectiveDirectCount(displayUser) : 0;
+  const sponsorUser = useMemo(
+    () => (displayUser?.sponsorId ? Database.getUserByUserId(displayUser.sponsorId) : null),
+    [displayUser?.sponsorId]
+  );
+  const directReferralUsers = useMemo(() => {
+    if (!displayUser) return [];
+    const rawUsers = Database.getUsers().filter((u) => u.sponsorId === displayUser.userId);
+    const seen = new Set<string>();
+    return rawUsers
+      .map((u) => Database.getUserByUserId(u.userId) || u)
+      .filter((u) => {
+        if (seen.has(u.userId)) return false;
+        seen.add(u.userId);
+        return true;
+      });
+  }, [displayUser?.userId]);
+  const filteredDirectReferrals = useMemo(() => {
+    const search = directReferralSearch.trim().toLowerCase();
+    if (!search) return directReferralUsers;
+    return directReferralUsers.filter((u) =>
+      u.userId.includes(search) || u.fullName.toLowerCase().includes(search)
+    );
+  }, [directReferralSearch, directReferralUsers]);
+  const sortedDirectReferrals = useMemo(() => {
+    return [...filteredDirectReferrals].sort((a, b) => {
+      const diff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      return directReferralSort === 'asc' ? diff : -diff;
+    });
+  }, [directReferralSort, filteredDirectReferrals]);
+  const currentLevelDisplay = useMemo(
+    () => (displayUser ? Database.getCurrentMatrixLevel(displayUser.id) : 0),
+    [displayUser?.id]
+  );
+  const qualifiedLevel = useMemo(
+    () => (displayUser ? Database.getQualifiedLevel(displayUser.id) : 0),
+    [displayUser?.id]
+  );
+  const lockedIncomeBreakdown = useMemo(
+    () => (displayUser ? Database.getLockedIncomeBreakdown(displayUser.id) : []),
+    [displayUser?.id]
+  );
+  const effectiveDirectCount = useMemo(
+    () => (displayUser ? Database.getEffectiveDirectCount(displayUser) : 0),
+    [displayUser]
+  );
   const currentRoyaltyMilestone = ROYALTY_MILESTONES
     .filter((milestone) => qualifiedLevel >= milestone.qualifiedLevel)
     .slice(-1)[0] || null;
@@ -351,7 +377,7 @@ export default function Dashboard() {
   // Next level direct referral progress
   const nextLevelDirectInfo = useMemo(() => {
     if (!displayUser || !hasMetInitialDirectRequirement) return null;
-    const currentMatrixLevel = Database.getCurrentMatrixLevel(displayUser.id);
+    const currentMatrixLevel = currentLevelDisplay;
     // Find the first level (starting from 2) where user hasn't met cumulative direct requirement
     for (let lvl = 2; lvl <= helpDistributionTable.length; lvl++) {
       const cumulativeRequired = Database.getCumulativeDirectRequired(lvl);
@@ -372,7 +398,7 @@ export default function Dashboard() {
       }
     }
     return null; // qualified for all levels
-  }, [displayUser, hasMetInitialDirectRequirement, effectiveDirectCount]);
+  }, [currentLevelDisplay, displayUser, hasMetInitialDirectRequirement, effectiveDirectCount]);
 
   const isOutflowTransaction = (tx: { amount: number; type: string }) =>
     tx.amount < 0
@@ -597,29 +623,30 @@ export default function Dashboard() {
           {/* Sponsor Detail */}
           {sponsorUser && (
             <Card className="glass border-slate-200/80 dark:border-white/10">
-              <CardContent className="p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                <div>
+              <CardContent className="p-5">
+                <div className="space-y-4">
                   <p className="text-sm text-slate-500 dark:text-white/50 flex items-center gap-2">
                     <Users className="w-4 h-4 text-[#118bdd]" />
                     Sponsor Details
                   </p>
-                  <p className="text-lg font-semibold text-slate-900 dark:text-white mt-1">{sponsorUser.fullName}</p>
-                  <p className="text-sm text-slate-600 dark:text-white/60">ID: {sponsorUser.userId}</p>
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-lg font-semibold text-slate-900 dark:text-white">{sponsorUser.userId}</p>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (!sponsorUser.phone) {
+                          toast.error('Sponsor mobile number not available');
+                          return;
+                        }
+                        window.location.href = `tel:${sponsorUser.phone}`;
+                      }}
+                      className="shrink-0 border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400"
+                    >
+                      <PhoneCall className="w-4 h-4 mr-2" />
+                      Call Sponsor
+                    </Button>
+                  </div>
                 </div>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    if (!sponsorUser.phone) {
-                      toast.error('Sponsor mobile number not available');
-                      return;
-                    }
-                    window.location.href = `tel:${sponsorUser.phone}`;
-                  }}
-                  className="border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400"
-                >
-                  <PhoneCall className="w-4 h-4 mr-2" />
-                  Call Sponsor
-                </Button>
               </CardContent>
             </Card>
           )}

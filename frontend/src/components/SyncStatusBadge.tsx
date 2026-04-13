@@ -64,6 +64,7 @@ export default function SyncStatusBadge() {
 
   if (!isAuthenticated) return null;
   if (HIDDEN_ROUTES.has(location.pathname)) return null;
+  if (status.dirtyKeys <= 0) return null;
 
   const detailText = status.message || (status.state === 'synced' ? `Last sync ${formatRelativeTime(status.lastSuccessAt)}` : 'Sync in progress');
 

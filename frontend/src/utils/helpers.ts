@@ -269,6 +269,77 @@ export async function readOptimizedUploadDataUrl(
   }
 }
 
+const BACKEND_UPLOAD_BASE_URL = (
+  (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || 'http://localhost:4000'
+).replace(/\/+$/, '');
+
+export async function uploadDataUrlToBackend(params: {
+  scope: string;
+  fileName: string;
+  dataUrl: string;
+  mimeType?: string;
+}): Promise<{
+  fileUrl: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+}> {
+  const response = await fetch(`${BACKEND_UPLOAD_BASE_URL}/api/upload-file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      scope: params.scope,
+      fileName: params.fileName,
+      mimeType: params.mimeType,
+      dataUrl: params.dataUrl
+    })
+  });
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false || typeof payload?.fileUrl !== 'string') {
+    const message =
+      typeof payload?.error === 'string'
+        ? payload.error
+        : `Failed to upload file (HTTP ${response.status})`;
+    throw new Error(message);
+  }
+
+  return {
+    fileUrl: payload.fileUrl,
+    fileName: typeof payload?.fileName === 'string' ? payload.fileName : params.fileName,
+    mimeType: typeof payload?.mimeType === 'string' ? payload.mimeType : (params.mimeType || ''),
+    sizeBytes: Number(payload?.sizeBytes || 0) || 0
+  };
+}
+
+export async function uploadOptimizedFileToBackend(
+  file: File,
+  params: {
+    scope: string;
+    maxDimension?: number;
+    targetBytes?: number;
+    quality?: number;
+  }
+): Promise<{
+  fileUrl: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+}> {
+  const dataUrl = await readOptimizedUploadDataUrl(file, {
+    maxDimension: params.maxDimension,
+    targetBytes: params.targetBytes,
+    quality: params.quality
+  });
+
+  return uploadDataUrlToBackend({
+    scope: params.scope,
+    fileName: file.name,
+    mimeType: file.type || 'application/octet-stream',
+    dataUrl
+  });
+}
+
 // Basic phone validation: allows E.164 (+XXXXXXXX) or 8-15 local/international digits
 export function isValidPhoneNumber(phoneInput?: string | null): boolean {
   const normalized = normalizePhoneNumber(phoneInput);
@@ -529,6 +600,7 @@ export function getTransactionTypeColor(type: string): string {
     receive_help: 'bg-purple-500',
     p2p_transfer: 'bg-cyan-500',
     withdrawal: 'bg-red-500',
+    fund_recovery: 'bg-amber-500',
     reentry: 'bg-amber-500',
     safety_pool: 'bg-gray-500'
   };
@@ -550,6 +622,7 @@ export function getTransactionTypeIcon(type: string): string {
     receive_help: 'ArrowDownLeft',
     p2p_transfer: 'Repeat',
     withdrawal: 'Wallet',
+    fund_recovery: 'RotateCcw',
     reentry: 'RefreshCw',
     safety_pool: 'Shield'
   };
@@ -587,6 +660,7 @@ export function getTransactionTypeLabel(type: string, description?: string): str
     safety_pool: 'Safety Pool',
     admin_credit: 'Admin Credit',
     admin_debit: 'Admin Debit',
+    fund_recovery: 'Fund Recovery',
     system_fee: 'System Fee'
   };
 

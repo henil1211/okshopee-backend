@@ -91,13 +91,13 @@ export default function InvoiceQuery() {
                   type="button"
                   onClick={() => {
                     if (index === 0) {
-                      navigate('/invoice-query/profit-tracked-incorrectly', { state: { invoice: queryInvoice } });
+                      navigate('/invoice-query/profit-tracked-incorrectly', { state: { invoice: queryInvoice, queryType: 'profit_tracked_incorrectly' } });
                     } else if (index === 1) {
                       navigate('/invoice-query/why-profit-pending', { state: { invoice: queryInvoice } });
                     } else if (index === 2) {
                       navigate('/invoice-query/how-to-withdraw-profit', { state: { invoice: queryInvoice } });
                     } else if (index === 3) {
-                      navigate('/invoice-query/different-query', { state: { invoice: queryInvoice } });
+                      navigate('/invoice-query/profit-tracked-incorrectly', { state: { invoice: queryInvoice, queryType: 'different_query' } });
                     }
                   }}
                   className={`w-full px-5 py-4 text-left text-[15px] font-medium text-white/80 transition-colors hover:bg-white/[0.04] hover:text-white sm:px-6 sm:py-5 sm:text-[17px] ${index < INVOICE_QUERY_OPTIONS.length - 1 ? 'border-b border-white/8' : ''}`}

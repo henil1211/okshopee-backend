@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type ChangeEvent } from 'react';
+import { useState, useEffect, useRef, useMemo, type ChangeEvent } from 'react';
 import { useAuthStore, usePinStore, useOtpStore, useSyncRefreshKey } from '@/store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,7 +13,7 @@ import {
 import Database from '@/db';
 import { toast } from 'sonner';
 import { useNavigate } from 'react-router-dom';
-import { readOptimizedUploadDataUrl } from '@/utils/helpers';
+import { uploadOptimizedFileToBackend } from '@/utils/helpers';
 
 export default function PinWallet() {
   const navigate = useNavigate();
@@ -34,7 +34,11 @@ export default function PinWallet() {
   } = usePinStore();
   const { sendOtp, verifyOtp } = useOtpStore();
   const syncKey = useSyncRefreshKey();
-  const displayUser = impersonatedUser || user;
+  const displayUser = useMemo(() => {
+    const activeUser = impersonatedUser || user;
+    if (!activeUser) return null;
+    return Database.getUserByUserId(activeUser.userId) || Database.getUserById(activeUser.id) || activeUser;
+  }, [impersonatedUser, user]);
 
   const [activeTab, setActiveTab] = useState<'unused' | 'used' | 'received' | 'transfer' | 'request'>('unused');
   const [transferUserId, setTransferUserId] = useState('');
@@ -256,7 +260,11 @@ export default function PinWallet() {
     setIsSendingOtp(false);
     if (result.success) {
       setIsTransferOtpSent(true);
-      toast.success('OTP sent to your email');
+      if (result.status === 'pending') {
+        toast.warning(result.message);
+      } else {
+        toast.success(result.message);
+      }
     } else {
       toast.error(result.message);
     }
@@ -266,12 +274,13 @@ export default function PinWallet() {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const proofDataUrl = await readOptimizedUploadDataUrl(file, {
+      const uploaded = await uploadOptimizedFileToBackend(file, {
+        scope: 'pin-request-proofs',
         maxDimension: 1800,
         targetBytes: 650 * 1024,
         quality: 0.86
       });
-      setRequestProof(proofDataUrl);
+      setRequestProof(uploaded.fileUrl);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to process payment screenshot');
     }

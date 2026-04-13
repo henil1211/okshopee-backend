@@ -20,6 +20,7 @@ export default function Transactions() {
   const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
   const syncKey = useSyncRefreshKey();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [filterType, setFilterType] = useState<'all' | 'help' | 'direct_income' | 'royalty_income' | 'fund_transfer' | 'deposit' | 'withdrawal'>('all');
   const [levelFilter, setLevelFilter] = useState<'all' | number>('all');
   const displayUser = useMemo(() => {
@@ -28,8 +29,26 @@ export default function Transactions() {
     return Database.getUserByUserId(activeUser.userId) || Database.getUserById(activeUser.id) || activeUser;
   }, [impersonatedUser, user]);
 
-  const loadTransactions = useCallback(() => {
+  const loadTransactions = useCallback(async (options?: { forceRefresh?: boolean }) => {
     if (!displayUser) return;
+
+    if (options?.forceRefresh) {
+      setIsRefreshing(true);
+      try {
+        await Database.hydrateFromServer({
+          strict: true,
+          maxAttempts: 2,
+          timeoutMs: 12000,
+          retryDelayMs: 800,
+          keys: Database.getTransactionFreshDataKeys()
+        });
+      } catch {
+        // Fall back to locally available data if remote refresh fails.
+      } finally {
+        setIsRefreshing(false);
+      }
+    }
+
     const userTransactions = Database.getUserTransactions(displayUser.id);
     setTransactions(userTransactions);
   }, [displayUser]);
@@ -40,8 +59,13 @@ export default function Transactions() {
       return;
     }
 
-    loadTransactions();
+    void loadTransactions();
   }, [isAuthenticated, navigate, loadTransactions, syncKey]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !displayUser) return;
+    void loadTransactions({ forceRefresh: true });
+  }, [isAuthenticated, displayUser?.id, loadTransactions]);
 
   const handleLogout = () => {
     logout();
@@ -119,10 +143,34 @@ export default function Transactions() {
     };
 
     const createdAt = parse(tx.createdAt);
-    if (createdAt !== null) return createdAt;
-
     const completedAt = parse(tx.completedAt);
-    if (completedAt !== null) return completedAt;
+    const baseTimestamp = createdAt ?? completedAt ?? 0;
+    const isHistoryOnlySettledReceive =
+      tx.type === 'receive_help'
+      && !(tx.amount > 0)
+      && Number.isFinite(tx.displayAmount)
+      && (tx.displayAmount as number) > 0
+      && String(tx.description || '').toLowerCase().startsWith('locked first-two help at level');
+
+    if (isHistoryOnlySettledReceive) {
+      const level = getTransactionLevel(tx);
+      const matchingGiveHelpTs = transactions
+        .filter((candidate) =>
+          candidate.userId === tx.userId
+          && candidate.type === 'give_help'
+          && candidate.status === 'completed'
+          && String(candidate.description || '').toLowerCase().includes('from locked income')
+          && (level ? getTransactionLevel(candidate) === level + 1 : true)
+        )
+        .map((candidate) => parse(candidate.completedAt) ?? parse(candidate.createdAt) ?? 0)
+        .filter((ts) => ts > 0)
+        .sort((a, b) => a - b)[0];
+      if (matchingGiveHelpTs && matchingGiveHelpTs > 1000) {
+        return matchingGiveHelpTs - 1000;
+      }
+    }
+
+    if (baseTimestamp > 0) return baseTimestamp;
 
     // Fallback for older data where date fields may be missing after sync.
     const idMatch = (tx.id || '').match(/_(\d{10,13})(?:_|$)/);
@@ -165,6 +213,16 @@ export default function Transactions() {
     const absAmount = Math.abs(rawAmount || 0);
     const sign = isOutflowTransaction(tx) ? '-' : '+';
     return `${sign}${formatCurrency(absAmount)}`;
+  };
+
+  const getDisplayDescription = (tx: Transaction) => {
+    if (tx.type === 'direct_income') {
+      return Database.getCanonicalDirectIncomeDescription(tx) || '-';
+    }
+    const cleanDescription = String(tx.description || '')
+      .replace(/\s*\[history restored - already settled\]/i, '')
+      .trim();
+    return getVisibleTransactionDescription(cleanDescription) || '-';
   };
 
   const renderWithdrawalMeta = (tx: Transaction) => {
@@ -299,9 +357,10 @@ export default function Transactions() {
 
       const getLockedFlowPriority = (tx: Transaction): number => {
         const txDesc = (tx.description || '').toLowerCase();
+        const effectiveAmount = Number.isFinite(tx.displayAmount) ? (tx.displayAmount as number) : tx.amount;
         if (
           tx.type === 'receive_help'
-          && tx.amount > 0
+          && effectiveAmount > 0
           && (
             txDesc.startsWith('locked first-two help at level')
             || txDesc.startsWith('locked receive help at level')
@@ -333,9 +392,14 @@ export default function Transactions() {
     for (const tx of sortedAsc) {
       const desc = (tx.description || '').toLowerCase();
       const level = getTransactionLevel(tx);
+      const effectiveAmount = Number.isFinite(tx.displayAmount) ? (tx.displayAmount as number) : tx.amount;
 
-      if (tx.type === 'receive_help' && tx.amount > 0 && desc.startsWith('locked first-two help at level')) {
+      if (tx.type === 'receive_help' && effectiveAmount > 0 && desc.startsWith('locked first-two help at level')) {
         if (!level) continue;
+        if (!(tx.amount > 0)) {
+          state.set(tx.id, 'unlocked');
+          continue;
+        }
         const list = firstTwoByLevel.get(level) || [];
         list.push({ txId: tx.id, remaining: tx.amount });
         firstTwoByLevel.set(level, list);
@@ -343,8 +407,12 @@ export default function Transactions() {
         continue;
       }
 
-      if (tx.type === 'receive_help' && tx.amount > 0 && desc.startsWith('locked receive help at level')) {
+      if (tx.type === 'receive_help' && effectiveAmount > 0 && desc.startsWith('locked receive help at level')) {
         if (!level) continue;
+        if (!(tx.amount > 0)) {
+          state.set(tx.id, 'unlocked');
+          continue;
+        }
         const list = qualificationByLevel.get(level) || [];
         list.push({ txId: tx.id, remaining: tx.amount });
         qualificationByLevel.set(level, list);
@@ -398,7 +466,7 @@ export default function Transactions() {
       });
     }
 
-    return rows;
+    return [...rows].sort((a, b) => getTransactionTimestamp(b) - getTransactionTimestamp(a));
   }, [transactions, filterType, levelFilter]);
 
   if (!displayUser) return null;
@@ -437,11 +505,12 @@ export default function Transactions() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={loadTransactions}
+                onClick={() => void loadTransactions({ forceRefresh: true })}
                 className="border-white/20 text-white hover:bg-white/10"
+                disabled={isRefreshing}
               >
-                <RefreshCw className="w-4 h-4 mr-2" />
-                <span className="hidden sm:inline">Refresh</span>
+                <RefreshCw className={`w-4 h-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">{isRefreshing ? 'Refreshing...' : 'Refresh'}</span>
               </Button>
               <Button
                 variant="ghost"
@@ -524,7 +593,7 @@ export default function Transactions() {
                         {getStatusBadge(tx.status)}
                       </div>
                     </div>
-                    <p className="text-sm text-white/65 break-words">{getVisibleTransactionDescription(tx.description) || '-'}</p>
+                    <p className="text-sm text-white/65 break-words">{getDisplayDescription(tx)}</p>
                     {renderTransactionMeta(tx)}
                   </div>
                 );
@@ -580,7 +649,7 @@ export default function Transactions() {
                           </span>
                         </td>
                         <td className="py-3 px-4 text-white/60 text-sm max-w-sm">
-                          <p className="break-words">{getVisibleTransactionDescription(tx.description) || '-'}</p>
+                          <p className="break-words">{getDisplayDescription(tx)}</p>
                           {renderTransactionMeta(tx)}
                         </td>
                         <td className="py-3 px-4">

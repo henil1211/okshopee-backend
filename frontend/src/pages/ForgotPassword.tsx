@@ -42,7 +42,11 @@ export default function ForgotPassword() {
     setIsSendingOtp(false);
     if (result.success) {
       setOtpSent(true);
-      toast.success('OTP sent to your email');
+      if (result.status === 'pending') {
+        toast.warning(result.message);
+      } else {
+        toast.success(result.message);
+      }
     } else {
       setError(result.message);
     }

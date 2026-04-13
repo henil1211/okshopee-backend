@@ -219,8 +219,13 @@ export default function Matrix() {
   const userNode = displayUser ? matrix.find(m => m.userId === displayUser.userId) : null;
   const usersByUserId = useMemo(() => {
     const users = Database.getUsers();
-    return new Map(users.map((u) => [u.userId, u]));
-  }, [matrix]);
+    const canonicalUsers = new Map<string, (typeof users)[number]>();
+    for (const user of users) {
+      if (!user?.userId || canonicalUsers.has(user.userId)) continue;
+      canonicalUsers.set(user.userId, Database.getUserByUserId(user.userId) || user);
+    }
+    return canonicalUsers;
+  }, [matrix, syncKey]);
   const getDisplayName = (userId: string, fallback: string) => usersByUserId.get(userId)?.fullName || fallback;
 
   const downline = useMemo(() => {
@@ -867,7 +872,7 @@ export default function Matrix() {
             <CardContent>
               {(() => {
                 const memberUser = usersByUserId.get(selectedNode.userId);
-                const memberWallet = Database.getWallet(memberUser?.id || '');
+                const memberTotalEarnings = Database.getMaxTotalReceivedByPublicUserId(selectedNode.userId);
                 const memberStats = Database.getTeamCounts(selectedNode.userId);
                 return (
                   <div className="space-y-4">
@@ -908,7 +913,7 @@ export default function Matrix() {
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Total Earnings</p>
-                        <p className="text-lg font-bold text-emerald-400">{formatCurrency(memberWallet?.totalReceived || 0)}</p>
+                        <p className="text-lg font-bold text-emerald-400">{formatCurrency(memberTotalEarnings)}</p>
                       </div>
                     </div>
 

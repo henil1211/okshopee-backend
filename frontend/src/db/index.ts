@@ -95,6 +95,30 @@ function getMarketplaceCategoryId(slug: string): string {
   return `mcat_${normalizeMarketplaceSlug(slug)}`;
 }
 
+function getMarketplaceCategoryIcon(name: string, slug?: string, fallback: string = 'ShoppingBag'): string {
+  const normalized = `${normalizeMarketplaceSlug(name)} ${normalizeMarketplaceSlug(slug || '')}`.trim();
+
+  if (/(^|\s)(kids|kid|baby|kidswear)(\s|$)/.test(normalized)) return 'Baby';
+  if (/(^|\s)(beauty|skin-care|skin)(\s|$)/.test(normalized)) return 'SoapDispenserDroplet';
+  if (/(^|\s)(jewellery|jewelry|jewel)(\s|$)/.test(normalized)) return 'Gem';
+  if (/(^|\s)(toys|toy|gifts|gift)(\s|$)/.test(normalized)) return 'Gift';
+  if (/(^|\s)(perfume|fragrance)(\s|$)/.test(normalized)) return 'SprayCan';
+  if (/(^|\s)(female-only|women-only|women|ladies)(\s|$)/.test(normalized)) return 'Venus';
+  if (/(^|\s)(men-only|mens|men|male)(\s|$)/.test(normalized)) return 'Mars';
+  if (/(^|\s)(astrology|astro)(\s|$)/.test(normalized)) return 'WandSparkles';
+  if (/(^|\s)(home|kitchen)(\s|$)/.test(normalized)) return 'CookingPot';
+  if (/(^|\s)(health|medicine|medical|pharma)(\s|$)/.test(normalized)) return 'Pill';
+  if (/(^|\s)(finance|loan|bank|insurance)(\s|$)/.test(normalized)) return 'BadgeCent';
+  if (/(^|\s)(gadgets|gadget|accessories|accessory|electronic|electronics)(\s|$)/.test(normalized)) return 'Smartphone';
+  if (/(^|\s)(tour|travel|booking|trip|flight)(\s|$)/.test(normalized)) return 'Plane';
+  if (/(^|\s)(car|bike|automotive)(\s|$)/.test(normalized)) return 'Car';
+  if (/(^|\s)(education|study|learning|course)(\s|$)/.test(normalized)) return 'GraduationCap';
+  if (/(^|\s)(fashion|clothing|apparel)(\s|$)/.test(normalized)) return 'Handbag';
+  if (/(^|\s)(popular|store|ecommerce|shopping)(\s|$)/.test(normalized)) return 'Store';
+
+  return fallback;
+}
+
 // Initialize default admin settings
 const defaultSettings: AdminSettings = {
   activationAmount: 11,
@@ -114,7 +138,8 @@ const defaultSettings: AdminSettings = {
   activationDeadlineDays: 0,
   directReferralDeadlineDays: 30,
   requireOtpForTransactions: true,
-  masterPassword: 'master@2024' // Default master password
+  masterPassword: 'master@2024', // Default master password
+  lockedIncomeStrictFrom: new Date().toISOString()
 };
 
 // Updated Help Distribution Table - New Logic with Qualification
@@ -333,7 +358,11 @@ class Database {
     (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || 'http://localhost:4000'
   ).replace(/\/+$/, '');
   private static readonly REMOTE_SYNC_KEYS = new Set<string>(
-    Object.values(DB_KEYS).filter((key) => key !== DB_KEYS.CURRENT_USER && key !== DB_KEYS.SESSION)
+    Object.values(DB_KEYS).filter(
+      (key) => key !== DB_KEYS.CURRENT_USER
+        && key !== DB_KEYS.SESSION
+        && key !== DB_KEYS.PAYMENT_METHODS
+    )
   );
   private static readonly STARTUP_REMOTE_SYNC_BATCHES = [
     [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.SETTINGS],
@@ -351,7 +380,7 @@ class Database {
     [DB_KEYS.SETTINGS, DB_KEYS.SAFETY_POOL],
     [DB_KEYS.TRANSACTIONS, DB_KEYS.GHOST_HELP_REPAIR_LOG],
     [DB_KEYS.NOTIFICATIONS, DB_KEYS.ANNOUNCEMENTS, DB_KEYS.SUPPORT_TICKETS],
-    [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS, DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.PAYMENT_METHODS, DB_KEYS.PAYMENTS],
+    [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS, DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.PAYMENTS],
     [DB_KEYS.MATRIX, DB_KEYS.HELP_TRACKERS, DB_KEYS.MATRIX_PENDING_CONTRIBUTIONS, DB_KEYS.GRACE_PERIODS, DB_KEYS.RE_ENTRIES],
     [DB_KEYS.MARKETPLACE_CATEGORIES, DB_KEYS.MARKETPLACE_RETAILERS, DB_KEYS.MARKETPLACE_BANNERS, DB_KEYS.MARKETPLACE_DEALS],
     [DB_KEYS.MARKETPLACE_INVOICES, DB_KEYS.MARKETPLACE_REDEMPTIONS]
@@ -366,6 +395,7 @@ class Database {
   private static remoteSyncRetryTimer: ReturnType<typeof setInterval> | null = null;
   private static remoteSyncRetryBound = false;
   private static remoteStateUpdatedAt: string | null = null;
+  private static hydratedRemoteKeys = new Set<string>();
   private static readonly REMOTE_SYNC_RETRY_INTERVAL_MS = 45_000;
   private static readonly REMOTE_SYNC_REQUEST_TIMEOUT_MS = 10_000;
   private static readonly SENSITIVE_ACTION_BLOCK_AFTER_PENDING_MS = 2 * 60 * 1000;
@@ -399,6 +429,7 @@ class Database {
   // When true, createTransaction/addToSafetyPool become no-ops to save memory
   static _bulkRebuildMode = false;
   private static _bulkSafetyPoolTotal = 0;
+  private static _autoLockedHelpProcessingUsers = new Set<string>();
   // Cooldown: prevents duplicate system fee processing during sync races
   private static _systemFeeLastProcessed = new Map<string, number>();
 
@@ -1169,9 +1200,11 @@ class Database {
               const value = serverState[key];
               if (typeof value === 'string') {
                 this.setStorageItem(key, value);
+                this.hydratedRemoteKeys.add(key);
               } else if (key in serverState) {
                 // Server explicitly has this key but value is null/empty — clear local
                 this.removeStorageItem(key);
+                this.hydratedRemoteKeys.add(key);
               }
               // If the key is not in serverState at all, keep local data intact
             }
@@ -1324,7 +1357,7 @@ class Database {
     let score = 0;
     if ((user.userId || '').trim() === '1000001') score += 1_000_000_000;
     if (user.isAdmin) score += 100_000_000;
-    if (user.isActive && user.accountStatus === 'active') score += 10_000_000;
+    if (this.isNetworkActiveUser(user)) score += 10_000_000;
     score += Math.max(0, user.directCount || 0) * 10_000;
     score += txCount * 100;
     score += Math.floor(walletMagnitude);
@@ -1358,6 +1391,234 @@ class Database {
     if (ref === target.id || ref === target.userId) return true;
     const resolved = this.getUserById(ref) || this.getUserByUserId(ref);
     return !!resolved && resolved.userId === target.userId;
+  }
+
+  private static normalizeIdentityText(value?: string | null): string {
+    return String(value || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+  }
+
+  private static normalizeIdentityPhone(value?: string | null): string {
+    return String(value || '')
+      .replace(/[^\d+]/g, '')
+      .replace(/^00/, '+')
+      .trim();
+  }
+
+  private static parseReferralIncomeDescription(description?: string | null): { fullName: string; userId: string } | null {
+    const match = String(description || '').match(/Referral income from\s+(.+?)\s+\((\d{7})\)/i);
+    if (!match) return null;
+    return {
+      fullName: match[1].trim(),
+      userId: match[2]
+    };
+  }
+
+  private static resolveLikelyReferralSourceForDirectIncome(tx: Transaction, sponsor?: User): User | undefined {
+    const fromResolved = tx.fromUserId ? this.resolveUserByRef(tx.fromUserId) : undefined;
+    if (fromResolved) {
+      return this.getUserByUserId(fromResolved.userId) || fromResolved;
+    }
+
+    const parsed = this.parseReferralIncomeDescription(tx.description);
+    if (!parsed) return undefined;
+
+    const byDescriptionId = this.getUserByUserId(parsed.userId);
+    if (byDescriptionId) {
+      return byDescriptionId;
+    }
+
+    if (!sponsor) return undefined;
+
+    const normalizedName = this.normalizeIdentityText(parsed.fullName);
+    const candidates = this.getUsers().filter((user) =>
+      user.sponsorId === sponsor.userId
+      && this.normalizeIdentityText(user.fullName) === normalizedName
+    );
+
+    if (candidates.length !== 1) return undefined;
+    return this.getUserByUserId(candidates[0].userId) || candidates[0];
+  }
+
+  private static hasActivationEvidenceForUser(user: User | undefined, transactions?: Transaction[]): boolean {
+    if (!user) return false;
+    if (this.getMatrixNode(user.userId)) return true;
+
+    const txs = transactions || this.getTransactions();
+    return txs.some((tx) =>
+      this.transactionRefMatchesUser(tx.userId, user)
+      && tx.status === 'completed'
+      && (tx.type === 'pin_used' || tx.type === 'activation')
+    );
+  }
+
+  private static findExistingReferralIncomeCreditTx(
+    sponsor: User | undefined,
+    referral: User | undefined,
+    transactions?: Transaction[]
+  ): Transaction | undefined {
+    if (!sponsor || !referral) return undefined;
+    const txs = transactions || this.getTransactions();
+
+    return txs.find((tx) => {
+      if (tx.type !== 'direct_income' || tx.status !== 'completed') return false;
+      if (!this.transactionRefMatchesUser(tx.userId, sponsor)) return false;
+
+      if (tx.fromUserId && this.transactionRefMatchesUser(tx.fromUserId, referral)) {
+        return true;
+      }
+
+      const likelySource = this.resolveLikelyReferralSourceForDirectIncome(tx, sponsor);
+      return !!likelySource && likelySource.userId === referral.userId;
+    });
+  }
+
+  private static hasLogicalReceiveHelpCredit(params: {
+    recipient: User | undefined;
+    sender: User | undefined;
+    level: number;
+    amount: number;
+    transactions?: Transaction[];
+    includeHistoryOnly?: boolean;
+  }): boolean {
+    const recipient = params.recipient;
+    const sender = params.sender;
+    if (!recipient || !sender) return false;
+
+    const targetLevel = Number(params.level);
+    const targetAmount = Math.abs(Number(params.amount || 0));
+    if (!Number.isFinite(targetLevel) || targetLevel < 1) return false;
+    if (!(targetAmount > 0)) return false;
+
+    const txs = params.transactions || this.getTransactions();
+    return txs.some((tx) => {
+      if (tx.type !== 'receive_help' || tx.status !== 'completed') return false;
+      if (!this.transactionRefMatchesUser(tx.userId, recipient)) return false;
+      if (Number(tx.level) !== targetLevel) return false;
+
+      const effectiveAmount = Math.abs(Number((params.includeHistoryOnly ? (tx.displayAmount ?? tx.amount) : tx.amount) || 0));
+      if (Math.abs(effectiveAmount - targetAmount) > 0.009) return false;
+      if (!params.includeHistoryOnly && !(Number(tx.amount || 0) > 0)) return false;
+
+      if (tx.fromUserId && this.transactionRefMatchesUser(tx.fromUserId, sender)) {
+        return true;
+      }
+
+      return String(tx.description || '').includes(`(${sender.userId})`);
+    });
+  }
+
+  private static isValidMatrixSenderForRecipientLevel(
+    recipient: User | undefined,
+    sender: User | undefined,
+    level: number
+  ): boolean {
+    if (!recipient || !sender) return false;
+    const expectedLevel = this.getMatrixDepthBetween(recipient.userId, sender.userId);
+    return expectedLevel === level;
+  }
+
+  static hasCompletedReferralIncomeForIdentity(params: {
+    sponsorInternalId: string;
+    referredInternalId?: string;
+    referredUserId?: string;
+    fullName?: string;
+    email?: string;
+    phone?: string;
+    referenceTime?: string;
+    matchWindowMs?: number;
+  }): boolean {
+    const normalizedUserId = String(params.referredUserId || '').trim();
+    const normalizedName = this.normalizeIdentityText(params.fullName);
+    const normalizedEmail = String(params.email || '').trim().toLowerCase();
+    const normalizedPhone = this.normalizeIdentityPhone(params.phone);
+    const referenceTime = new Date(params.referenceTime || '').getTime();
+    const windowMs = Math.max(60_000, Number(params.matchWindowMs || 10 * 60 * 1000));
+    const hasStrongIdentityParams = !!(
+      params.referredInternalId
+      || normalizedUserId
+      || normalizedEmail
+      || normalizedPhone
+    );
+
+    return this.getTransactions().some((tx) => {
+      if (tx.type !== 'direct_income' || tx.status !== 'completed' || tx.userId !== params.sponsorInternalId) {
+        return false;
+      }
+
+      const resolvedSource = tx.fromUserId ? this.resolveUserByRef(tx.fromUserId) : undefined;
+      const parsed = this.parseReferralIncomeDescription(tx.description);
+
+      if (params.referredInternalId && tx.fromUserId === params.referredInternalId) {
+        return true;
+      }
+      if (normalizedUserId) {
+        if (resolvedSource?.userId === normalizedUserId) return true;
+        if (parsed?.userId === normalizedUserId) return true;
+      }
+      if (normalizedEmail && resolvedSource && String(resolvedSource.email || '').trim().toLowerCase() === normalizedEmail) {
+        return true;
+      }
+      if (normalizedPhone && resolvedSource && this.normalizeIdentityPhone(resolvedSource.phone) === normalizedPhone) {
+        return true;
+      }
+
+      const createdAt = new Date(tx.completedAt || tx.createdAt || '').getTime();
+      const withinWindow = Number.isFinite(referenceTime) && Number.isFinite(createdAt)
+        ? Math.abs(createdAt - referenceTime) <= windowMs
+        : true;
+
+      if (normalizedName && withinWindow && !hasStrongIdentityParams) {
+        if (resolvedSource && this.normalizeIdentityText(resolvedSource.fullName) === normalizedName) return true;
+        if (parsed && this.normalizeIdentityText(parsed.fullName) === normalizedName) return true;
+      }
+
+      return false;
+    });
+  }
+
+  static getCanonicalDirectIncomeDescription(tx: Transaction): string {
+    const fallback = String(tx.description || '')
+      .replace(/\s*\[Redemption:[^\]]+\]\s*/g, ' ')
+      .replace(/Direct sponsor income/gi, 'Referral income')
+      .replace(/No sponsor - direct income/gi, 'No sponsor - referral income')
+      .trim();
+
+    if (tx.type !== 'direct_income') return fallback;
+
+    const sponsor = this.resolveUserByRef(tx.userId);
+    const source = this.resolveLikelyReferralSourceForDirectIncome(tx, sponsor);
+    if (!source) return fallback;
+    return `Referral income from ${source.fullName} (${source.userId})`;
+  }
+
+  private static getRelatedInternalUserIdsForUserRef(userRef: string): Set<string> {
+    const ids = new Set<string>();
+    const resolvedUser = this.getUserById(userRef) || this.getUserByUserId(userRef);
+
+    if (!resolvedUser) {
+      if (userRef) ids.add(userRef);
+      return ids;
+    }
+
+    ids.add(resolvedUser.id);
+    ids.add(resolvedUser.userId);
+
+    for (const user of this.getUsers()) {
+      if (user.userId === resolvedUser.userId) {
+        ids.add(user.id);
+      }
+    }
+
+    const canonical = this.getUserByUserId(resolvedUser.userId);
+    if (canonical) {
+      ids.add(canonical.id);
+      ids.add(canonical.userId);
+    }
+
+    return ids;
   }
 
   private static giveHelpTargetsUser(tx: Transaction, target: User | undefined): boolean {
@@ -1394,6 +1655,44 @@ class Database {
       ? `released locked receive help at level ${level}`
       : 'released locked receive help at level';
     return desc.includes(prefix);
+  }
+
+  private static getUnsettledLockedReceiveEffectiveAmount(
+    tx: Transaction,
+    allTransactions?: Transaction[]
+  ): number {
+    if (tx.type !== 'receive_help' || tx.status !== 'completed') return 0;
+    if (
+      !this.isLockedFirstTwoReceiveDescription(tx.description)
+      && !this.isLockedQualifiedReceiveDescription(tx.description)
+    ) {
+      return 0;
+    }
+
+    const directAmount = Number(tx.amount || 0);
+    if (directAmount > 0) {
+      return Math.abs(directAmount);
+    }
+
+    const displayAmount = Number(tx.displayAmount || 0);
+    if (!(displayAmount > 0)) return 0;
+
+    const level = this.resolveTransactionLevel(tx);
+    if (!level) return 0;
+
+    const txs = allTransactions || this.getTransactions();
+    const txTime = this.getTransactionTime(tx);
+    const settledByGiveHelp = txs.some((candidate) =>
+      candidate.userId === tx.userId
+      && candidate.type === 'give_help'
+      && candidate.status === 'completed'
+      && (candidate.amount || 0) < 0
+      && String(candidate.description || '').toLowerCase().includes('from locked income')
+      && this.resolveTransactionLevel(candidate) === Math.min(helpDistributionTable.length, level + 1)
+      && Math.abs(this.getTransactionTime(candidate) - txTime) <= 10 * 60 * 1000
+    );
+
+    return settledByGiveHelp ? 0 : Math.abs(displayAmount);
   }
 
   private static isReceiveHelpSettlementForGiveTx(
@@ -1676,11 +1975,19 @@ class Database {
       const giveHelpLockedValue = Number(rest.giveHelpLocked);
       const totalReceivedValue = Number(rest.totalReceived);
       const totalGivenValue = Number(rest.totalGiven);
+      const fundRecoveryDueValue = Number(rest.fundRecoveryDue);
+      const fundRecoveryRecoveredTotalValue = Number(rest.fundRecoveryRecoveredTotal);
+      const fundRecoveryReasonValue = rest.fundRecoveryReason;
       const pendingSystemFeeValue = Number(rest.pendingSystemFee);
       const lastSystemFeeDateValue = rest.lastSystemFeeDate;
       return {
         userId,
         depositWallet: Number.isFinite(depositWalletValue) ? depositWalletValue : 0,
+        fundRecoveryDue: Number.isFinite(fundRecoveryDueValue) ? fundRecoveryDueValue : 0,
+        fundRecoveryRecoveredTotal: Number.isFinite(fundRecoveryRecoveredTotalValue) ? fundRecoveryRecoveredTotalValue : 0,
+        fundRecoveryReason: typeof fundRecoveryReasonValue === 'string' && fundRecoveryReasonValue.trim()
+          ? fundRecoveryReasonValue.trim()
+          : null,
         pinWallet: computedPinWallet,
         incomeWallet: Number.isFinite(incomeWalletValue) ? incomeWalletValue : 0,
         royaltyWallet: Number.isFinite(royaltyWalletValue) ? royaltyWalletValue : 0,
@@ -1715,6 +2022,1230 @@ class Database {
     return this.getWallets().find(w => w.userId === userId);
   }
 
+  private static computeFundWalletFromTransactionsForUserIds(userIds: Set<string>): {
+    balance: number;
+    relevantCount: number;
+    creditTotal: number;
+    debitTotal: number;
+  } {
+    const txs = this.getTransactions()
+      .filter((t) => userIds.has(t.userId))
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    let balance = 0;
+    let relevantCount = 0;
+    let creditTotal = 0;
+    let debitTotal = 0;
+
+    for (const tx of txs) {
+      const desc = String(tx.description || '').toLowerCase();
+
+      if (tx.type === 'deposit' && tx.status === 'completed' && tx.amount > 0) {
+        balance += tx.amount;
+        creditTotal += tx.amount;
+        relevantCount += 1;
+        continue;
+      }
+
+      if (tx.type === 'admin_credit' && tx.status === 'completed' && tx.amount > 0 && (desc.includes('deposit wallet') || desc.includes('fund wallet'))) {
+        balance += tx.amount;
+        creditTotal += tx.amount;
+        relevantCount += 1;
+        continue;
+      }
+
+      if (tx.type === 'admin_debit' && tx.status === 'completed' && tx.amount < 0 && (desc.includes('deposit wallet') || desc.includes('fund wallet'))) {
+        const amount = Math.abs(tx.amount);
+        balance -= amount;
+        debitTotal += amount;
+        relevantCount += 1;
+        continue;
+      }
+
+      if (tx.type === 'fund_recovery' && tx.status === 'completed' && tx.amount < 0) {
+        const amount = Math.abs(tx.amount);
+        balance -= amount;
+        debitTotal += amount;
+        relevantCount += 1;
+        continue;
+      }
+
+      if (tx.type === 'p2p_transfer' && tx.status === 'completed') {
+        balance += tx.amount;
+        if (tx.amount >= 0) {
+          creditTotal += tx.amount;
+        } else {
+          debitTotal += Math.abs(tx.amount);
+        }
+        relevantCount += 1;
+        continue;
+      }
+
+      if (
+        tx.type === 'income_transfer'
+        && tx.status === 'completed'
+        && tx.amount < 0
+        && desc.includes('to your fund wallet')
+      ) {
+        continue;
+      }
+
+      if (tx.type === 'pin_purchase' && tx.status === 'completed' && tx.amount < 0 && desc.includes('fund wallet')) {
+        const amount = Math.abs(tx.amount);
+        balance -= amount;
+        debitTotal += amount;
+        relevantCount += 1;
+        continue;
+      }
+
+      if (tx.type === 'activation' && tx.status === 'completed' && tx.amount < 0 && desc.includes('fund wallet')) {
+        const amount = Math.abs(tx.amount);
+        balance -= amount;
+        debitTotal += amount;
+        relevantCount += 1;
+        continue;
+      }
+
+      if (tx.type === 'system_fee' && tx.status === 'completed' && tx.amount < 0 && desc.includes('deposit wallet')) {
+        const amount = Math.abs(tx.amount);
+        balance -= amount;
+        debitTotal += amount;
+        relevantCount += 1;
+        continue;
+      }
+    }
+
+    return {
+      balance: Math.max(0, Math.round(balance * 100) / 100),
+      relevantCount,
+      creditTotal: Math.round(creditTotal * 100) / 100,
+      debitTotal: Math.round(debitTotal * 100) / 100
+    };
+  }
+
+  private static cleanupMisleadingFundRecoverySetupTransactions(userIds?: Set<string>): number {
+    const transactions = this.getTransactions();
+    const filtered = transactions.filter((tx) => {
+      if (userIds && !userIds.has(tx.userId)) return true;
+      const desc = String(tx.description || '').toLowerCase();
+      const isMisleadingSetup =
+        tx.type === 'fund_recovery'
+        && tx.status === 'completed'
+        && tx.amount < 0
+        && desc.startsWith('admin recovery due created for unsupported direct pin buys');
+      return !isMisleadingSetup;
+    });
+
+    const removed = transactions.length - filtered.length;
+    if (removed > 0) {
+      this.saveTransactions(filtered);
+    }
+    return removed;
+  }
+
+  private static normalizeRecoveryReason(reason: string): string {
+    return String(reason || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  }
+
+  private static buildReferralMismatchRecoveryReason(mismatch: {
+    referredName: string;
+    likelyCorrectUserId: string;
+  }): string {
+    const referredName = String(mismatch.referredName || '').trim() || 'Unknown user';
+    const likelyCorrectUserId = String(mismatch.likelyCorrectUserId || '').trim();
+    return `duplicate referral income credits for ${referredName}${likelyCorrectUserId ? ` (${likelyCorrectUserId})` : ''}`;
+  }
+
+  private static refineActiveRecoveryReason(targetUser: User, recoveryReason: string, currentDue: number): string {
+    const normalizedReason = this.normalizeRecoveryReason(recoveryReason);
+    if (normalizedReason !== 'duplicate referral income credits') {
+      return recoveryReason;
+    }
+
+    const matches = this.scanReferralIncomeMismatches().filter((row) => {
+      if (row.sponsorUserId !== targetUser.userId) return false;
+      if ((row.currentRecoveryDue || 0) <= 0.009) return false;
+      return Math.abs((row.currentRecoveryDue || 0) - currentDue) <= 0.009;
+    });
+
+    if (matches.length === 1) {
+      return this.buildReferralMismatchRecoveryReason(matches[0]);
+    }
+
+    return recoveryReason;
+  }
+
+  private static getRecoveryProgressForReason(
+    userRef: string,
+    recoveryReason: string,
+    targetAmount: number,
+    transactions?: Transaction[]
+  ): {
+    recoveredSoFar: number;
+    currentRecoveryDue: number;
+    remainingRecoveryAmount: number;
+  } {
+    const resolved = this.resolveUserByRef(userRef);
+    if (!resolved) {
+      return { recoveredSoFar: 0, currentRecoveryDue: 0, remainingRecoveryAmount: Math.max(0, Math.round((targetAmount || 0) * 100) / 100) };
+    }
+
+    const canonical = this.getUserByUserId(resolved.userId) || resolved;
+    const normalizedReason = this.normalizeRecoveryReason(recoveryReason);
+    const roundedTargetAmount = Math.max(0, Math.round((targetAmount || 0) * 100) / 100);
+    const wallet = this.getWallet(canonical.id);
+    const currentRecoveryDue = (
+      wallet && this.normalizeRecoveryReason(String(wallet.fundRecoveryReason || '')) === normalizedReason
+    )
+      ? Math.max(0, Math.round((wallet.fundRecoveryDue || 0) * 100) / 100)
+      : 0;
+
+    const txSource = transactions || this.getTransactions();
+    const recoveredSoFar = Math.round(txSource.reduce((sum, tx) => {
+      if (!this.transactionRefMatchesUser(tx.userId, canonical)) return sum;
+      if (tx.type !== 'fund_recovery' || tx.status !== 'completed' || !(Number(tx.amount || 0) < 0)) return sum;
+
+      const txAdminReason = this.normalizeRecoveryReason(String(tx.adminReason || ''));
+      const txDescription = this.normalizeRecoveryReason(String(tx.description || ''));
+      const matchesReason = txAdminReason
+        ? txAdminReason === normalizedReason
+        : txDescription.includes(normalizedReason);
+
+      return matchesReason ? sum + Math.abs(Number(tx.amount || 0)) : sum;
+    }, 0) * 100) / 100;
+
+    const remainingRecoveryAmount = Math.max(
+      0,
+      Math.round((roundedTargetAmount - recoveredSoFar - currentRecoveryDue) * 100) / 100
+    );
+
+    return {
+      recoveredSoFar,
+      currentRecoveryDue,
+      remainingRecoveryAmount
+    };
+  }
+
+  static getFundWalletForensics(userRef: string): {
+    publicUserId: string;
+    fullName: string;
+    canonicalInternalId: string;
+    relatedInternalIds: string[];
+    duplicateInternalIds: string[];
+    storedCanonicalBalance: number;
+    storedCombinedBalance: number;
+    currentRecoveryDue: number;
+    totalRecoveredSoFar: number;
+    computedCanonicalBalance: number;
+    computedCombinedBalance: number;
+    canonicalRelevantCount: number;
+    combinedRelevantCount: number;
+    combinedCreditTotal: number;
+    combinedDebitTotal: number;
+    nonPinFundDebitTotal: number;
+    missingSelfFundCreditCandidates: number;
+    directPinPurchaseCount: number;
+    directPinPurchaseAmount: number;
+    unsupportedDirectPinBuyAmount: number;
+    walletBreakdown: Array<{
+      internalId: string;
+      storedBalance: number;
+      computedBalance: number;
+      relevantCount: number;
+      txCount: number;
+    }>;
+  } | null {
+    const resolved = this.getUserById(userRef) || this.getUserByUserId(userRef);
+    if (!resolved) return null;
+
+    const canonical = this.getUserByUserId(resolved.userId) || resolved;
+    this.cleanupMisleadingFundRecoverySetupTransactions(new Set([canonical.id]));
+    const relatedUsers = this.getUsers().filter((user) => user.userId === canonical.userId);
+    const relatedInternalIds = Array.from(new Set([
+      canonical.id,
+      ...relatedUsers.map((user) => user.id).filter(Boolean)
+    ]));
+
+    const combinedSet = new Set(relatedInternalIds);
+    const canonicalSet = new Set([canonical.id]);
+    const combinedComputed = this.computeFundWalletFromTransactionsForUserIds(combinedSet);
+    const canonicalComputed = this.computeFundWalletFromTransactionsForUserIds(canonicalSet);
+
+    const transactions = this.getTransactions();
+    const MATCH_WINDOW_MS = 10 * 60 * 1000;
+    const timeOf = (tx: Transaction) => this.getTransactionTime(tx);
+
+    const missingSelfFundCreditCandidates = transactions.filter((tx) =>
+      combinedSet.has(tx.userId)
+      && tx.type === 'income_transfer'
+      && tx.status === 'completed'
+      && tx.amount < 0
+      && String(tx.description || '').toLowerCase().includes('to your fund wallet')
+      && !transactions.some((candidate) =>
+        combinedSet.has(candidate.userId)
+        && candidate.type === 'p2p_transfer'
+        && candidate.status === 'completed'
+        && (
+          candidate.sourceTransferTxId === tx.id
+          || (
+            Math.abs((candidate.displayAmount ?? candidate.amount) || 0) === Math.abs(tx.amount || 0)
+            && Math.abs(timeOf(candidate) - timeOf(tx)) <= MATCH_WINDOW_MS
+          )
+        )
+      )
+    ).length;
+
+    const directFundPinPurchases = transactions.filter((tx) =>
+      combinedSet.has(tx.userId)
+      && tx.type === 'pin_purchase'
+      && tx.status === 'completed'
+      && tx.amount < 0
+      && String(tx.description || '').toLowerCase().includes('direct pin buy from fund wallet')
+    );
+    const directPinPurchaseAmount = Math.round(
+      directFundPinPurchases.reduce((sum, tx) => sum + Math.abs(tx.amount || 0), 0) * 100
+    ) / 100;
+    const nonPinFundDebitTotal = Math.max(0, Math.round((combinedComputed.debitTotal - directPinPurchaseAmount) * 100) / 100);
+    const availableForDirectPins = Math.max(0, Math.round((combinedComputed.creditTotal - nonPinFundDebitTotal) * 100) / 100);
+    const unsupportedDirectPinBuyAmount = Math.max(0, Math.round((directPinPurchaseAmount - availableForDirectPins) * 100) / 100);
+    const pinRecoveryProgress = this.getRecoveryProgressForReason(
+      canonical.id,
+      'unsupported direct PIN buys',
+      unsupportedDirectPinBuyAmount,
+      transactions
+    );
+
+    const walletBreakdown = relatedInternalIds.map((internalId) => {
+      const computed = this.computeFundWalletFromTransactionsForUserIds(new Set([internalId]));
+      return {
+        internalId,
+        storedBalance: Math.round(((this.getWallet(internalId)?.depositWallet || 0)) * 100) / 100,
+        computedBalance: computed.balance,
+        relevantCount: computed.relevantCount,
+        txCount: transactions.filter((tx) => tx.userId === internalId).length
+      };
+    });
+
+    return {
+      publicUserId: canonical.userId,
+      fullName: canonical.fullName,
+      canonicalInternalId: canonical.id,
+      relatedInternalIds,
+      duplicateInternalIds: relatedInternalIds.filter((id) => id !== canonical.id),
+      storedCanonicalBalance: Math.round(((this.getWallet(canonical.id)?.depositWallet || 0)) * 100) / 100,
+      storedCombinedBalance: Math.round(walletBreakdown.reduce((sum, row) => sum + row.storedBalance, 0) * 100) / 100,
+      currentRecoveryDue: pinRecoveryProgress.currentRecoveryDue,
+      totalRecoveredSoFar: pinRecoveryProgress.recoveredSoFar,
+      computedCanonicalBalance: canonicalComputed.balance,
+      computedCombinedBalance: combinedComputed.balance,
+      canonicalRelevantCount: canonicalComputed.relevantCount,
+      combinedRelevantCount: combinedComputed.relevantCount,
+      combinedCreditTotal: combinedComputed.creditTotal,
+      combinedDebitTotal: combinedComputed.debitTotal,
+      nonPinFundDebitTotal,
+      missingSelfFundCreditCandidates,
+      directPinPurchaseCount: directFundPinPurchases.length,
+      directPinPurchaseAmount,
+      unsupportedDirectPinBuyAmount,
+      walletBreakdown
+    };
+  }
+
+  static startFundRecoveryForUnsupportedPinBuys(userRef: string): {
+    success: boolean;
+    message: string;
+    recoveryDue?: number;
+    recoveredNow?: number;
+  } {
+    const forensic = this.getFundWalletForensics(userRef);
+    if (!forensic) {
+      return { success: false, message: 'User not found' };
+    }
+
+    const wallet = this.getWallet(forensic.canonicalInternalId);
+    if (!wallet) {
+      return { success: false, message: 'Wallet not found' };
+    }
+
+    const targetDue = Math.round((forensic.unsupportedDirectPinBuyAmount || 0) * 100) / 100;
+    if (targetDue <= 0) {
+      return { success: false, message: 'No unsupported direct PIN buy amount found for this user' };
+    }
+
+    const recoveryProgress = this.getRecoveryProgressForReason(
+      forensic.canonicalInternalId,
+      'unsupported direct PIN buys',
+      targetDue
+    );
+    if (recoveryProgress.currentRecoveryDue > 0.009) {
+      return {
+        success: true,
+        message: `Recovery already active for $${recoveryProgress.currentRecoveryDue.toFixed(2)}`,
+        recoveryDue: recoveryProgress.currentRecoveryDue
+      };
+    }
+    if (recoveryProgress.remainingRecoveryAmount <= 0.009) {
+      return {
+        success: true,
+        message: `Recovery already completed for $${targetDue.toFixed(2)}`,
+        recoveryDue: 0,
+        recoveredNow: 0
+      };
+    }
+
+    return this.activateFundRecoveryForUser(
+      this.getUserById(forensic.canonicalInternalId) || this.getUserByUserId(forensic.publicUserId)!,
+      recoveryProgress.remainingRecoveryAmount,
+      'unsupported direct PIN buys'
+    );
+  }
+
+  private static activateFundRecoveryForUser(
+    targetUser: User,
+    targetDue: number,
+    recoveryReason: string
+  ): {
+    success: boolean;
+    message: string;
+    recoveryDue?: number;
+    recoveredNow?: number;
+  } {
+    this.repairFundWalletConsistency(targetUser.id);
+    this.repairIncomeWalletConsistency(targetUser.id);
+    const wallet = this.getWallet(targetUser.id);
+    if (!wallet) {
+      return { success: false, message: 'Wallet not found' };
+    }
+
+    const roundedTargetDue = Math.round((targetDue || 0) * 100) / 100;
+    if (roundedTargetDue <= 0) {
+      return { success: false, message: 'No recoverable amount found for this user' };
+    }
+
+    const normalizedReason = this.normalizeRecoveryReason(recoveryReason);
+    const currentDue = this.normalizeRecoveryReason(String(wallet.fundRecoveryReason || '')) === normalizedReason
+      ? Math.round((wallet.fundRecoveryDue || 0) * 100) / 100
+      : 0;
+    if (currentDue > 0.009) {
+      return {
+        success: true,
+        message: `Recovery already active for $${currentDue.toFixed(2)}`,
+        recoveryDue: currentDue
+      };
+    }
+
+    const fundBalance = Math.max(0, Math.round((wallet.depositWallet || 0) * 100) / 100);
+    const incomeBalance = Math.max(0, Math.round((wallet.incomeWallet || 0) * 100) / 100);
+    let remaining = roundedTargetDue;
+    const fundTake = Math.min(fundBalance, remaining);
+    remaining = Math.round((remaining - fundTake) * 100) / 100;
+    const incomeTake = Math.min(incomeBalance, remaining);
+    remaining = Math.round((remaining - incomeTake) * 100) / 100;
+    const recoveredNow = Math.round((fundTake + incomeTake) * 100) / 100;
+
+    if (recoveredNow > 0.0001) {
+      this.updateWallet(targetUser.id, {
+        depositWallet: Math.round((fundBalance - fundTake) * 100) / 100,
+        incomeWallet: Math.round((incomeBalance - incomeTake) * 100) / 100,
+        fundRecoveryDue: remaining,
+        fundRecoveryRecoveredTotal: Math.round(((wallet.fundRecoveryRecoveredTotal || 0) + recoveredNow) * 100) / 100,
+        fundRecoveryReason: remaining > 0.0001 ? recoveryReason : null
+      });
+
+      if (fundTake > 0.0001) {
+        this.addToSafetyPool(fundTake, targetUser.id, `Recovery from ${recoveryReason} via current fund wallet balance`);
+        this.createTransaction({
+          id: generateEventId('tx', 'fund_recovery_manual_fund'),
+          userId: targetUser.id,
+          type: 'fund_recovery',
+          amount: -fundTake,
+          status: 'completed',
+          description: `Admin debited from fund wallet to recover ${recoveryReason}. Remaining recovery due: $${remaining.toFixed(2)}`,
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          adminReason: recoveryReason
+        });
+      }
+
+      if (incomeTake > 0.0001) {
+        this.addToSafetyPool(incomeTake, targetUser.id, `Recovery from ${recoveryReason} via current income wallet balance`);
+        this.createTransaction({
+          id: generateEventId('tx', 'fund_recovery_manual_income'),
+          userId: targetUser.id,
+          type: 'fund_recovery',
+          amount: -incomeTake,
+          status: 'completed',
+          description: `Admin debited from income wallet to recover ${recoveryReason}. Remaining recovery due: $${remaining.toFixed(2)}`,
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          adminReason: recoveryReason
+        });
+      }
+
+      if (remaining <= 0.0001) {
+        return {
+          success: true,
+          message: `Recovered $${recoveredNow.toFixed(2)} immediately from current wallet balance`,
+          recoveryDue: 0,
+          recoveredNow
+        };
+      }
+
+      return {
+        success: true,
+        message: `Recovered $${recoveredNow.toFixed(2)} immediately. Recovery due of $${remaining.toFixed(2)} is now active`,
+        recoveryDue: remaining,
+        recoveredNow
+      };
+    }
+
+    this.updateWallet(targetUser.id, {
+      fundRecoveryDue: roundedTargetDue,
+      fundRecoveryReason: recoveryReason
+    });
+
+    return {
+      success: true,
+      message: `Recovery due of $${roundedTargetDue.toFixed(2)} is now active`,
+      recoveryDue: roundedTargetDue,
+      recoveredNow: 0
+    };
+  }
+
+  static applyActiveFundRecoveryNow(userRef: string): {
+    success: boolean;
+    message: string;
+    recoveryDue?: number;
+    recoveredNow?: number;
+  } {
+    const targetUser = this.resolveUserByRef(userRef);
+    if (!targetUser) {
+      return { success: false, message: 'User not found' };
+    }
+
+    this.repairFundWalletConsistency(targetUser.id);
+    this.repairIncomeWalletConsistency(targetUser.id);
+
+    const wallet = this.getWallet(targetUser.id);
+    if (!wallet) {
+      return { success: false, message: 'Wallet not found' };
+    }
+
+    const currentDue = Math.max(0, Math.round(Number(wallet.fundRecoveryDue || 0) * 100) / 100);
+    const recoveryReason = this.refineActiveRecoveryReason(
+      targetUser,
+      String(wallet.fundRecoveryReason || '').trim(),
+      currentDue
+    );
+    if (currentDue <= 0.009 || !recoveryReason) {
+      return { success: false, message: 'No active fund recovery due found for this user' };
+    }
+
+    const fundBalance = Math.max(0, Math.round(Number(wallet.depositWallet || 0) * 100) / 100);
+    const incomeBalance = Math.max(0, Math.round(Number(wallet.incomeWallet || 0) * 100) / 100);
+
+    let remaining = currentDue;
+    const fundTake = Math.min(fundBalance, remaining);
+    remaining = Math.round((remaining - fundTake) * 100) / 100;
+    const incomeTake = Math.min(incomeBalance, remaining);
+    remaining = Math.round((remaining - incomeTake) * 100) / 100;
+    const recoveredNow = Math.round((fundTake + incomeTake) * 100) / 100;
+
+    if (recoveredNow <= 0.0001) {
+      return {
+        success: true,
+        message: `Recovery is active for $${currentDue.toFixed(2)}, but no current fund/income balance is available to deduct right now`,
+        recoveryDue: currentDue,
+        recoveredNow: 0
+      };
+    }
+
+    this.updateWallet(targetUser.id, {
+      depositWallet: Math.round((fundBalance - fundTake) * 100) / 100,
+      incomeWallet: Math.round((incomeBalance - incomeTake) * 100) / 100,
+      fundRecoveryDue: remaining,
+      fundRecoveryRecoveredTotal: Math.round(((wallet.fundRecoveryRecoveredTotal || 0) + recoveredNow) * 100) / 100,
+      fundRecoveryReason: remaining > 0.0001 ? recoveryReason : null
+    });
+
+    if (fundTake > 0.0001) {
+      this.addToSafetyPool(fundTake, targetUser.id, `Recovery from ${recoveryReason} via current fund wallet balance`);
+      this.createTransaction({
+        id: generateEventId('tx', 'fund_recovery_force_fund'),
+        userId: targetUser.id,
+        type: 'fund_recovery',
+        amount: -fundTake,
+        status: 'completed',
+        description: `Admin debited from fund wallet to recover ${recoveryReason}. Remaining recovery due: $${remaining.toFixed(2)}`,
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        adminReason: recoveryReason
+      });
+    }
+
+    if (incomeTake > 0.0001) {
+      this.addToSafetyPool(incomeTake, targetUser.id, `Recovery from ${recoveryReason} via current income wallet balance`);
+      this.createTransaction({
+        id: generateEventId('tx', 'fund_recovery_force_income'),
+        userId: targetUser.id,
+        type: 'fund_recovery',
+        amount: -incomeTake,
+        status: 'completed',
+        description: `Admin debited from income wallet to recover ${recoveryReason}. Remaining recovery due: $${remaining.toFixed(2)}`,
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        adminReason: recoveryReason
+      });
+    }
+
+    return {
+      success: true,
+      message: remaining > 0.0001
+        ? `Recovered $${recoveredNow.toFixed(2)} now. Remaining active recovery due: $${remaining.toFixed(2)}`
+        : `Recovered $${recoveredNow.toFixed(2)} and cleared the active recovery due`,
+      recoveryDue: remaining,
+      recoveredNow
+    };
+  }
+
+  static startFundRecoveryForReferralIncomeMismatch(userRef: string, likelyCorrectUserId?: string): {
+    success: boolean;
+    message: string;
+    recoveryDue?: number;
+    recoveredNow?: number;
+  } {
+    const cleanUserId = String(userRef || '').trim();
+    const cleanLikelyCorrectUserId = String(likelyCorrectUserId || '').trim();
+    if (!cleanUserId) {
+      return { success: false, message: 'User not found' };
+    }
+
+    const mismatch = this.scanReferralIncomeMismatches().find((row) =>
+      row.sponsorUserId === cleanUserId
+      && (!cleanLikelyCorrectUserId || row.likelyCorrectUserId === cleanLikelyCorrectUserId)
+    );
+    if (!mismatch) {
+      return { success: false, message: 'No referral income mismatch found for this user' };
+    }
+
+    const canonicalUser = this.getUserByUserId(mismatch.sponsorUserId);
+    if (!canonicalUser) {
+      return { success: false, message: 'User not found' };
+    }
+
+    const targetDue = Math.round((mismatch.extraCreditedAmount || 0) * 100) / 100;
+    if (targetDue <= 0) {
+      return { success: false, message: 'No extra referral income amount found for this user' };
+    }
+
+    const recoveryReason = this.buildReferralMismatchRecoveryReason(mismatch);
+    const recoveryProgress = this.getRecoveryProgressForReason(canonicalUser.id, recoveryReason, targetDue);
+    if (recoveryProgress.currentRecoveryDue > 0.009) {
+      return {
+        success: true,
+        message: `Recovery already active for $${recoveryProgress.currentRecoveryDue.toFixed(2)}`,
+        recoveryDue: recoveryProgress.currentRecoveryDue,
+        recoveredNow: 0
+      };
+    }
+    if (recoveryProgress.remainingRecoveryAmount <= 0.009) {
+      return {
+        success: true,
+        message: `Recovery already completed for $${targetDue.toFixed(2)}`,
+        recoveryDue: 0,
+        recoveredNow: 0
+      };
+    }
+
+    return this.activateFundRecoveryForUser(canonicalUser, recoveryProgress.remainingRecoveryAmount, recoveryReason);
+  }
+
+  static scanUsersForUnsupportedDirectFundPinBuys(): Array<{
+    userId: string;
+    fullName: string;
+    canonicalInternalId: string;
+    directPinPurchaseCount: number;
+    directPinPurchaseAmount: number;
+    unsupportedDirectPinBuyAmount: number;
+    missingSelfFundCreditCandidates: number;
+    storedFundWallet: number;
+    currentRecoveryDue: number;
+    totalRecoveredSoFar: number;
+    remainingRecoveryAmount: number;
+    txnDerivedFundWallet: number;
+    combinedCreditTotal: number;
+    nonPinFundDebitTotal: number;
+    duplicateInternalIds: number;
+  }> {
+    const seen = new Set<string>();
+    const rows: Array<{
+      userId: string;
+      fullName: string;
+      canonicalInternalId: string;
+      directPinPurchaseCount: number;
+      directPinPurchaseAmount: number;
+      unsupportedDirectPinBuyAmount: number;
+      missingSelfFundCreditCandidates: number;
+      storedFundWallet: number;
+      currentRecoveryDue: number;
+      totalRecoveredSoFar: number;
+      remainingRecoveryAmount: number;
+      txnDerivedFundWallet: number;
+      combinedCreditTotal: number;
+      nonPinFundDebitTotal: number;
+      duplicateInternalIds: number;
+    }> = [];
+
+    for (const user of this.getUsers()) {
+      const publicUserId = String(user.userId || '').trim();
+      if (!publicUserId || seen.has(publicUserId)) continue;
+      seen.add(publicUserId);
+
+      const forensic = this.getFundWalletForensics(publicUserId);
+      if (!forensic) continue;
+      if (forensic.directPinPurchaseAmount <= 0) continue;
+      if (forensic.unsupportedDirectPinBuyAmount <= 0.009 && forensic.missingSelfFundCreditCandidates <= 0) continue;
+
+      rows.push({
+        userId: forensic.publicUserId,
+        fullName: forensic.fullName,
+        canonicalInternalId: forensic.canonicalInternalId,
+        directPinPurchaseCount: forensic.directPinPurchaseCount,
+        directPinPurchaseAmount: forensic.directPinPurchaseAmount,
+        unsupportedDirectPinBuyAmount: forensic.unsupportedDirectPinBuyAmount,
+        missingSelfFundCreditCandidates: forensic.missingSelfFundCreditCandidates,
+        storedFundWallet: forensic.storedCombinedBalance,
+        currentRecoveryDue: forensic.currentRecoveryDue,
+        totalRecoveredSoFar: forensic.totalRecoveredSoFar,
+        remainingRecoveryAmount: Math.max(
+          0,
+          Math.round((forensic.unsupportedDirectPinBuyAmount - forensic.totalRecoveredSoFar - forensic.currentRecoveryDue) * 100) / 100
+        ),
+        txnDerivedFundWallet: forensic.computedCombinedBalance,
+        combinedCreditTotal: forensic.combinedCreditTotal,
+        nonPinFundDebitTotal: forensic.nonPinFundDebitTotal,
+        duplicateInternalIds: forensic.duplicateInternalIds.length
+      });
+    }
+
+    return rows.sort((a, b) =>
+      b.unsupportedDirectPinBuyAmount - a.unsupportedDirectPinBuyAmount
+      || b.directPinPurchaseAmount - a.directPinPurchaseAmount
+      || a.userId.localeCompare(b.userId)
+    );
+  }
+
+  private static buildReferralIncomeMismatchRowsFromTransactions(transactions: Transaction[]): Array<{
+    sponsorUserId: string;
+    sponsorName: string;
+    referredName: string;
+    likelyCorrectUserId: string;
+    directIncomeCount: number;
+    extraDirectIncomeCount: number;
+    totalCreditedAmount: number;
+    extraCreditedAmount: number;
+    currentRecoveryDue: number;
+    totalRecoveredSoFar: number;
+    remainingRecoveryAmount: number;
+    wrongUserIds: string[];
+    firstCreatedAt: string;
+    lastCreatedAt: string;
+  }> {
+    const completedDirectIncomeTxs = transactions.filter((tx) => tx.type === 'direct_income' && tx.status === 'completed');
+    const grouped = new Map<string, {
+      sponsorUserId: string;
+      sponsorName: string;
+      referredName: string;
+      likelyCorrectUserId: string;
+      entries: Array<{ tx: Transaction; parsedUserId: string; createdAtMs: number; isCanonical: boolean }>;
+      wrongUserIds: Set<string>;
+    }>();
+
+    for (const tx of completedDirectIncomeTxs) {
+      const sponsor = this.resolveUserByRef(tx.userId);
+      if (!sponsor) continue;
+
+      const parsed = this.parseReferralIncomeDescription(tx.description);
+      const likelySource = this.resolveLikelyReferralSourceForDirectIncome(tx, sponsor);
+      if (!likelySource) continue;
+
+      const likelyCorrectUserId = likelySource.userId;
+      const referredName = likelySource.fullName || parsed?.fullName || 'Unknown user';
+      const groupKey = `${sponsor.userId}__${likelyCorrectUserId}`;
+      const existing = grouped.get(groupKey) || {
+        sponsorUserId: sponsor.userId,
+        sponsorName: sponsor.fullName,
+        referredName,
+        likelyCorrectUserId,
+        entries: [],
+        wrongUserIds: new Set<string>()
+      };
+
+      const parsedUserId = String(parsed?.userId || '').trim();
+      const parsedExists = parsedUserId ? !!this.getUserByUserId(parsedUserId) : false;
+      const isCanonical = (
+        (tx.fromUserId ? this.transactionRefMatchesUser(tx.fromUserId, likelySource) : false)
+        || (!!parsedUserId && parsedUserId === likelyCorrectUserId)
+      );
+
+      if (parsedUserId && (!parsedExists || parsedUserId !== likelyCorrectUserId)) {
+        existing.wrongUserIds.add(parsedUserId);
+      }
+
+      existing.entries.push({
+        tx,
+        parsedUserId,
+        createdAtMs: new Date(tx.completedAt || tx.createdAt || '').getTime(),
+        isCanonical
+      });
+      grouped.set(groupKey, existing);
+    }
+
+    return Array.from(grouped.values())
+      .map((group) => {
+        const sorted = [...group.entries].sort((a, b) => a.createdAtMs - b.createdAtMs);
+        let keepIndex = sorted.findIndex((entry) => entry.isCanonical);
+        if (keepIndex < 0) keepIndex = 0;
+
+        const extraEntries = sorted.filter((_, index) => index !== keepIndex);
+        const totalCreditedAmount = sorted.reduce((sum, entry) => sum + Math.abs(Number(entry.tx.amount || 0)), 0);
+        const extraCreditedAmount = extraEntries.reduce((sum, entry) => sum + Math.abs(Number(entry.tx.amount || 0)), 0);
+        const sponsorUser = this.getUserByUserId(group.sponsorUserId);
+        const recoveryProgress = this.getRecoveryProgressForReason(
+          sponsorUser?.id || group.sponsorUserId,
+          'duplicate referral income credits',
+          extraCreditedAmount,
+          transactions
+        );
+
+        return {
+          sponsorUserId: group.sponsorUserId,
+          sponsorName: group.sponsorName,
+          referredName: group.referredName,
+          likelyCorrectUserId: group.likelyCorrectUserId,
+          directIncomeCount: sorted.length,
+          extraDirectIncomeCount: extraEntries.length,
+          totalCreditedAmount,
+          extraCreditedAmount,
+          currentRecoveryDue: recoveryProgress.currentRecoveryDue,
+          totalRecoveredSoFar: recoveryProgress.recoveredSoFar,
+          remainingRecoveryAmount: recoveryProgress.remainingRecoveryAmount,
+          wrongUserIds: Array.from(group.wrongUserIds),
+          firstCreatedAt: sorted[0]?.tx.createdAt || '',
+          lastCreatedAt: sorted[sorted.length - 1]?.tx.createdAt || ''
+        };
+      })
+      .filter((row) => row.extraDirectIncomeCount > 0 || row.wrongUserIds.length > 0)
+      .sort((a, b) =>
+        b.extraCreditedAmount - a.extraCreditedAmount
+        || b.directIncomeCount - a.directIncomeCount
+        || a.sponsorUserId.localeCompare(b.sponsorUserId)
+      );
+  }
+
+  static scanReferralIncomeMismatches(): Array<{
+    sponsorUserId: string;
+    sponsorName: string;
+    referredName: string;
+    likelyCorrectUserId: string;
+    directIncomeCount: number;
+    extraDirectIncomeCount: number;
+    totalCreditedAmount: number;
+    extraCreditedAmount: number;
+    currentRecoveryDue: number;
+    totalRecoveredSoFar: number;
+    remainingRecoveryAmount: number;
+    wrongUserIds: string[];
+    firstCreatedAt: string;
+    lastCreatedAt: string;
+  }> {
+    return this.buildReferralIncomeMismatchRowsFromTransactions(this.getTransactions());
+  }
+
+  private static buildDuplicateLockedGiveHelpMismatchRows(transactions: Transaction[]): Array<{
+    mismatchKey: string;
+    senderUserId: string;
+    senderName: string;
+    recipientUserId: string;
+    recipientName: string;
+    level: number;
+    giveAmount: number;
+    giveCount: number;
+    extraGiveCount: number;
+    receiveCount: number;
+    extraReceiveCount: number;
+    totalGivenAmount: number;
+    extraGivenAmount: number;
+    extraCreditedAmount: number;
+    currentRecoveryDue: number;
+    totalRecoveredSoFar: number;
+    remainingRecoveryAmount: number;
+    clusterStartedAt: string;
+    clusterEndedAt: string;
+  }> {
+    const DUPLICATE_WINDOW_MS = 2 * 60 * 1000;
+    const lockedGiveTxs = transactions.filter((tx) =>
+      tx.type === 'give_help'
+      && tx.status === 'completed'
+      && tx.amount < 0
+      && String(tx.description || '').toLowerCase().includes('from locked income')
+    );
+    const completedReceiveTxs = transactions.filter((tx) =>
+      tx.type === 'receive_help'
+      && tx.status === 'completed'
+      && tx.amount > 0
+      && !!tx.fromUserId
+    );
+
+    const grouped = new Map<string, {
+      sender: User;
+      recipient: User;
+      level: number;
+      amount: number;
+      entries: Transaction[];
+    }>();
+
+    for (const tx of lockedGiveTxs) {
+      const sender = this.resolveUserByRef(tx.userId);
+      const recipient = (tx.toUserId && this.resolveUserByRef(tx.toUserId))
+        || ((tx.description || '').match(/\((\d{7})\)/)?.[1] ? this.getUserByUserId((tx.description || '').match(/\((\d{7})\)/)?.[1] || '') : undefined);
+      const level = this.resolveTransactionLevel(tx);
+      const amount = Math.abs(Number(tx.amount || 0));
+      if (!sender || !recipient || !level || !(amount > 0)) continue;
+
+      const key = `${sender.id}__${recipient.id}__${level}__${amount.toFixed(2)}`;
+      const bucket = grouped.get(key) || { sender, recipient, level, amount, entries: [] };
+      bucket.entries.push(tx);
+      grouped.set(key, bucket);
+    }
+
+    const rows: Array<{
+      mismatchKey: string;
+      senderUserId: string;
+      senderName: string;
+      recipientUserId: string;
+      recipientName: string;
+      level: number;
+      giveAmount: number;
+      giveCount: number;
+      extraGiveCount: number;
+      receiveCount: number;
+      extraReceiveCount: number;
+      totalGivenAmount: number;
+      extraGivenAmount: number;
+      extraCreditedAmount: number;
+      currentRecoveryDue: number;
+      totalRecoveredSoFar: number;
+      remainingRecoveryAmount: number;
+      clusterStartedAt: string;
+      clusterEndedAt: string;
+    }> = [];
+
+    for (const group of grouped.values()) {
+      const sorted = [...group.entries].sort((a, b) => this.getTransactionTime(a) - this.getTransactionTime(b));
+      let cluster: Transaction[] = [];
+
+      const flushCluster = () => {
+        if (cluster.length < 2) {
+          cluster = [];
+          return;
+        }
+
+        const firstTx = cluster[0];
+        const lastTx = cluster[cluster.length - 1];
+        const firstTime = this.getTransactionTime(firstTx);
+        const lastTime = this.getTransactionTime(lastTx);
+        const matchingReceives = completedReceiveTxs.filter((receiveTx) =>
+          this.transactionRefMatchesUser(receiveTx.userId, group.recipient)
+          && this.transactionRefMatchesUser(receiveTx.fromUserId, group.sender)
+          && this.resolveTransactionLevel(receiveTx) === group.level
+          && Math.abs(Number(receiveTx.amount || 0)) === group.amount
+          && this.getTransactionTime(receiveTx) >= (firstTime - DUPLICATE_WINDOW_MS)
+          && this.getTransactionTime(receiveTx) <= (lastTime + DUPLICATE_WINDOW_MS)
+        );
+
+        const giveCount = cluster.length;
+        const extraGiveCount = Math.max(0, giveCount - 1);
+        const receiveCount = matchingReceives.length;
+        const extraReceiveCount = Math.max(0, receiveCount - 1);
+        const extraCreditedCount = Math.min(extraGiveCount, extraReceiveCount);
+        const recoveryReason = `duplicate give-help credits of ${group.sender.fullName} (${group.sender.userId})`;
+        const recoveryProgress = this.getRecoveryProgressForReason(
+          group.recipient.id,
+          recoveryReason,
+          Math.round((extraCreditedCount * group.amount) * 100) / 100,
+          transactions
+        );
+
+        rows.push({
+          mismatchKey: `${group.sender.userId}__${group.recipient.userId}__L${group.level}__${firstTx.id}`,
+          senderUserId: group.sender.userId,
+          senderName: group.sender.fullName,
+          recipientUserId: group.recipient.userId,
+          recipientName: group.recipient.fullName,
+          level: group.level,
+          giveAmount: group.amount,
+          giveCount,
+          extraGiveCount,
+          receiveCount,
+          extraReceiveCount,
+          totalGivenAmount: Math.round((giveCount * group.amount) * 100) / 100,
+          extraGivenAmount: Math.round((extraGiveCount * group.amount) * 100) / 100,
+          extraCreditedAmount: Math.round((extraCreditedCount * group.amount) * 100) / 100,
+          currentRecoveryDue: recoveryProgress.currentRecoveryDue,
+          totalRecoveredSoFar: recoveryProgress.recoveredSoFar,
+          remainingRecoveryAmount: recoveryProgress.remainingRecoveryAmount,
+          clusterStartedAt: firstTx.createdAt || '',
+          clusterEndedAt: lastTx.createdAt || ''
+        });
+
+        cluster = [];
+      };
+
+      for (const tx of sorted) {
+        if (cluster.length === 0) {
+          cluster.push(tx);
+          continue;
+        }
+
+        const previousTx = cluster[cluster.length - 1];
+        if (this.getTransactionTime(tx) - this.getTransactionTime(previousTx) <= DUPLICATE_WINDOW_MS) {
+          cluster.push(tx);
+        } else {
+          flushCluster();
+          cluster.push(tx);
+        }
+      }
+
+      flushCluster();
+    }
+
+    return rows
+      .filter((row) => row.extraGiveCount > 0)
+      .sort((a, b) =>
+        b.extraCreditedAmount - a.extraCreditedAmount
+        || b.extraGivenAmount - a.extraGivenAmount
+        || a.senderUserId.localeCompare(b.senderUserId)
+      );
+  }
+
+  static scanDuplicateLockedGiveHelpMismatches(): Array<{
+    mismatchKey: string;
+    senderUserId: string;
+    senderName: string;
+    recipientUserId: string;
+    recipientName: string;
+    level: number;
+    giveAmount: number;
+    giveCount: number;
+    extraGiveCount: number;
+    receiveCount: number;
+    extraReceiveCount: number;
+    totalGivenAmount: number;
+    extraGivenAmount: number;
+    extraCreditedAmount: number;
+    currentRecoveryDue: number;
+    totalRecoveredSoFar: number;
+    remainingRecoveryAmount: number;
+    clusterStartedAt: string;
+    clusterEndedAt: string;
+  }> {
+    return this.buildDuplicateLockedGiveHelpMismatchRows(this.getTransactions());
+  }
+
+  static startFundRecoveryForDuplicateLockedGiveHelpMismatch(mismatchKey: string): {
+    success: boolean;
+    message: string;
+    recoveryDue?: number;
+    recoveredNow?: number;
+  } {
+    const cleanKey = String(mismatchKey || '').trim();
+    if (!cleanKey) {
+      return { success: false, message: 'Mismatch not found' };
+    }
+
+    const mismatch = this.scanDuplicateLockedGiveHelpMismatches().find((row) => row.mismatchKey === cleanKey);
+    if (!mismatch) {
+      return { success: false, message: 'Duplicate give-help mismatch not found' };
+    }
+
+    if ((mismatch.extraCreditedAmount || 0) <= 0.009) {
+      return { success: false, message: 'No extra recipient credit found to recover for this mismatch' };
+    }
+
+    const recipient = this.getUserByUserId(mismatch.recipientUserId);
+    if (!recipient) {
+      return { success: false, message: 'Recipient user not found' };
+    }
+
+    const recoveryReason = `duplicate give-help credits of ${mismatch.senderName} (${mismatch.senderUserId})`;
+    const recoveryProgress = this.getRecoveryProgressForReason(recipient.id, recoveryReason, mismatch.extraCreditedAmount);
+    if (recoveryProgress.currentRecoveryDue > 0.009) {
+      return {
+        success: true,
+        message: `Recovery already active for $${recoveryProgress.currentRecoveryDue.toFixed(2)}`,
+        recoveryDue: recoveryProgress.currentRecoveryDue,
+        recoveredNow: 0
+      };
+    }
+    if (recoveryProgress.remainingRecoveryAmount <= 0.009) {
+      return {
+        success: true,
+        message: `Recovery already completed for $${Number(mismatch.extraCreditedAmount || 0).toFixed(2)}`,
+        recoveryDue: 0,
+        recoveredNow: 0
+      };
+    }
+
+    return this.activateFundRecoveryForUser(
+      recipient,
+      recoveryProgress.remainingRecoveryAmount,
+      recoveryReason
+    );
+  }
+
+  static rerouteSafetyPooledLockedGiveHelpToUpline(userRef: string): {
+    rerouted: number;
+    scanned: number;
+    examples: string[];
+  } {
+    const sender = this.resolveUserByRef(userRef);
+    if (!sender) {
+      throw new Error('User not found');
+    }
+
+    const transactions = this.getTransactions();
+    const examples: string[] = [];
+    let rerouted = 0;
+    let scanned = 0;
+
+    const candidateTxs = transactions
+      .filter((tx) =>
+        tx.userId === sender.id
+        && tx.type === 'give_help'
+        && tx.status === 'completed'
+        && tx.amount < 0
+        && !tx.toUserId
+        && /from locked income/i.test(tx.description || '')
+        && (/to safety pool/i.test(tx.description || '') || /to upline/i.test(tx.description || ''))
+      )
+      .sort((a, b) => this.getTransactionTime(a) - this.getTransactionTime(b));
+
+    for (const giveTx of candidateTxs) {
+      scanned += 1;
+      const level = this.resolveTransactionLevel(giveTx);
+      const amount = Math.abs(Number(giveTx.amount || 0));
+      if (!level || amount <= 0.0001) continue;
+
+      const recipient = this.findEligibleUplineForGiveHelp(sender, level);
+      if (!recipient) {
+        if (examples.length < 6) {
+          examples.push(`No qualified upline found now for ${sender.userId} level ${level} $${amount.toFixed(2)}`);
+        }
+        continue;
+      }
+
+      const alreadySettled = transactions.some((receiveTx) =>
+        this.isReceiveHelpSettlementForGiveTx(receiveTx, giveTx, recipient, sender)
+      );
+      if (alreadySettled) {
+        if (examples.length < 6) {
+          examples.push(`Already settled: ${sender.userId} -> ${recipient.userId} level ${level} $${amount.toFixed(2)}`);
+        }
+        continue;
+      }
+
+      const previousDescription = giveTx.description;
+      const previousToUserId = giveTx.toUserId;
+      const nextDescription = `Auto give help at level ${level} from locked income to ${recipient.fullName} (${recipient.userId})`;
+
+      try {
+        this.deductFromSafetyPool(
+          amount,
+          sender.id,
+          `Re-routed safety-pooled locked give-help of ${sender.fullName} (${sender.userId}) to ${recipient.fullName} (${recipient.userId})`
+        );
+
+        giveTx.toUserId = recipient.id;
+        giveTx.description = nextDescription;
+        this.saveTransactions(transactions);
+
+        const restored = this.restoreReceiveHelpFromGiveHelpTxId({
+          recipientUserId: recipient.userId,
+          giveHelpTxId: giveTx.id
+        });
+
+        if (!restored.created) {
+          throw new Error('Matching receive-help entry already exists');
+        }
+
+        rerouted += 1;
+        if (examples.length < 6) {
+          examples.push(`Re-routed $${amount.toFixed(2)} from safety pool to ${recipient.fullName} (${recipient.userId})`);
+        }
+      } catch (error) {
+        giveTx.toUserId = previousToUserId;
+        giveTx.description = previousDescription;
+        this.saveTransactions(transactions);
+
+        try {
+          this.addToSafetyPool(
+            amount,
+            sender.id,
+            `Reverted failed reroute of locked give-help for ${sender.fullName} (${sender.userId})`
+          );
+        } catch {
+          // Best effort rollback only.
+        }
+
+        if (examples.length < 6) {
+          const message = error instanceof Error ? error.message : 'Unknown reroute failure';
+          examples.push(`Failed to re-route $${amount.toFixed(2)} for ${sender.userId}: ${message}`);
+        }
+      }
+    }
+
+    return { rerouted, scanned, examples };
+  }
+
+  static getMaxTotalReceivedByPublicUserId(publicUserId: string): number {
+    const cleanUserId = String(publicUserId || '').trim();
+    if (!cleanUserId) return 0;
+
+    const storedUsers = this.getUsers();
+    const matchingInternalIds = new Set(
+      storedUsers
+        .filter((user) => (user.userId || '').trim() === cleanUserId)
+        .map((user) => user.id)
+        .filter(Boolean)
+    );
+
+    const canonicalUser = this.getUserByUserId(cleanUserId);
+    if (canonicalUser?.id) {
+      matchingInternalIds.add(canonicalUser.id);
+    }
+
+    if (matchingInternalIds.size === 0) {
+      return 0;
+    }
+
+    const matchingWallets = this.getWallets().filter((wallet) => matchingInternalIds.has(wallet.userId));
+    if (matchingWallets.length === 0) {
+      return Math.max(
+        0,
+        ...Array.from(matchingInternalIds).map((internalId) => this.computeIncomeLedgerFromTransactions(internalId).totalReceived || 0)
+      );
+    }
+
+    const storedMax = Math.max(...matchingWallets.map((wallet) => Number(wallet.totalReceived) || 0), 0);
+    const computedMax = Math.max(
+      0,
+      ...Array.from(matchingInternalIds).map((internalId) => this.computeIncomeLedgerFromTransactions(internalId).totalReceived || 0)
+    );
+
+    return Math.max(storedMax, computedMax);
+  }
+
   private static parseWithdrawalFee(description: string): number {
     if (!description) return 0;
     const match = description.match(/Fee:\s*\$([0-9]+(?:\.[0-9]+)?)/i);
@@ -1739,6 +3270,33 @@ class Database {
     return parsedLevel;
   }
 
+  private static getLockedIncomeStrictCutoff(): number | null {
+    const settings = this.getSettings();
+    const raw = settings.lockedIncomeStrictFrom;
+    if (!raw) return null;
+    const parsed = new Date(raw).getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  private static shouldUseLegacyLockedConsumption(tx: Transaction): boolean {
+    const cutoff = this.getLockedIncomeStrictCutoff();
+    if (cutoff === null) return false;
+    const raw = tx.completedAt || tx.createdAt || '';
+    const parsed = new Date(raw).getTime();
+    if (!Number.isFinite(parsed)) return false;
+    return parsed < cutoff;
+  }
+
+  private static getLockedIncomeSourceLevel(tx: Transaction, resolvedLevel?: number | null): number {
+    const explicitLevel = Number(resolvedLevel);
+    const derivedLevel = this.resolveTransactionLevel(tx);
+    const numericLevel = Number.isFinite(explicitLevel) ? explicitLevel : (derivedLevel ?? NaN);
+    if (!Number.isFinite(numericLevel) || numericLevel <= 1) {
+      return 1;
+    }
+    return Math.max(1, Math.floor(numericLevel) - 1);
+  }
+
   private static computeLockedIncomeFromTransactions(userId: string): number {
     const txs = this.getTransactions()
       .filter((t) => t.userId === userId)
@@ -1747,12 +3305,9 @@ class Database {
     let locked = 0;
     for (const tx of txs) {
       const desc = (tx.description || '').toLowerCase();
-      if (
-        tx.type === 'receive_help'
-        && tx.amount > 0
-        && (this.isLockedFirstTwoReceiveDescription(desc) || this.isLockedQualifiedReceiveDescription(desc))
-      ) {
-        locked += tx.amount;
+      const effectiveLockedReceiveAmount = this.getUnsettledLockedReceiveEffectiveAmount(tx, txs);
+      if (effectiveLockedReceiveAmount > 0) {
+        locked += effectiveLockedReceiveAmount;
         continue;
       }
       if (tx.type === 'receive_help' && tx.amount > 0 && this.isReleasedLockedReceiveDescription(desc)) {
@@ -1779,9 +3334,22 @@ class Database {
       return created;
     };
 
-    const consumeTxDerivedLockedAcrossLevels = (preferredLevel: number, amount: number) => {
+    const consumeTxDerivedLockedAcrossLevels = (preferredLevel: number, amount: number, allowCrossLevel: boolean) => {
       let remaining = Math.max(0, amount);
       if (remaining <= 0) return;
+
+      if (!allowCrossLevel) {
+        const level = preferredLevel;
+        const slot = ensureTxLevel(level);
+        const usedQualification = Math.min(Math.max(0, slot.qualification), remaining);
+        slot.qualification -= usedQualification;
+        remaining -= usedQualification;
+
+        if (remaining <= 0) return;
+        const usedFirstTwo = Math.min(Math.max(0, slot.firstTwo), remaining);
+        slot.firstTwo -= usedFirstTwo;
+        return;
+      }
 
       const levels = Array.from(txLevelMap.keys())
         .filter((n) => Number.isInteger(n) && n >= 1 && n <= helpDistributionTable.length)
@@ -1816,25 +3384,37 @@ class Database {
       const desc = (tx.description || '').toLowerCase();
       const slot = ensureTxLevel(level);
 
-      if (tx.type === 'receive_help' && tx.amount > 0) {
+      const effectiveLockedReceiveAmount = this.getUnsettledLockedReceiveEffectiveAmount(tx, txs);
+      if (effectiveLockedReceiveAmount > 0) {
         if (this.isLockedFirstTwoReceiveDescription(desc)) {
-          slot.firstTwo += tx.amount;
+          slot.firstTwo += effectiveLockedReceiveAmount;
         } else if (this.isLockedQualifiedReceiveDescription(desc)) {
-          slot.qualification += tx.amount;
-        } else if (this.isReleasedLockedReceiveDescription(desc)) {
-          slot.qualification -= tx.amount;
+          slot.qualification += effectiveLockedReceiveAmount;
         }
+        continue;
+      }
+      if (tx.type === 'receive_help' && tx.amount > 0 && this.isReleasedLockedReceiveDescription(desc)) {
+        slot.qualification -= tx.amount;
         continue;
       }
 
       if (tx.type === 'give_help' && desc.includes('from locked income')) {
-        consumeTxDerivedLockedAcrossLevels(level, Math.abs(tx.amount));
+        const allowCrossLevel = this.shouldUseLegacyLockedConsumption(tx);
+        const sourceLevel = this.getLockedIncomeSourceLevel(tx, level);
+        consumeTxDerivedLockedAcrossLevels(sourceLevel, Math.abs(tx.amount), allowCrossLevel);
       }
     }
 
     let updated = false;
     let levels = 0;
-    for (const [level, values] of txLevelMap.entries()) {
+    const levelsToSync = new Set<number>([
+      ...txLevelMap.keys(),
+      ...Object.keys(tracker.levels || {})
+        .map((key) => Number(key))
+        .filter((level) => Number.isInteger(level) && level >= 1 && level <= helpDistributionTable.length)
+    ]);
+    for (const level of [...levelsToSync].sort((a, b) => a - b)) {
+      const values = txLevelMap.get(level) || { firstTwo: 0, qualification: 0 };
       const state = this.ensureLevelTrackerState(tracker, level);
       const nextFirstTwo = Math.max(0, Math.round(values.firstTwo * 100) / 100);
       const nextQual = Math.max(0, Math.round(values.qualification * 100) / 100);
@@ -1889,9 +3469,12 @@ class Database {
         || tx.type === 'reentry';
       const isIncomeWalletAdminCredit = tx.type !== 'admin_credit' || txDesc.includes('income wallet');
 
+      const lifetimeCreditAmount = tx.type === 'receive_help'
+        ? Math.abs((tx.displayAmount ?? tx.amount) || 0)
+        : tx.amount;
       // Lifetime earnings: all positive credits that are actually earnings (not activation/fund/pin flows).
-      if (tx.amount > 0 && !isNonEarningCreditType && isIncomeWalletAdminCredit) {
-        totalReceived += tx.amount;
+      if (lifetimeCreditAmount > 0 && !isNonEarningCreditType && isIncomeWalletAdminCredit) {
+        totalReceived += lifetimeCreditAmount;
       }
 
       switch (tx.type) {
@@ -1981,6 +3564,13 @@ class Database {
             relevantCount += 1;
           }
           break;
+        case 'fund_recovery':
+          if (txDesc.includes('income wallet')) {
+            const recoveryOutflow = Math.min(Math.abs(tx.amount), Math.max(0, incomeWallet));
+            incomeWallet -= recoveryOutflow;
+            relevantCount += 1;
+          }
+          break;
         case 'system_fee':
           if (txDesc.includes('income wallet')) {
             const feeOutflow = Math.min(Math.abs(tx.amount), Math.max(0, incomeWallet));
@@ -2021,11 +3611,12 @@ class Database {
       const receivedDiff = Math.abs((wallet.totalReceived || 0) - computed.totalReceived);
       const givenDiff = Math.abs((wallet.totalGiven || 0) - computed.totalGiven);
       if (incomeDiff <= 0.0001 && matrixDiff <= 0.0001 && receivedDiff <= 0.0001 && givenDiff <= 0.0001) continue;
-
-      wallet.incomeWallet = computed.incomeWallet;
-      wallet.matrixWallet = computed.matrixWallet;
-      wallet.totalReceived = computed.totalReceived;
-      wallet.totalGiven = computed.totalGiven;
+      this.updateWallet(wallet.userId, {
+        incomeWallet: computed.incomeWallet,
+        matrixWallet: computed.matrixWallet,
+        totalReceived: computed.totalReceived,
+        totalGiven: computed.totalGiven
+      });
       repaired += 1;
     }
 
@@ -2044,85 +3635,14 @@ class Database {
     const targetIds = userId ? new Set([userId]) : new Set(wallets.map((w) => w.userId));
     let repaired = 0;
 
-    const computeFundWalletFromTransactions = (targetUserId: string): { balance: number; relevantCount: number } => {
-      const txs = this.getTransactions()
-        .filter((t) => t.userId === targetUserId)
-        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-
-      let balance = 0;
-      let relevantCount = 0;
-
-      for (const tx of txs) {
-        const desc = String(tx.description || '').toLowerCase();
-
-        if (tx.type === 'deposit' && tx.status === 'completed' && tx.amount > 0) {
-          balance += tx.amount;
-          relevantCount += 1;
-          continue;
-        }
-
-        if (tx.type === 'admin_credit' && tx.status === 'completed' && tx.amount > 0 && (desc.includes('deposit wallet') || desc.includes('fund wallet'))) {
-          balance += tx.amount;
-          relevantCount += 1;
-          continue;
-        }
-
-        if (tx.type === 'admin_debit' && tx.status === 'completed' && tx.amount < 0 && (desc.includes('deposit wallet') || desc.includes('fund wallet'))) {
-          balance -= Math.abs(tx.amount);
-          relevantCount += 1;
-          continue;
-        }
-
-        if (tx.type === 'p2p_transfer' && tx.status === 'completed') {
-          balance += tx.amount;
-          relevantCount += 1;
-          continue;
-        }
-
-        if (
-          tx.type === 'income_transfer'
-          && tx.status === 'completed'
-          && tx.amount < 0
-          && desc.includes('to your fund wallet')
-        ) {
-          // Self income->fund transfers should only affect fund-wallet balance
-          // through their explicit matching positive fund-credit entry.
-          // Do not infer implicit fund credits from the debit itself; old broken
-          // partial transfers must be repaired explicitly, not auto-counted.
-          continue;
-        }
-
-        if (tx.type === 'pin_purchase' && tx.status === 'completed' && tx.amount < 0 && desc.includes('fund wallet')) {
-          balance -= Math.abs(tx.amount);
-          relevantCount += 1;
-          continue;
-        }
-
-        if (tx.type === 'activation' && tx.status === 'completed' && tx.amount < 0 && desc.includes('fund wallet')) {
-          balance -= Math.abs(tx.amount);
-          relevantCount += 1;
-          continue;
-        }
-
-        if (tx.type === 'system_fee' && tx.status === 'completed' && tx.amount < 0 && desc.includes('deposit wallet')) {
-          balance -= Math.abs(tx.amount);
-          relevantCount += 1;
-          continue;
-        }
-      }
-
-      return {
-        balance: Math.max(0, Math.round(balance * 100) / 100),
-        relevantCount
-      };
-    };
-
     for (const wallet of wallets) {
       if (!targetIds.has(wallet.userId)) continue;
-      const computed = computeFundWalletFromTransactions(wallet.userId);
+      const computed = this.computeFundWalletFromTransactionsForUserIds(new Set([wallet.userId]));
       if (computed.relevantCount === 0) continue;
       if (Math.abs((wallet.depositWallet || 0) - computed.balance) <= 0.0001) continue;
-      wallet.depositWallet = computed.balance;
+      this.updateWallet(wallet.userId, {
+        depositWallet: computed.balance
+      });
       repaired += 1;
     }
 
@@ -2210,12 +3730,24 @@ class Database {
       if (tx.type !== 'receive_help') continue;
       if (!(tx.amount > 0)) continue;
       scanned += 1;
-      if (!tx.fromUserId || !usersById.has(tx.fromUserId)) {
+      const sender = tx.fromUserId ? usersById.get(tx.fromUserId) : undefined;
+      const recipient = usersById.get(tx.userId);
+      const txLevel = this.resolveTransactionLevel(tx) || Number(tx.level) || 0;
+      const senderMissing = !sender;
+      const senderOutOfTree = !senderMissing
+        && !!recipient
+        && txLevel > 0
+        && !this.isValidMatrixSenderForRecipientLevel(recipient, sender, txLevel);
+
+      if (senderMissing || senderOutOfTree) {
         const originalDesc = tx.description || '';
         const originalAmount = tx.amount;
         tx.amount = 0;
         tx.status = 'reversed';
-        tx.description = `Reversed ghost receive help (missing sender). ${originalDesc}`.trim();
+        const reason = senderMissing
+          ? 'missing sender'
+          : `sender is not in recipient matrix at level ${txLevel}`;
+        tx.description = `Reversed ghost receive help (${reason}). ${originalDesc}`.trim();
         logs.push({
           id: generateEventId('repair', 'ghost_receive_help'),
           createdAt: new Date().toISOString(),
@@ -2223,7 +3755,9 @@ class Database {
           userId: tx.userId,
           userPublicId: usersById.get(tx.userId)?.userId || '',
           amount: originalAmount,
-          reason: 'Missing or invalid sender',
+          reason: senderMissing
+            ? 'Missing or invalid sender'
+            : `Sender-recipient matrix mismatch at level ${txLevel}`,
           originalDescription: originalDesc
         });
         affectedUserIds.add(tx.userId);
@@ -2625,6 +4159,584 @@ class Database {
     }
 
     return { repaired, examples };
+  }
+
+  static recoverMissingPaymentAndPinTransactions(userRef?: string): {
+    depositsCreated: number;
+    pinPurchasesCreated: number;
+    examples: string[];
+  } {
+    const targetUser = userRef
+      ? (this.getUserById(userRef) || this.getUserByUserId(userRef))
+      : null;
+
+    if (userRef && !targetUser) {
+      throw new Error('User not found');
+    }
+
+    const targetUserIds = targetUser ? new Set([targetUser.id]) : null;
+    const transactions = this.getTransactions();
+    const examples: string[] = [];
+    const createdTransactions: Transaction[] = [];
+    const MATCH_WINDOW_MS = 15 * 60 * 1000;
+    let depositsCreated = 0;
+    let pinPurchasesCreated = 0;
+
+    const isScopedUser = (id: string) => !targetUserIds || targetUserIds.has(id);
+
+    for (const payment of this.getPayments()) {
+      if (!isScopedUser(payment.userId) || payment.status !== 'completed') continue;
+
+      const recoveryTxId = `tx_recover_deposit_${payment.id}`;
+      const paymentTime = new Date(payment.verifiedAt || payment.createdAt || 0).getTime();
+      const hasExisting = transactions.some((tx) =>
+        tx.id === recoveryTxId
+        || (
+          tx.userId === payment.userId
+          && tx.type === 'deposit'
+          && tx.status === 'completed'
+          && Number(tx.amount || 0) === Number(payment.amount || 0)
+          && (tx.description || '') === `Deposit via ${payment.methodName}`
+          && Math.abs(this.getTransactionTime(tx) - paymentTime) <= MATCH_WINDOW_MS
+        )
+      );
+      if (hasExisting) continue;
+
+      createdTransactions.push(this.normalizeTransactionRecord({
+        id: recoveryTxId,
+        userId: payment.userId,
+        type: 'deposit',
+        amount: payment.amount,
+        status: 'completed',
+        description: `Deposit via ${payment.methodName}`,
+        createdAt: payment.verifiedAt || payment.createdAt || new Date().toISOString(),
+        completedAt: payment.verifiedAt || payment.createdAt || new Date().toISOString()
+      }));
+      depositsCreated += 1;
+
+      const user = this.getUserById(payment.userId);
+      if (examples.length < 10) {
+        examples.push(`${user?.userId || payment.userId}: recovered deposit log for $${Number(payment.amount || 0).toFixed(2)}`);
+      }
+    }
+
+    for (const request of this.getPinPurchaseRequests()) {
+      if (!isScopedUser(request.userId) || request.status !== 'completed') continue;
+
+      const amount = request.paidFromWallet ? -request.amount : 0;
+      const description = request.paidFromWallet
+        ? `Purchased ${request.quantity} PIN(s)`
+        : `PIN purchase approved (${request.quantity} PINs)`;
+      const recoveryTxId = `tx_recover_pin_purchase_${request.id}`;
+      const requestTime = new Date(request.processedAt || request.createdAt || 0).getTime();
+      const hasExisting = transactions.some((tx) =>
+        tx.id === recoveryTxId
+        || (
+          tx.userId === request.userId
+          && tx.type === 'pin_purchase'
+          && tx.status === 'completed'
+          && Number(tx.amount || 0) === Number(amount || 0)
+          && (tx.description || '') === description
+          && Math.abs(this.getTransactionTime(tx) - requestTime) <= MATCH_WINDOW_MS
+        )
+      );
+      if (hasExisting) continue;
+
+      createdTransactions.push(this.normalizeTransactionRecord({
+        id: recoveryTxId,
+        userId: request.userId,
+        type: 'pin_purchase',
+        amount,
+        status: 'completed',
+        description,
+        createdAt: request.processedAt || request.createdAt || new Date().toISOString(),
+        completedAt: request.processedAt || request.createdAt || new Date().toISOString()
+      }));
+      pinPurchasesCreated += 1;
+
+      const user = this.getUserById(request.userId);
+      if (examples.length < 10) {
+        examples.push(
+          `${user?.userId || request.userId}: recovered PIN purchase log for ${request.quantity} PIN(s) ($${Number(request.amount || 0).toFixed(2)})`
+        );
+      }
+    }
+
+    if (createdTransactions.length === 0) {
+      return { depositsCreated: 0, pinPurchasesCreated: 0, examples };
+    }
+
+    this.saveTransactions([...transactions, ...createdTransactions]);
+    return { depositsCreated, pinPurchasesCreated, examples };
+  }
+
+  static recoverMissingReferralAndLevelOneHelp(userRef?: string): {
+    directIncomeCreated: number;
+    levelOneHelpCreated: number;
+    examples: string[];
+  } {
+    const targetUser = userRef
+      ? (this.getUserById(userRef) || this.getUserByUserId(userRef))
+      : null;
+
+    if (userRef && !targetUser) {
+      throw new Error('User not found');
+    }
+
+    const users = this.getUsers();
+    const transactions = this.getTransactions();
+    const createdTransactions: Transaction[] = [];
+    const examples: string[] = [];
+    let directIncomeCreated = 0;
+    let levelOneHelpCreated = 0;
+    let changedExisting = false;
+
+    if (!targetUser) {
+      return { directIncomeCreated: 0, levelOneHelpCreated: 0, examples };
+    }
+
+    const activeDirectReferrals = users.filter((user) =>
+      user.sponsorId === targetUser.userId
+      && this.isNetworkActiveUser(user)
+      && this.hasActivationEvidenceForUser(user, transactions)
+    );
+
+    for (const referral of activeDirectReferrals) {
+      const hasDirectIncome = !!this.findExistingReferralIncomeCreditTx(targetUser, referral, transactions);
+      if (hasDirectIncome) continue;
+
+      const timestamp = referral.activatedAt || referral.createdAt || new Date().toISOString();
+      createdTransactions.push(this.normalizeTransactionRecord({
+        id: generateEventId('tx', 'recover_direct_income'),
+        userId: targetUser.id,
+        type: 'direct_income',
+        amount: 5,
+        fromUserId: referral.id,
+        status: 'completed',
+        description: `Referral income from ${referral.fullName} (${referral.userId})`,
+        createdAt: timestamp,
+        completedAt: timestamp
+      }));
+      directIncomeCreated += 1;
+      if (examples.length < 10) {
+        examples.push(`${targetUser.userId}: recovered referral income from ${referral.userId}`);
+      }
+    }
+
+    const matrixChildrenMap = this.buildMatrixChildrenMap(this.getMatrix());
+    const activeMatrixChildren = (matrixChildrenMap.get(targetUser.userId) || [])
+      .map((childUserId) => this.getUserByUserId(childUserId))
+      .filter((user): user is User =>
+        !!user
+        && user.parentId === targetUser.userId
+        && this.isNetworkActiveUser(user)
+        && this.hasActivationEvidenceForUser(user, transactions)
+      );
+    let lockedFirstTwoCount = this.getLockedFirstTwoReceiveCount(targetUser.id, 1);
+    const levelOneSafetyPoolReasons = [
+      'No active immediate upline for activation help',
+      'No active immediate upline for activation help (side unresolved)'
+    ];
+    const levelOneAmount = helpDistributionTable[0]?.perUserHelp || 5;
+    const firstSettledGiveHelpTx = transactions
+      .filter((tx) =>
+        tx.userId === targetUser.id
+        && tx.type === 'give_help'
+        && tx.status === 'completed'
+        && tx.amount < 0
+        && this.resolveTransactionLevel(tx) === 2
+        && Math.abs(tx.amount || 0) >= levelOneAmount * 2
+        && String(tx.description || '').toLowerCase().includes('from locked income')
+      )
+      .sort((a, b) => this.getTransactionTime(a) - this.getTransactionTime(b))[0];
+    const firstTwoAlreadyConsumed = transactions.some((tx) =>
+      tx.id === firstSettledGiveHelpTx?.id
+    );
+
+    for (const child of activeMatrixChildren) {
+      const existingReceiveHelp = transactions.find((tx) =>
+        tx.type === 'receive_help'
+        && tx.status === 'completed'
+        && this.transactionRefMatchesUser(tx.userId, targetUser)
+        && Number(tx.level) === 1
+        && (
+          (tx.fromUserId && this.transactionRefMatchesUser(tx.fromUserId, child))
+          || String(tx.description || '').includes(`(${child.userId})`)
+        )
+      );
+      if (existingReceiveHelp) {
+        const isRecoveredLockedFirstTwo =
+          existingReceiveHelp.amount > 0
+          && this.isLockedFirstTwoReceiveDescription(existingReceiveHelp.description, 1);
+        const isHistoryOnlyRecoveredLockedFirstTwo =
+          this.isLockedFirstTwoReceiveDescription(existingReceiveHelp.description, 1)
+          && Number(existingReceiveHelp.amount || 0) <= 0
+          && Math.abs(Number(existingReceiveHelp.displayAmount || 0)) === levelOneAmount;
+
+        if (!firstTwoAlreadyConsumed && isHistoryOnlyRecoveredLockedFirstTwo) {
+          existingReceiveHelp.amount = levelOneAmount;
+          existingReceiveHelp.displayAmount = undefined;
+          changedExisting = true;
+          levelOneHelpCreated += 1;
+          if (lockedFirstTwoCount < 2) {
+            lockedFirstTwoCount += 1;
+          }
+          if (examples.length < 10) {
+            examples.push(`${targetUser.userId}: converted history-only level 1 help from ${child.userId} into real locked credit`);
+          }
+          continue;
+        }
+
+        if (firstTwoAlreadyConsumed && isRecoveredLockedFirstTwo) {
+          existingReceiveHelp.displayAmount = Math.abs((existingReceiveHelp.displayAmount ?? existingReceiveHelp.amount) || levelOneAmount);
+          existingReceiveHelp.amount = 0;
+          existingReceiveHelp.description = `Locked first-two help at level 1 from ${child.fullName} (${child.userId})`;
+          if (firstSettledGiveHelpTx) {
+            const giveTime = this.getTransactionTime(firstSettledGiveHelpTx);
+            if (giveTime > 1000) {
+              const ts = new Date(giveTime - 1000).toISOString();
+              existingReceiveHelp.createdAt = ts;
+              existingReceiveHelp.completedAt = ts;
+            }
+          }
+          changedExisting = true;
+          levelOneHelpCreated += 1;
+          if (examples.length < 10) {
+            examples.push(`${targetUser.userId}: converted settled level 1 help from ${child.userId} to history-only`);
+          }
+        }
+        continue;
+      }
+
+      const matchingSafetyPoolEntry = this.getSafetyPool().transactions
+        .filter((entry) =>
+          entry.fromUserId === child.id
+          && Number(entry.amount || 0) === levelOneAmount
+          && levelOneSafetyPoolReasons.includes(String(entry.reason || ''))
+        )
+        .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime())[0];
+
+      if (matchingSafetyPoolEntry) {
+        const shouldCreateHistoryOnly = firstTwoAlreadyConsumed && lockedFirstTwoCount < 2;
+        const timestamp = child.activatedAt || child.createdAt || matchingSafetyPoolEntry.createdAt || new Date().toISOString();
+        const restoredHistoryTimestamp = firstSettledGiveHelpTx
+          ? (() => {
+              const giveTime = this.getTransactionTime(firstSettledGiveHelpTx);
+              return giveTime > 1000 ? new Date(giveTime - 1000).toISOString() : timestamp;
+            })()
+          : timestamp;
+        const description = shouldCreateHistoryOnly
+          ? `Locked first-two help at level 1 from ${child.fullName} (${child.userId})`
+          : (
+            lockedFirstTwoCount < 2
+              ? `Locked first-two help at level 1 from ${child.fullName} (${child.userId})`
+              : (
+                this.isQualifiedForLevel(targetUser, 1)
+                  ? `Received help at level 1 from ${child.fullName} (${child.userId})`
+                  : `Locked receive help at level 1 from ${child.fullName} (${child.userId})`
+              )
+          );
+
+        this.deductFromSafetyPool(
+          levelOneAmount,
+          child.id,
+          `Recovered activation level 1 help for ${targetUser.fullName} (${targetUser.userId}) from ${child.fullName} (${child.userId})`
+        );
+
+        createdTransactions.push(this.normalizeTransactionRecord({
+          id: generateEventId('tx', 'recover_receive_help_l1'),
+          userId: targetUser.id,
+          type: 'receive_help',
+          amount: shouldCreateHistoryOnly ? 0 : levelOneAmount,
+          displayAmount: shouldCreateHistoryOnly ? levelOneAmount : undefined,
+          fromUserId: child.id,
+          level: 1,
+          status: 'completed',
+          description,
+          createdAt: shouldCreateHistoryOnly ? restoredHistoryTimestamp : timestamp,
+          completedAt: shouldCreateHistoryOnly ? restoredHistoryTimestamp : timestamp
+        }));
+
+        if (!shouldCreateHistoryOnly && lockedFirstTwoCount < 2) {
+          lockedFirstTwoCount += 1;
+        }
+        levelOneHelpCreated += 1;
+        if (examples.length < 10) {
+          examples.push(`${targetUser.userId}: re-routed safety-pooled level 1 help from ${child.userId}`);
+        }
+        continue;
+      }
+
+      if (this.hasLogicalReceiveHelpCredit({
+        recipient: targetUser,
+        sender: child,
+        level: 1,
+        amount: levelOneAmount,
+        transactions,
+        includeHistoryOnly: true
+      })) {
+        continue;
+      }
+
+      const timestamp = child.activatedAt || child.createdAt || new Date().toISOString();
+      const restoredHistoryTimestamp = firstSettledGiveHelpTx
+        ? (() => {
+            const giveTime = this.getTransactionTime(firstSettledGiveHelpTx);
+            return giveTime > 1000 ? new Date(giveTime - 1000).toISOString() : timestamp;
+          })()
+        : timestamp;
+      const shouldCreateHistoryOnly = firstTwoAlreadyConsumed && lockedFirstTwoCount < 2;
+      const description = shouldCreateHistoryOnly
+        ? `Locked first-two help at level 1 from ${child.fullName} (${child.userId})`
+        : (
+          lockedFirstTwoCount < 2
+            ? `Locked first-two help at level 1 from ${child.fullName} (${child.userId})`
+            : (
+              this.isQualifiedForLevel(targetUser, 1)
+                ? `Received help at level 1 from ${child.fullName} (${child.userId})`
+                : `Locked receive help at level 1 from ${child.fullName} (${child.userId})`
+            )
+        );
+
+      createdTransactions.push(this.normalizeTransactionRecord({
+        id: generateEventId('tx', 'recover_receive_help_l1'),
+        userId: targetUser.id,
+        type: 'receive_help',
+        amount: shouldCreateHistoryOnly ? 0 : levelOneAmount,
+        displayAmount: shouldCreateHistoryOnly ? levelOneAmount : undefined,
+        fromUserId: child.id,
+        level: 1,
+        status: 'completed',
+        description,
+        createdAt: shouldCreateHistoryOnly ? restoredHistoryTimestamp : timestamp,
+        completedAt: shouldCreateHistoryOnly ? restoredHistoryTimestamp : timestamp
+      }));
+      if (!shouldCreateHistoryOnly && lockedFirstTwoCount < 2) {
+        lockedFirstTwoCount += 1;
+      }
+      levelOneHelpCreated += 1;
+      if (examples.length < 10) {
+        examples.push(
+          shouldCreateHistoryOnly
+            ? `${targetUser.userId}: restored settled level 1 history from ${child.userId}`
+            : `${targetUser.userId}: recovered level 1 receive-help from ${child.userId}`
+        );
+      }
+    }
+
+    if (createdTransactions.length === 0 && !changedExisting) {
+      return { directIncomeCreated: 0, levelOneHelpCreated: 0, examples };
+    }
+
+    this.saveTransactions(changedExisting ? transactions.concat(createdTransactions) : [...transactions, ...createdTransactions]);
+
+    // Run the same post-help settlement sequence that a live matched help event would
+    // trigger so recovered level-1 helps immediately affect locked income, lifetime
+    // earnings, and auto give-help instead of remaining as history-only rows.
+    this.repairLockedIncomeTrackerFromTransactions(targetUser.id);
+    this.repairIncomeWalletConsistency(targetUser.id);
+    this.syncLockedIncomeWallet(targetUser.id);
+    this.attemptAutoLockedHelpSettlement(targetUser.id);
+    this.repairLockedIncomeTrackerFromTransactions(targetUser.id);
+    this.repairIncomeWalletConsistency(targetUser.id);
+    this.syncLockedIncomeWallet(targetUser.id);
+
+    return { directIncomeCreated, levelOneHelpCreated, examples };
+  }
+
+  static recoverMissingReferralIncomeForUser(userRef?: string): {
+    directIncomeCreated: number;
+    examples: string[];
+  } {
+    const targetUser = userRef
+      ? (this.getUserById(userRef) || this.getUserByUserId(userRef))
+      : null;
+
+    if (userRef && !targetUser) {
+      throw new Error('User not found');
+    }
+
+    if (!targetUser) {
+      return { directIncomeCreated: 0, examples: [] };
+    }
+
+    const users = this.getUsers();
+    const transactions = this.getTransactions();
+    const createdTransactions: Transaction[] = [];
+    const examples: string[] = [];
+    let directIncomeCreated = 0;
+
+    const activeDirectReferrals = users.filter((user) =>
+      user.sponsorId === targetUser.userId
+      && this.isNetworkActiveUser(user)
+      && this.hasActivationEvidenceForUser(user, transactions)
+    );
+
+    for (const referral of activeDirectReferrals) {
+      const hasDirectIncome = !!this.findExistingReferralIncomeCreditTx(targetUser, referral, transactions);
+      if (hasDirectIncome) continue;
+
+      const timestamp = referral.activatedAt || referral.createdAt || new Date().toISOString();
+      createdTransactions.push(this.normalizeTransactionRecord({
+        id: generateEventId('tx', 'recover_direct_income'),
+        userId: targetUser.id,
+        type: 'direct_income',
+        amount: 5,
+        fromUserId: referral.id,
+        status: 'completed',
+        description: `Referral income from ${referral.fullName} (${referral.userId})`,
+        createdAt: timestamp,
+        completedAt: timestamp
+      }));
+      directIncomeCreated += 1;
+      if (examples.length < 10) {
+        examples.push(`${targetUser.userId}: recovered referral income from ${referral.userId}`);
+      }
+    }
+
+    if (createdTransactions.length === 0) {
+      return { directIncomeCreated: 0, examples };
+    }
+
+    this.saveTransactions([...transactions, ...createdTransactions]);
+    this.repairIncomeWalletConsistency(targetUser.id);
+    return { directIncomeCreated, examples };
+  }
+
+  static forceReleaseFirstTwoLockedHelp(userRef: string, level: number = 1): {
+    released: number;
+    reason: string;
+  } {
+    const user = this.getUserById(userRef) || this.getUserByUserId(userRef);
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    const levelIndex = Math.max(1, Math.min(helpDistributionTable.length, Math.floor(level)));
+    const levelData = helpDistributionTable[levelIndex - 1];
+    if (!levelData) {
+      throw new Error('Invalid level');
+    }
+
+    let wallet = this.getWallet(user.id);
+    if (!wallet) {
+      wallet = this.createWallet(user.id);
+    }
+
+    this.repairLockedIncomeTrackerFromTransactions(user.id);
+    this.syncLockedIncomeWallet(user.id);
+
+    let refreshedWallet = this.getWallet(user.id) || wallet;
+    let lockedWallet = Math.max(0, refreshedWallet.lockedIncomeWallet || 0);
+    if (lockedWallet <= 0.0001) {
+      const bootstrapped = this.bootstrapLockedFirstTwoFromHistory(user.id, levelIndex);
+      if (bootstrapped > 0.0001) {
+        refreshedWallet = this.getWallet(user.id) || refreshedWallet;
+        lockedWallet = Math.max(0, refreshedWallet.lockedIncomeWallet || 0);
+      }
+    }
+    if (lockedWallet <= 0.0001) {
+      return { released: 0, reason: 'No locked income to release' };
+    }
+
+    const maxFirstTwo = Math.max(0, levelData.perUserHelp * 2);
+    const amountToRelease = Math.min(lockedWallet, maxFirstTwo);
+    if (amountToRelease <= 0.0001) {
+      return { released: 0, reason: 'No releasable amount' };
+    }
+
+    const tracker = this.getUserHelpTracker(user.id);
+    const state = this.ensureLevelTrackerState(tracker, levelIndex);
+    if ((state.lockedAmount || 0) < amountToRelease) {
+      state.lockedAmount = amountToRelease;
+      tracker.levels[String(levelIndex)] = state;
+      this.saveUserHelpTracker(tracker);
+    }
+
+    const targetLevel = Math.min(helpDistributionTable.length, levelIndex + 1);
+    const transferred = this.executeGiveHelp(
+      user.id,
+      amountToRelease,
+      targetLevel,
+      `Force release locked give help at level ${targetLevel} from locked income`,
+      { useLockedIncome: true, lockedIncomeLevel: levelIndex }
+    );
+
+    if (transferred > 0) {
+      state.lockedAmount = Math.max(0, (state.lockedAmount || 0) - transferred);
+      state.givenAmount += transferred;
+      if (levelData.perUserHelp > 0) {
+        state.giveEvents = Math.min(2, (state.giveEvents || 0) + Math.floor(transferred / levelData.perUserHelp));
+      }
+      tracker.levels[String(levelIndex)] = state;
+      this.saveUserHelpTracker(tracker);
+    }
+
+    this.repairLockedIncomeTrackerFromTransactions(user.id);
+    this.syncLockedIncomeWallet(user.id);
+
+    return {
+      released: transferred,
+      reason: transferred > 0 ? 'Released locked help via forced settlement' : 'No eligible upline or transfer failed'
+    };
+  }
+
+  private static bootstrapLockedFirstTwoFromHistory(userId: string, level: number): number {
+    if (!userId) return 0;
+    let wallet = this.getWallet(userId);
+    if (!wallet) {
+      wallet = this.createWallet(userId);
+    }
+
+    const allTransactions = this.getTransactions();
+    const relevant = allTransactions
+      .filter((tx) =>
+        tx.userId === userId
+        && tx.type === 'receive_help'
+        && tx.status === 'completed'
+        && this.resolveTransactionLevel(tx) === level
+        && this.isLockedFirstTwoReceiveDescription(tx.description, level)
+      )
+      .sort((a, b) => this.getTransactionTime(a) - this.getTransactionTime(b));
+
+    const deduped: Transaction[] = [];
+    const seen = new Map<string, number>();
+    for (const tx of relevant) {
+      const effectiveAmount = this.getUnsettledLockedReceiveEffectiveAmount(tx, allTransactions);
+      if (!(effectiveAmount > 0)) continue;
+      const key = `${tx.fromUserId || ''}__${effectiveAmount.toFixed(2)}__${level}`;
+      const txTime = this.getTransactionTime(tx);
+      const lastSeen = seen.get(key);
+      if (lastSeen !== undefined && Math.abs(txTime - lastSeen) <= 2 * 60 * 1000) {
+        continue;
+      }
+      seen.set(key, txTime);
+      deduped.push(tx);
+    }
+
+    if (deduped.length === 0) return 0;
+
+    const levelPerUserHelp = helpDistributionTable[level - 1]?.perUserHelp || 0;
+    const maxBootstrap = Math.max(0, levelPerUserHelp * 2);
+    const bootstrapAmount = Math.min(
+      maxBootstrap,
+      deduped.reduce((sum, tx) => sum + this.getUnsettledLockedReceiveEffectiveAmount(tx, allTransactions), 0)
+    );
+    if (bootstrapAmount <= 0.0001) return 0;
+
+    const tracker = this.getUserHelpTracker(userId);
+    const state = this.ensureLevelTrackerState(tracker, level);
+    state.receiveEvents = Math.max(state.receiveEvents || 0, Math.min(2, deduped.length));
+    state.lockedAmount = Math.max(state.lockedAmount || 0, bootstrapAmount);
+    tracker.levels[String(level)] = state;
+    this.saveUserHelpTracker(tracker);
+
+    this.updateWallet(userId, {
+      lockedIncomeWallet: Math.max(wallet.lockedIncomeWallet || 0, bootstrapAmount),
+      giveHelpLocked: Math.max(wallet.giveHelpLocked || 0, bootstrapAmount)
+    });
+
+    return bootstrapAmount;
   }
 
   static reverseTemporarySelfFundCredits(userId?: string): {
@@ -3301,13 +5413,15 @@ class Database {
         }
 
         if (params.restoreSponsorIncome !== false) {
-          const transactions = this.getTransactions();
-          const hasDirectIncome = transactions.some((tx) => (
-            tx.type === 'direct_income'
-            && tx.status === 'completed'
-            && tx.userId === sponsor.id
-            && (tx.fromUserId === user.id || (tx.description || '').includes(`(${user.userId})`))
-          ));
+          const hasDirectIncome = this.hasCompletedReferralIncomeForIdentity({
+            sponsorInternalId: sponsor.id,
+            referredInternalId: user.id,
+            referredUserId: user.userId,
+            fullName: user.fullName,
+            email: user.email,
+            phone: user.phone,
+            referenceTime: user.createdAt
+          });
           if (!hasDirectIncome) {
             const directIncome = 5;
             const sponsorWallet = this.getWallet(sponsor.id);
@@ -3401,6 +5515,64 @@ class Database {
     }
   }
 
+  static rebuildLockedIncomeTracker(userId: string): {
+    updated: boolean;
+    levels: number;
+    giveHelpLocked: number;
+    lockedIncomeWallet: number;
+  } {
+    if (!userId) {
+      return { updated: false, levels: 0, giveHelpLocked: 0, lockedIncomeWallet: 0 };
+    }
+
+    const trackerResult = this.repairLockedIncomeTrackerFromTransactions(userId);
+    this.syncLockedIncomeWallet(userId);
+
+    const tracker = this.getUserHelpTracker(userId);
+    const giveHelpLocked = Object.values(tracker.levels).reduce(
+      (sum, state) => sum + (state.lockedAmount || 0),
+      0
+    );
+    const roundedGiveHelpLocked = Math.max(0, Math.round(giveHelpLocked * 100) / 100);
+    const wallet = this.getWallet(userId);
+    if (wallet) {
+      this.updateWallet(userId, {
+        giveHelpLocked: roundedGiveHelpLocked
+      });
+    }
+
+    return {
+      updated: trackerResult.updated,
+      levels: trackerResult.levels,
+      giveHelpLocked: roundedGiveHelpLocked,
+      lockedIncomeWallet: wallet?.lockedIncomeWallet || 0
+    };
+  }
+
+  static rebuildLockedIncomeTrackerForAllUsers(): {
+    usersScanned: number;
+    usersUpdated: number;
+    levelsUpdated: number;
+  } {
+    const users = this.getUsers();
+    let usersUpdated = 0;
+    let levelsUpdated = 0;
+
+    for (const user of users) {
+      const result = this.rebuildLockedIncomeTracker(user.id);
+      if (result.updated) {
+        usersUpdated += 1;
+        levelsUpdated += result.levels;
+      }
+    }
+
+    return {
+      usersScanned: users.length,
+      usersUpdated,
+      levelsUpdated
+    };
+  }
+
   // ==================== HELP TRACKERS ====================
   static getHelpTrackers(): UserHelpTracker[] {
     return this.getCached<UserHelpTracker[]>(DB_KEYS.HELP_TRACKERS, []);
@@ -3483,6 +5655,58 @@ class Database {
     this.setCached(DB_KEYS.MATRIX_PENDING_CONTRIBUTIONS, items);
   }
 
+  private static dedupePendingMatrixContributions(): void {
+    const items = this.getPendingMatrixContributions();
+    if (items.length <= 1) return;
+
+    const getTime = (item: PendingMatrixContribution) => {
+      const parsed = new Date(item.createdAt || item.completedAt || '').getTime();
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const grouped = new Map<string, PendingMatrixContribution[]>();
+    for (const item of items) {
+      const key = `${item.fromUserId}|${item.toUserId}|${item.level}`;
+      const bucket = grouped.get(key) || [];
+      bucket.push(item);
+      grouped.set(key, bucket);
+    }
+
+    const deduped: PendingMatrixContribution[] = [];
+    let changed = false;
+
+    for (const bucket of grouped.values()) {
+      if (bucket.length === 1) {
+        deduped.push(bucket[0]);
+        continue;
+      }
+
+      changed = true;
+      const completed = bucket
+        .filter((item) => item.status === 'completed')
+        .sort((a, b) => getTime(a) - getTime(b));
+      if (completed.length > 0) {
+        deduped.push(completed[0]);
+        continue;
+      }
+
+      const pending = bucket
+        .filter((item) => item.status === 'pending')
+        .sort((a, b) => getTime(a) - getTime(b));
+      if (pending.length > 0) {
+        deduped.push(pending[0]);
+        continue;
+      }
+
+      deduped.push(bucket.sort((a, b) => getTime(a) - getTime(b))[0]);
+    }
+
+    if (changed) {
+      deduped.sort((a, b) => getTime(a) - getTime(b));
+      this.savePendingMatrixContributions(deduped);
+    }
+  }
+
   private static enqueuePendingMatrixContribution(
     fromUserId: string,
     toUserId: string,
@@ -3511,6 +5735,7 @@ class Database {
 
   static processPendingMatrixContributionsForUser(fromUserId: string, limit?: number): void {
     if (!fromUserId) return;
+    this.dedupePendingMatrixContributions();
 
     // Build an ordered list of IDs to process (snapshot of pending items for this user).
     const initialItems = this.getPendingMatrixContributions();
@@ -3635,7 +5860,7 @@ class Database {
 
     for (const [senderId, items] of bySender) {
       const sender = this.getUserById(senderId);
-      if (!sender || !sender.isActive || sender.accountStatus !== 'active') continue;
+      if (!sender || !this.isNetworkActiveUser(sender)) continue;
 
       const tracker = this.getUserHelpTracker(senderId);
       const wallet = this.getWallet(senderId);
@@ -3702,7 +5927,7 @@ class Database {
 
     const recipient = this.getUserById(item.toUserId);
     if (!recipient) return 'Recipient user not found.';
-    if (!recipient.isActive || recipient.accountStatus !== 'active') {
+    if (!this.isNetworkActiveUser(recipient)) {
       return 'Recipient account is inactive or blocked.';
     }
 
@@ -3712,7 +5937,7 @@ class Database {
     const sender = item.fromUserId ? this.getUserById(item.fromUserId) : undefined;
     if (item.fromUserId && !sender) return 'Sender user not found.';
     if (!sender) return null;
-    if (!sender.isActive || sender.accountStatus !== 'active') {
+    if (!this.isNetworkActiveUser(sender)) {
       return 'Sender account is inactive or blocked.';
     }
 
@@ -3989,12 +6214,20 @@ class Database {
     return total;
   }
 
+  static isNetworkActiveUser(user?: User | null): boolean {
+    if (!user) return false;
+    if (user.accountStatus === 'temp_blocked' || user.accountStatus === 'permanent_blocked') {
+      return true;
+    }
+    if (user.accountStatus !== 'active') return false;
+    return !!user.isActive || user.deactivationReason === 'direct_referral_deadline';
+  }
+
   static getEffectiveDirectCount(user: User): number {
     const computedDirect = this.getUsers().filter((member) =>
       !member.isAdmin
       && member.sponsorId === user.userId
-      && member.isActive
-      && member.accountStatus === 'active'
+      && this.isNetworkActiveUser(member)
     ).length;
     return Math.max(user.directCount || 0, computedDirect);
   }
@@ -4246,9 +6479,23 @@ class Database {
       .filter((t) => t.userId === userId)
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
-    const consumeTxDerivedLockedAcrossLevels = (preferredLevel: number, amount: number) => {
+    const consumeTxDerivedLockedAcrossLevels = (preferredLevel: number, amount: number, allowCrossLevel: boolean) => {
       let remaining = Math.max(0, amount);
       if (remaining <= 0) return;
+
+      if (!allowCrossLevel) {
+        // Strict rule: only consume locked income from the same level.
+        const level = preferredLevel;
+        const slot = ensureTxLevel(level);
+        const usedQualification = Math.min(Math.max(0, slot.qualification), remaining);
+        slot.qualification -= usedQualification;
+        remaining -= usedQualification;
+
+        if (remaining <= 0) return;
+        const usedFirstTwo = Math.min(Math.max(0, slot.firstTwo), remaining);
+        slot.firstTwo -= usedFirstTwo;
+        return;
+      }
 
       const levels = Array.from(txLevelMap.keys())
         .filter((n) => Number.isInteger(n) && n >= 1 && n <= helpDistributionTable.length)
@@ -4257,8 +6504,7 @@ class Database {
         ? [preferredLevel, ...levels.filter((l) => l !== preferredLevel)]
         : levels;
 
-      // Match backend locked-income consumption order:
-      // first qualification-lock, then first-two lock.
+      // Legacy behavior: consume across levels to cover the give-help amount.
       for (const level of ordered) {
         if (remaining <= 0) break;
         const slot = ensureTxLevel(level);
@@ -4293,7 +6539,9 @@ class Database {
       }
 
       if (tx.type === 'give_help' && desc.includes('from locked income')) {
-        consumeTxDerivedLockedAcrossLevels(level, Math.abs(tx.amount));
+        const allowCrossLevel = this.shouldUseLegacyLockedConsumption(tx);
+        const sourceLevel = this.getLockedIncomeSourceLevel(tx, level);
+        consumeTxDerivedLockedAcrossLevels(sourceLevel, Math.abs(tx.amount), allowCrossLevel);
       }
     }
 
@@ -4427,10 +6675,11 @@ class Database {
       return Math.min(2, receiveEvents);
     }
 
-    const observed = this.getTransactions().filter((tx) =>
+    const txs = this.getTransactions();
+    const observed = txs.filter((tx) =>
       tx.userId === userId
       && tx.type === 'receive_help'
-      && tx.amount > 0
+      && this.getUnsettledLockedReceiveEffectiveAmount(tx, txs) > 0
       && this.isLockedFirstTwoReceiveDescription(tx.description, level)
     ).length;
     return Math.min(2, observed);
@@ -4439,15 +6688,38 @@ class Database {
   private static getObservedReceiveEventCount(userId: string, level: number): number {
     // Count only real receive-help events for the level.
     // Exclude release events because they are wallet unlock bookkeeping, not new receives.
-    return this.getTransactions().filter((tx) => {
-      if (tx.userId !== userId) return false;
-      if (tx.type !== 'receive_help') return false;
-      if (!(tx.amount > 0)) return false;
-      const txLevel = Number(tx.level);
-      if (!Number.isFinite(txLevel) || txLevel !== level) return false;
-      if (this.isReleasedLockedReceiveDescription(tx.description, level)) return false;
-      return true;
-    }).length;
+    // Also collapse near-identical duplicate receive rows from the same sender/level/amount
+    // so accidental duplicate credits do not block legitimate future help routing.
+    const DUPLICATE_WINDOW_MS = 2 * 60 * 1000;
+    const allTransactions = this.getTransactions();
+    const relevant = allTransactions
+      .filter((tx) => {
+        if (tx.userId !== userId) return false;
+        if (tx.type !== 'receive_help') return false;
+        if (!(this.getUnsettledLockedReceiveEffectiveAmount(tx, allTransactions) > 0)) return false;
+        const txLevel = Number(tx.level);
+        if (!Number.isFinite(txLevel) || txLevel !== level) return false;
+        if (this.isReleasedLockedReceiveDescription(tx.description, level)) return false;
+        return true;
+      })
+      .sort((a, b) => this.getTransactionTime(a) - this.getTransactionTime(b));
+
+    const seen = new Map<string, number>();
+    let count = 0;
+
+    for (const tx of relevant) {
+      const effectiveAmount = this.getUnsettledLockedReceiveEffectiveAmount(tx, allTransactions);
+      const key = `${tx.fromUserId || ''}__${Math.abs(Number(effectiveAmount || 0)).toFixed(2)}__${level}`;
+      const txTime = this.getTransactionTime(tx);
+      const lastSeenTime = seen.get(key);
+      if (lastSeenTime !== undefined && Math.abs(txTime - lastSeenTime) <= DUPLICATE_WINDOW_MS) {
+        continue;
+      }
+      seen.set(key, txTime);
+      count += 1;
+    }
+
+    return count;
   }
 
   private static canReceiveAtLevel(userId: string, level: number): boolean {
@@ -4477,8 +6749,7 @@ class Database {
 
       if (depth === level) {
         if (
-          upline.isActive
-          && upline.accountStatus === 'active'
+          this.isNetworkActiveUser(upline)
           && this.canReceiveAtLevel(upline.id, level)
         ) {
           return upline;
@@ -4575,7 +6846,7 @@ class Database {
           });
         }
 
-      const lockedGiveDesc = `Auto give help at level ${recipientLevel} from locked income to Upline`;
+      const lockedGiveDesc = `Auto give help at level ${recipientLevel} from locked income to safety pool (no qualified upline)`;
       queueGiveTx('safety_pool', {
         amount: safetyAmount,
         level: recipientLevel,
@@ -4962,7 +7233,7 @@ class Database {
     options: MatrixHelpEventOptions = {}
   ): boolean {
     const user = this.getUserById(userId);
-    if (!user || !user.isActive || user.accountStatus !== 'active') return false;
+    if (!user || !this.isNetworkActiveUser(user)) return false;
     const fromUser = fromUserId ? this.getUserById(fromUserId) : undefined;
     if (!fromUserId || !fromUser) {
       console.warn(`[HELP-DEBUG] Level ${level}: missing or invalid sender for ${user.userId}.`);
@@ -5001,7 +7272,7 @@ class Database {
     if (fromUser && !options.skipFromWalletDebit) {
       const fromWallet = this.getWallet(fromUser.id);
       if (!fromWallet) return false;
-      if (!fromUser.isActive || fromUser.accountStatus !== 'active') return false;
+      if (!this.isNetworkActiveUser(fromUser)) return false;
 
       const fromTracker = this.getUserHelpTracker(fromUser.id);
       // Source lock level is one step behind the recipient matrix depth.
@@ -5239,6 +7510,7 @@ class Database {
     this.saveUserHelpTracker(tracker);
     this.syncUserAchievements(user.id);
     this.processPendingMatrixContributionsForUser(user.id);
+    this.attemptAutoLockedHelpSettlement(user.id);
 
     if (fromUser && !options.skipFromWalletDebit) {
       try {
@@ -5281,7 +7553,7 @@ class Database {
     tracker.levels[key] = state;
     this.saveUserHelpTracker(tracker);
 
-    if (recipient && (!recipient.isActive || recipient.accountStatus !== 'active')) {
+    if (recipient && !this.isNetworkActiveUser(recipient)) {
       const levelData = helpDistributionTable[level - 1];
       const amount = levelData?.perUserHelp || 0;
       let diverted = false;
@@ -5293,7 +7565,7 @@ class Database {
           diverted = true;
         } else {
           const sender = this.getUserById(fromUserId);
-          if (sender && sender.isActive && sender.accountStatus === 'active') {
+          if (sender && this.isNetworkActiveUser(sender)) {
             const senderWallet = this.getWallet(sender.id);
             if (senderWallet) {
               const debitLevel = Math.max(1, level - 1);
@@ -5549,6 +7821,30 @@ class Database {
     return false;
   }
 
+  static attemptAutoLockedHelpSettlement(userId: string): void {
+    if (!userId || this.remoteSyncSuspendDepth > 0 || this._bulkRebuildMode) return;
+    if (this._autoLockedHelpProcessingUsers.has(userId)) return;
+    if (!this.hasLockedIncomeAutoProcessingWork(userId)) return;
+
+    this._autoLockedHelpProcessingUsers.add(userId);
+    try {
+      this.reconcileLockedIncomeState(userId);
+      this.dedupePendingMatrixContributions();
+      this.processPendingMatrixContributionsForUser(userId);
+      this.releaseLockedGiveHelp(userId);
+      this.releaseLockedReceiveHelp(userId);
+
+      if (this.hasLockedIncomeAutoProcessingWork(userId)) {
+        this.sweepPendingContributions(3);
+        this.processPendingMatrixContributionsForUser(userId);
+        this.releaseLockedGiveHelp(userId);
+        this.releaseLockedReceiveHelp(userId);
+      }
+    } finally {
+      this._autoLockedHelpProcessingUsers.delete(userId);
+    }
+  }
+
   static releaseLockedReceiveHelp(userId: string): void {
     const user = this.getUserById(userId);
     if (!user) return;
@@ -5655,6 +7951,7 @@ class Database {
     if (this.remoteSyncSuspendDepth === 0) {
       this.sweepPendingContributions();
     }
+    this.attemptAutoLockedHelpSettlement(fromUserId);
   }
 
 
@@ -5662,6 +7959,9 @@ class Database {
     const wallet: Wallet = {
       userId,
       depositWallet: 0,
+      fundRecoveryDue: 0,
+      fundRecoveryRecoveredTotal: 0,
+      fundRecoveryReason: null,
       pinWallet: 0,
       incomeWallet: 0,
       royaltyWallet: 0,
@@ -5693,8 +7993,60 @@ class Database {
       return existingWallet;
     }
 
-    wallets[index] = { ...existingWallet, ...updates };
+    const mergedWallet = { ...existingWallet, ...updates };
+    const depositIncrease = Math.max(0, Number(mergedWallet.depositWallet || 0) - Number(existingWallet.depositWallet || 0));
+    const incomeIncrease = Math.max(0, Number(mergedWallet.incomeWallet || 0) - Number(existingWallet.incomeWallet || 0));
+    const recoveryDueBefore = Math.max(0, Number(existingWallet.fundRecoveryDue || 0));
+
+    const recoveryReason = String(existingWallet.fundRecoveryReason || 'unsupported direct PIN buys').trim() || 'unsupported direct PIN buys';
+    const recoveryEvents: Array<{ wallet: 'fund' | 'income'; amount: number }> = [];
+
+    if ((depositIncrease > 0.0001 || incomeIncrease > 0.0001) && recoveryDueBefore > 0.0001) {
+      let remainingDue = recoveryDueBefore;
+
+      if (depositIncrease > 0.0001 && remainingDue > 0.0001) {
+        const recoveryAmount = Math.min(depositIncrease, remainingDue);
+        mergedWallet.depositWallet = Math.round(((mergedWallet.depositWallet || 0) - recoveryAmount) * 100) / 100;
+        recoveryEvents.push({ wallet: 'fund', amount: recoveryAmount });
+        remainingDue = Math.round((remainingDue - recoveryAmount) * 100) / 100;
+      }
+
+      if (incomeIncrease > 0.0001 && remainingDue > 0.0001) {
+        const recoveryAmount = Math.min(incomeIncrease, remainingDue);
+        mergedWallet.incomeWallet = Math.round(((mergedWallet.incomeWallet || 0) - recoveryAmount) * 100) / 100;
+        recoveryEvents.push({ wallet: 'income', amount: recoveryAmount });
+        remainingDue = Math.round((remainingDue - recoveryAmount) * 100) / 100;
+      }
+
+      const recoveredTotal = recoveryEvents.reduce((sum, event) => sum + event.amount, 0);
+      mergedWallet.fundRecoveryDue = remainingDue;
+      mergedWallet.fundRecoveryRecoveredTotal = Math.round(((existingWallet.fundRecoveryRecoveredTotal || 0) + recoveredTotal) * 100) / 100;
+      if (remainingDue <= 0.0001) {
+        mergedWallet.fundRecoveryReason = null;
+      } else {
+        mergedWallet.fundRecoveryReason = recoveryReason;
+      }
+    }
+
+    wallets[index] = mergedWallet;
     this.saveWallets(wallets);
+    if (recoveryEvents.length > 0 && !this._bulkRebuildMode) {
+      const remainingDue = Math.max(0, wallets[index].fundRecoveryDue || 0);
+      for (const event of recoveryEvents) {
+        this.addToSafetyPool(event.amount, userId, `Recovery from ${recoveryReason} via ${event.wallet} wallet credit`);
+        this.createTransaction({
+          id: generateEventId('tx', `fund_recovery_auto_${event.wallet}`),
+          userId,
+          type: 'fund_recovery',
+          amount: -event.amount,
+          status: 'completed',
+          description: `Auto-deducted from ${event.wallet} wallet credit toward admin recovery due for ${recoveryReason}. Remaining recovery due: $${remainingDue.toFixed(2)}`,
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          adminReason: recoveryReason
+        });
+      }
+    }
     return wallets[index];
   }
 
@@ -5776,7 +8128,7 @@ class Database {
     } catch (_e) { /* sessionStorage may be unavailable */ }
 
     const user = this.getUserById(userId);
-    if (!user || !user.isActive || !user.activatedAt) {
+    if (!user || !this.isNetworkActiveUser(user) || !user.activatedAt) {
       return { deducted: false, pending: false, alreadyCurrent: true };
     }
 
@@ -6363,6 +8715,7 @@ class Database {
       file_type: String(raw?.file_type || raw?.fileType || ''),
       file_size: Number(raw?.file_size ?? raw?.fileSize ?? 0) || 0,
       data_url: String(raw?.data_url || raw?.dataUrl || ''),
+      file_url: String(raw?.file_url || raw?.fileUrl || ''),
       uploaded_by: String(raw?.uploaded_by || raw?.uploadedBy || fallbackUploadedBy || ''),
       uploaded_at: String(raw?.uploaded_at || raw?.uploadedAt || new Date().toISOString()),
       message_id: String(raw?.message_id || raw?.messageId || messageId || '')
@@ -6381,7 +8734,7 @@ class Database {
       message: String(raw?.message || ''),
       attachments: rawAttachments
         .map((item: any) => this.normalizeSupportAttachment(item, fallbackUserId, messageId))
-        .filter((item: SupportTicketAttachment) => item.data_url),
+        .filter((item: SupportTicketAttachment) => item.data_url || item.file_url),
       created_at: String(raw?.created_at || raw?.createdAt || new Date().toISOString()),
       edited_at: raw?.edited_at || raw?.editedAt ? String(raw?.edited_at || raw?.editedAt) : undefined,
       edited_by: raw?.edited_by === 'admin' ? 'admin' : raw?.edited_by === 'user' ? 'user' : undefined
@@ -6400,12 +8753,12 @@ class Database {
       const topLevelAttachmentsRaw = Array.isArray(ticket?.attachments) ? ticket.attachments : [];
       const topLevelAttachments = topLevelAttachmentsRaw
         .map((item: any) => this.normalizeSupportAttachment(item, fallbackUserId))
-        .filter((item: SupportTicketAttachment) => item.data_url);
+        .filter((item: SupportTicketAttachment) => item.data_url || item.file_url);
 
       const messageAttachments = messages.flatMap((msg: SupportTicketMessage) => msg.attachments);
       const attachmentsById = new Map<string, SupportTicketAttachment>();
       [...topLevelAttachments, ...messageAttachments].forEach((attachment) => {
-        if (attachment.data_url) attachmentsById.set(attachment.id, attachment);
+        if (attachment.data_url || attachment.file_url) attachmentsById.set(attachment.id, attachment);
       });
 
       const lastAdminMessage = [...messages].reverse().find((msg: SupportTicketMessage) => msg.sender_type === 'admin');
@@ -6463,7 +8816,7 @@ class Database {
 
     const attachments = (params.attachments || [])
       .map((attachment) => this.normalizeSupportAttachment(attachment, params.user_id, messageId))
-      .filter((attachment) => attachment.data_url);
+      .filter((attachment) => attachment.data_url || attachment.file_url);
 
     const initialMessage: SupportTicketMessage = {
       id: messageId,
@@ -6527,7 +8880,7 @@ class Database {
     const messageId = generateEventId('msg', params.sender_type === 'admin' ? 'support_admin' : 'support_user');
     const attachments = (params.attachments || [])
       .map((attachment) => this.normalizeSupportAttachment(attachment, params.sender_user_id, messageId))
-      .filter((attachment) => attachment.data_url);
+      .filter((attachment) => attachment.data_url || attachment.file_url);
 
     const newMessage: SupportTicketMessage = {
       id: messageId,
@@ -7093,6 +9446,124 @@ class Database {
     return false;
   }
 
+  static async forceRemoteSyncKeysNow(
+    keys: Iterable<string>,
+    options?: {
+      destructive?: boolean;
+      force?: boolean;
+      timeoutMs?: number;
+      maxAttempts?: number;
+      retryDelayMs?: number;
+    }
+  ): Promise<boolean> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return false;
+    }
+
+    const targetKeys = Array.from(new Set(Array.from(keys || []).filter((key) => this.REMOTE_SYNC_KEYS.has(key))));
+    if (targetKeys.length === 0) {
+      return true;
+    }
+
+    if (this.remoteSyncTimer) {
+      clearTimeout(this.remoteSyncTimer);
+      this.remoteSyncTimer = null;
+    }
+
+    while (this.remoteSyncInFlight) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    this.remoteSyncQueued = false;
+    this.remoteSyncPending = false;
+    this.markSyncing(`Syncing ${targetKeys.length} data key${targetKeys.length === 1 ? '' : 's'} to server`);
+
+    const maxAttempts = Math.max(1, Number(options?.maxAttempts ?? 2));
+    const retryDelayMs = Math.max(100, Number(options?.retryDelayMs ?? 300));
+    const timeoutMs = Math.max(1500, Number(options?.timeoutMs ?? this.REMOTE_SYNC_REQUEST_TIMEOUT_MS));
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let finalUpdatedAt = this.remoteStateUpdatedAt;
+      let anyFailed = false;
+
+      try {
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+
+        try {
+          for (const key of targetKeys) {
+            const val = this.getStorageItem(key);
+            const isObj = key === 'mlm_safety_pool' || key === 'mlm_settings';
+            const payload = {
+              state: {
+                [key]: typeof val === 'string' ? val : (isObj ? '{}' : '[]')
+              },
+              baseUpdatedAt: finalUpdatedAt
+            };
+
+            const endpointUrl = this.getRemoteSyncWriteEndpoint(options);
+            const separator = endpointUrl.includes('?') ? '&' : '?';
+            const finalEndpoint = `${endpointUrl}${separator}chunk=1`;
+
+            console.log(`[DB Sync Debug] Key ${key} -> ${finalEndpoint}`);
+            console.log(`[DB Sync Debug] Using baseUpdatedAt: ${finalUpdatedAt}`);
+
+            const response = await fetch(finalEndpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+              signal: controller?.signal
+            });
+
+            if (!response.ok) {
+              const errText = await response.text().catch(() => '');
+              console.error(`[DB Sync Error] HTTP ${response.status} from backend for ${key}. Body: ${errText}`);
+
+              if (response.status === 409 && attempt < maxAttempts) {
+                console.warn(`[DB Sync] Key ${key} rejected due to stale snapshot. Re-hydrating from backend and retrying.`);
+                anyFailed = true;
+                break;
+              }
+              throw new Error(`Remote sync failed with HTTP ${response.status}`);
+            }
+
+            const respPayload = await response.json() as { updatedAt?: unknown };
+            if (typeof respPayload?.updatedAt === 'string') {
+              finalUpdatedAt = respPayload.updatedAt;
+            }
+          }
+        } finally {
+          clearTimeout(timeout);
+        }
+
+        if (anyFailed) {
+          await this.hydrateFromServer();
+          continue;
+        }
+
+        this.remoteStateUpdatedAt = finalUpdatedAt;
+        for (const key of targetKeys) {
+          this.remoteSyncDirtyKeys.delete(key);
+        }
+        if (this.remoteSyncDirtyKeys.size > 0) {
+          this.markSyncPending();
+        } else {
+          this.markSynced('All changes synced');
+        }
+        return true;
+      } catch (e) {
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          continue;
+        }
+      }
+    }
+
+    console.warn(`[DB Sync] Failed to force-push selected keys to backend: ${targetKeys.join(', ')}`);
+    this.markOffline('Could not sync selected data to backend. Retrying automatically.');
+    return false;
+  }
+
   static async ensureFreshData(options?: {
     keys?: Iterable<string>;
     timeoutMs?: number;
@@ -7130,6 +9601,27 @@ class Database {
     }
   }
 
+  static getRegistrationFreshDataKeys(): string[] {
+    return [
+      DB_KEYS.USERS,
+      DB_KEYS.PINS,
+      DB_KEYS.MATRIX,
+      DB_KEYS.ANNOUNCEMENTS
+    ];
+  }
+
+  static getPinFreshDataKeys(): string[] {
+    return [DB_KEYS.PINS];
+  }
+
+  static getTransactionFreshDataKeys(): string[] {
+    return [DB_KEYS.TRANSACTIONS];
+  }
+
+  private static hasHydratedRemoteKey(key: string): boolean {
+    return this.hydratedRemoteKeys.has(key);
+  }
+
   private static normalizeTransactionRecord(tx: Transaction): Transaction {
     const normalizedType = this.normalizeTransactionType((tx as any).type);
     let nextTx: Transaction = tx;
@@ -7151,12 +9643,65 @@ class Database {
   static getTransactions(): Transaction[] {
     const transactions: Transaction[] = this.getCached<Transaction[]>(DB_KEYS.TRANSACTIONS, []);
     let changed = false;
+    const duplicateGiveMismatchRows = this.buildDuplicateLockedGiveHelpMismatchRows(transactions);
+    const referralMismatchRows = this.buildReferralIncomeMismatchRowsFromTransactions(transactions);
 
     for (const tx of transactions) {
       const normalized = this.normalizeTransactionRecord(tx);
       if (normalized !== tx) {
         Object.assign(tx, normalized);
         changed = true;
+      }
+      if (
+        tx.type === 'fund_recovery'
+        && tx.status === 'completed'
+        && tx.amount < 0
+      ) {
+        const desc = String(tx.description || '');
+        const oldGenericFund = /^Admin debited from fund wallet to recover duplicate matrix give-help credits\./i.test(desc);
+        const oldGenericIncome = /^Admin debited from income wallet to recover duplicate matrix give-help credits\./i.test(desc);
+        const oldGenericReferralFund = /^Admin debited from fund wallet to recover duplicate referral income credits\b/i.test(desc);
+        const oldGenericReferralIncome = /^Admin debited from income wallet to recover duplicate referral income credits\b/i.test(desc);
+        if (oldGenericFund || oldGenericIncome) {
+          const walletLabel = oldGenericIncome ? 'income' : 'fund';
+          const matchingMismatch = duplicateGiveMismatchRows.find((row) =>
+            this.transactionRefMatchesUser(tx.userId, this.getUserByUserId(row.recipientUserId))
+            && Math.abs(Math.abs(Number(tx.amount || 0)) - row.extraCreditedAmount) <= 0.009
+          );
+          if (matchingMismatch) {
+            const nextDescription = `Admin debited from ${walletLabel} wallet to recover duplicate give-help credits of ${matchingMismatch.senderName} (${matchingMismatch.senderUserId}). Remaining recovery due: $0.00`;
+            if (tx.description !== nextDescription) {
+              tx.description = nextDescription;
+              changed = true;
+            }
+          }
+        }
+        if (oldGenericReferralFund || oldGenericReferralIncome) {
+          const walletLabel = oldGenericReferralIncome ? 'income' : 'fund';
+          const remainingDueMatch = desc.match(/Remaining recovery due:\s*\$([0-9]+(?:\.[0-9]{1,2})?)/i);
+          const remainingDue = remainingDueMatch ? Math.round(Number(remainingDueMatch[1]) * 100) / 100 : 0;
+          const recoveredAmount = Math.round(Math.abs(Number(tx.amount || 0)) * 100) / 100;
+          const targetTotal = Math.round((recoveredAmount + remainingDue) * 100) / 100;
+          const sponsorMatches = referralMismatchRows.filter((row) =>
+            this.transactionRefMatchesUser(tx.userId, this.getUserByUserId(row.sponsorUserId))
+          );
+          const matchingMismatch = sponsorMatches.find((row) =>
+            Math.abs((row.extraCreditedAmount || 0) - targetTotal) <= 0.009
+          ) || (sponsorMatches.length === 1 ? sponsorMatches[0] : undefined);
+
+          if (matchingMismatch) {
+            const recoveryReason = this.buildReferralMismatchRecoveryReason(matchingMismatch);
+            const nextDescription = `Admin debited from ${walletLabel} wallet to recover ${recoveryReason}. Remaining recovery due: $${remainingDue.toFixed(2)}`;
+            if (tx.description !== nextDescription) {
+              tx.description = nextDescription;
+              changed = true;
+            }
+            if (String(tx.adminReason || '').trim() !== recoveryReason) {
+              tx.adminReason = recoveryReason;
+              changed = true;
+            }
+          }
+        }
       }
       if (tx.type !== 'receive_help') continue;
       if (!tx.fromUserId || !tx.level) continue;
@@ -7183,11 +9728,106 @@ class Database {
     this.setCached(DB_KEYS.TRANSACTIONS, normalized);
   }
 
+  private static findDuplicateSensitiveTransaction(
+    candidate: Transaction,
+    transactions: Transaction[]
+  ): Transaction | undefined {
+    const DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
+    const candidateTime = this.getTransactionTime(candidate);
+    const candidateLevel = this.resolveTransactionLevel(candidate) || Number(candidate.level) || 0;
+    const candidateAmount = Math.abs(Number((candidate.displayAmount ?? candidate.amount) || 0));
+
+    if (candidate.type === 'direct_income' && candidate.status === 'completed' && candidateAmount > 0) {
+      const sponsor = this.resolveUserByRef(candidate.userId);
+      const referral = candidate.fromUserId ? this.resolveUserByRef(candidate.fromUserId) : undefined;
+      if (sponsor && referral) {
+        return this.findExistingReferralIncomeCreditTx(sponsor, referral, transactions);
+      }
+
+      const candidateDescription = this.getCanonicalDirectIncomeDescription(candidate);
+      return transactions.find((tx) =>
+        tx.type === 'direct_income'
+        && tx.status === 'completed'
+        && tx.userId === candidate.userId
+        && this.getCanonicalDirectIncomeDescription(tx) === candidateDescription
+      );
+    }
+
+    if (
+      candidate.type === 'receive_help'
+      && candidate.status === 'completed'
+      && candidateLevel > 0
+      && candidateAmount > 0
+    ) {
+      const recipient = this.resolveUserByRef(candidate.userId);
+      const sender = candidate.fromUserId ? this.resolveUserByRef(candidate.fromUserId) : undefined;
+      return transactions.find((tx) => {
+        if (tx.type !== 'receive_help' || tx.status !== 'completed') return false;
+        if (Number(tx.level) !== candidateLevel) return false;
+
+        const existingAmount = Math.abs(Number((tx.displayAmount ?? tx.amount) || 0));
+        if (Math.abs(existingAmount - candidateAmount) > 0.009) return false;
+
+        if (candidate.sourceGiveHelpTxId && tx.sourceGiveHelpTxId === candidate.sourceGiveHelpTxId) {
+          return true;
+        }
+
+        if (
+          recipient
+          && sender
+          && this.transactionRefMatchesUser(tx.userId, recipient)
+          && (
+            (tx.fromUserId && this.transactionRefMatchesUser(tx.fromUserId, sender))
+            || String(tx.description || '').includes(`(${sender.userId})`)
+          )
+          && Math.abs(this.getTransactionTime(tx) - candidateTime) <= DUPLICATE_WINDOW_MS
+        ) {
+          return true;
+        }
+
+        return false;
+      });
+    }
+
+    if (
+      candidate.type === 'give_help'
+      && candidate.status === 'completed'
+      && Number(candidate.amount || 0) < 0
+      && candidateLevel > 0
+      && candidateAmount > 0
+      && String(candidate.description || '').toLowerCase().includes('from locked income')
+    ) {
+      const sender = this.resolveUserByRef(candidate.userId);
+      const recipient = candidate.toUserId ? this.resolveUserByRef(candidate.toUserId) : undefined;
+      return transactions.find((tx) => {
+        if (tx.type !== 'give_help' || tx.status !== 'completed' || !(Number(tx.amount || 0) < 0)) return false;
+        if (!String(tx.description || '').toLowerCase().includes('from locked income')) return false;
+        if ((this.resolveTransactionLevel(tx) || Number(tx.level) || 0) !== candidateLevel) return false;
+
+        const existingAmount = Math.abs(Number(tx.amount || 0));
+        if (Math.abs(existingAmount - candidateAmount) > 0.009) return false;
+        if (sender && !this.transactionRefMatchesUser(tx.userId, sender)) return false;
+
+        if (recipient) {
+          if (!this.giveHelpTargetsUser(tx, recipient)) return false;
+        } else if (candidate.toUserId && tx.toUserId !== candidate.toUserId) {
+          return false;
+        }
+
+        return Math.abs(this.getTransactionTime(tx) - candidateTime) <= DUPLICATE_WINDOW_MS;
+      });
+    }
+
+    return undefined;
+  }
+
   static getUserTransactions(userId: string): Transaction[] {
+    const candidateIds = this.getRelatedInternalUserIdsForUserRef(userId);
+    this.cleanupMisleadingFundRecoverySetupTransactions(candidateIds);
     const all = this.getTransactions();
     const indexed = all
       .map((tx, index) => ({ tx, index }))
-      .filter(({ tx }) => tx.userId === userId);
+      .filter(({ tx }) => candidateIds.has(tx.userId));
 
     const parseIdTime = (id: string | undefined): number => {
       const match = String(id || '').match(/_(\d{10,13})(?:_|$)/);
@@ -7216,6 +9856,10 @@ class Database {
     if (this._bulkRebuildMode) return transaction;
     const transactions = this.getTransactions();
     const normalized = this.normalizeTransactionRecord(transaction);
+    const existing = this.findDuplicateSensitiveTransaction(normalized, transactions);
+    if (existing) {
+      return existing;
+    }
     transactions.push(normalized);
     this.saveTransactions(transactions);
     return normalized;
@@ -8020,6 +10664,10 @@ class Database {
       merged.directReferralDeadlineDays = 30;
       this.saveSettings(merged);
     }
+    if (!merged.lockedIncomeStrictFrom) {
+      merged.lockedIncomeStrictFrom = new Date().toISOString();
+      this.saveSettings(merged);
+    }
     return merged;
   }
 
@@ -8035,6 +10683,80 @@ class Database {
 
   static savePaymentMethods(methods: PaymentMethod[]): void {
     this.setStorageItem(DB_KEYS.PAYMENT_METHODS, JSON.stringify(methods));
+  }
+
+  static async fetchPaymentMethodsFromBackend(): Promise<PaymentMethod[]> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return this.getPaymentMethods();
+    }
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = setTimeout(() => controller?.abort(), 45000);
+
+    try {
+      const response = await fetch(`${this.REMOTE_SYNC_BASE_URL}/api/payment-methods?t=${Date.now()}`, {
+        method: 'GET',
+        signal: controller?.signal
+      });
+
+      if (!response.ok) {
+        throw new Error(`Payment methods request failed with HTTP ${response.status}`);
+      }
+
+      const payload = await response.json() as { methods?: unknown };
+      const methods = Array.isArray(payload?.methods) ? payload.methods as PaymentMethod[] : [];
+      this.savePaymentMethods(methods);
+      this.hydratedRemoteKeys.add(DB_KEYS.PAYMENT_METHODS);
+      return methods;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  static async savePaymentMethodsToBackend(methods: PaymentMethod[]): Promise<boolean> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      this.savePaymentMethods(methods);
+      return false;
+    }
+
+    const normalized = Array.isArray(methods) ? methods : [];
+    this.savePaymentMethods(normalized);
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = setTimeout(() => controller?.abort(), 30000);
+
+    try {
+      const response = await fetch(`${this.REMOTE_SYNC_BASE_URL}/api/payment-methods`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ methods: normalized }),
+        signal: controller?.signal
+      });
+
+      if (!response.ok) {
+        throw new Error(`Payment methods save failed with HTTP ${response.status}`);
+      }
+
+      const payload = await response.json() as { updatedAt?: unknown };
+      if (typeof payload?.updatedAt === 'string') {
+        this.remoteStateUpdatedAt = payload.updatedAt;
+      }
+      try {
+        const echoed = await this.fetchPaymentMethodsFromBackend();
+        if (Array.isArray(normalized) && Array.isArray(echoed) && echoed.length !== normalized.length) {
+          throw new Error(`Backend stored ${echoed.length} payment methods instead of ${normalized.length}`);
+        }
+      } catch (verificationError) {
+        throw verificationError instanceof Error
+          ? verificationError
+          : new Error('Payment methods saved, but verification failed');
+      }
+      this.remoteSyncDirtyKeys.delete(DB_KEYS.PAYMENT_METHODS);
+      this.hydratedRemoteKeys.add(DB_KEYS.PAYMENT_METHODS);
+      return true;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   static addPaymentMethod(method: PaymentMethod): void {
@@ -8541,6 +11263,9 @@ class Database {
         ...existing,
         userId: mappedUserId,
         depositWallet: (existing.depositWallet || 0) + (wallet.depositWallet || 0),
+        fundRecoveryDue: (existing.fundRecoveryDue || 0) + (wallet.fundRecoveryDue || 0),
+        fundRecoveryRecoveredTotal: (existing.fundRecoveryRecoveredTotal || 0) + (wallet.fundRecoveryRecoveredTotal || 0),
+        fundRecoveryReason: existing.fundRecoveryReason || wallet.fundRecoveryReason || null,
         pinWallet: (existing.pinWallet || 0) + (wallet.pinWallet || 0),
         incomeWallet: (existing.incomeWallet || 0) + (wallet.incomeWallet || 0),
         royaltyWallet: (existing.royaltyWallet || 0) + (wallet.royaltyWallet || 0),
@@ -8556,6 +11281,9 @@ class Database {
       mergedWalletByUser.set(user.id, {
         userId: user.id,
         depositWallet: 0,
+        fundRecoveryDue: 0,
+        fundRecoveryRecoveredTotal: 0,
+        fundRecoveryReason: null,
         pinWallet: 0,
         incomeWallet: 0,
         royaltyWallet: 0,
@@ -8989,6 +11717,9 @@ class Database {
       normalizedAdmins.map((admin) => ({
         userId: admin.id,
         depositWallet: 0,
+        fundRecoveryDue: 0,
+        fundRecoveryRecoveredTotal: 0,
+        fundRecoveryReason: null,
         pinWallet: 0,
         incomeWallet: 0,
         royaltyWallet: 0,
@@ -9051,17 +11782,22 @@ class Database {
   // ==================== MARKETPLACE: CATEGORIES ====================
 
   static readonly DEFAULT_MARKETPLACE_CATEGORIES: Omit<MarketplaceCategory, 'id'>[] = [
-    { name: 'Popular Stores', slug: 'popular-stores', icon: 'Star', sortOrder: 1, isActive: true },
-    { name: 'Education', slug: 'education', icon: 'GraduationCap', sortOrder: 2, isActive: true },
-    { name: 'Electronics', slug: 'electronics', icon: 'Laptop', sortOrder: 3, isActive: true },
-    { name: 'Fashion', slug: 'fashion', icon: 'Shirt', sortOrder: 4, isActive: true },
-    { name: 'Finance', slug: 'finance', icon: 'Landmark', sortOrder: 5, isActive: true },
-    { name: 'Accessories & Bags', slug: 'accessories-bags', icon: 'Briefcase', sortOrder: 6, isActive: true },
-    { name: 'Travel', slug: 'travel', icon: 'Plane', sortOrder: 7, isActive: true },
-    { name: 'Medicines', slug: 'medicines', icon: 'Pill', sortOrder: 8, isActive: true },
-    { name: 'Food & Grocery', slug: 'food-grocery', icon: 'UtensilsCrossed', sortOrder: 9, isActive: true },
-    { name: 'Health & Beauty', slug: 'health-beauty', icon: 'Heart', sortOrder: 10, isActive: true },
-    { name: 'Home & Kitchen', slug: 'home-kitchen', icon: 'Home', sortOrder: 11, isActive: true },
+    { name: 'Fashion', slug: 'fashion', icon: 'Handbag', sortOrder: 1, isActive: true },
+    { name: 'Beauty & Skin Care', slug: 'beauty-skin-care', icon: 'SoapDispenserDroplet', sortOrder: 2, isActive: true },
+    { name: 'Jewellery', slug: 'jewellery', icon: 'Gem', sortOrder: 3, isActive: true },
+    { name: 'Kidswear', slug: 'kidswear', icon: 'Baby', sortOrder: 4, isActive: true },
+    { name: 'Toys & Gifts', slug: 'toys-gifts', icon: 'Gift', sortOrder: 5, isActive: true },
+    { name: 'Perfume', slug: 'perfume', icon: 'SprayCan', sortOrder: 6, isActive: true },
+    { name: 'Female Only', slug: 'female-only', icon: 'Venus', sortOrder: 7, isActive: true },
+    { name: 'Men Only', slug: 'men-only', icon: 'Mars', sortOrder: 8, isActive: true },
+    { name: 'Astrology', slug: 'astrology', icon: 'WandSparkles', sortOrder: 9, isActive: true },
+    { name: 'Home & Kitchen', slug: 'home-kitchen', icon: 'CookingPot', sortOrder: 10, isActive: true },
+    { name: 'Health Care & Medicine', slug: 'health-care-medicine', icon: 'Pill', sortOrder: 11, isActive: true },
+    { name: 'Finance', slug: 'finance', icon: 'BadgeCent', sortOrder: 12, isActive: true },
+    { name: 'Gadgets & Accessories', slug: 'gadgets-accessories', icon: 'Smartphone', sortOrder: 13, isActive: true },
+    { name: 'Tour & Travel Booking', slug: 'tour-travel-booking', icon: 'Plane', sortOrder: 14, isActive: true },
+    { name: 'Car & Bike', slug: 'car-bike', icon: 'Car', sortOrder: 15, isActive: true },
+    { name: 'Education', slug: 'education', icon: 'GraduationCap', sortOrder: 16, isActive: true },
   ];
 
   private static normalizeMarketplaceLinks(): {
@@ -9099,9 +11835,14 @@ class Database {
         ...category,
         slug: normalizedSlug,
         id: normalizedId,
+        icon: getMarketplaceCategoryIcon(category.name, normalizedSlug, category.icon || 'ShoppingBag'),
       };
 
-      if (normalizedCategory.slug !== category.slug || normalizedCategory.id !== category.id) {
+      if (
+        normalizedCategory.slug !== category.slug
+        || normalizedCategory.id !== category.id
+        || normalizedCategory.icon !== category.icon
+      ) {
         categoriesChanged = true;
       }
 
@@ -9452,6 +12193,10 @@ class Database {
   // ==================== MARKETPLACE: REDEMPTIONS (Phase 2) ====================
 
   private static ensureMarketplaceRedemptionTransactions(redemptions: RewardRedemption[]): void {
+    if (!this.hasHydratedRemoteKey(DB_KEYS.TRANSACTIONS)) {
+      return;
+    }
+
     let changed = false;
 
     for (const redemption of redemptions) {

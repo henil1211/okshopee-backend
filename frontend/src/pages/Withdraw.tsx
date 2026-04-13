@@ -79,7 +79,11 @@ export default function Withdraw() {
     setIsSendingOtp(false);
     if (result.success) {
       setIsOtpSent(true);
-      toast.success('OTP sent to your registered email');
+      if (result.status === 'pending') {
+        toast.warning(result.message);
+      } else {
+        toast.success(result.message);
+      }
     } else {
       toast.error(result.message);
     }

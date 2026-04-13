@@ -9,20 +9,22 @@ import type { MarketplaceInvoice, MarketplaceRetailer, SupportTicketAttachment }
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import MobileBottomNav from '@/components/MobileBottomNav';
-import { readOptimizedUploadDataUrl } from '@/utils/helpers';
+import { uploadOptimizedFileToBackend } from '@/utils/helpers';
 
 async function toAttachment(file: File, uploadedBy: string): Promise<SupportTicketAttachment> {
-  const dataUrl = await readOptimizedUploadDataUrl(file, {
+  const uploaded = await uploadOptimizedFileToBackend(file, {
+    scope: 'invoice-queries',
     maxDimension: 1800,
     targetBytes: 650 * 1024,
     quality: 0.86
   });
   return {
     id: `support_att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    file_name: file.name,
-    file_type: file.type || 'application/octet-stream',
-    file_size: file.size,
-    data_url: dataUrl,
+    file_name: uploaded.fileName,
+    file_type: uploaded.mimeType || file.type || 'application/octet-stream',
+    file_size: uploaded.sizeBytes || file.size,
+    data_url: '',
+    file_url: uploaded.fileUrl,
     uploaded_by: uploadedBy,
     uploaded_at: new Date().toISOString()
   };
@@ -33,7 +35,9 @@ export default function InvoiceProfitTrackedIncorrectly() {
   const location = useLocation();
   const { user, impersonatedUser, isAuthenticated } = useAuthStore();
   const displayUser = impersonatedUser || user;
-  const queryInvoice = ((location.state as { invoice?: MarketplaceInvoice } | null) ?? null)?.invoice ?? null;
+  const routeState = ((location.state as { invoice?: MarketplaceInvoice; queryType?: string } | null) ?? null);
+  const queryInvoice = routeState?.invoice ?? null;
+  const queryType = routeState?.queryType === 'different_query' ? 'different_query' : 'profit_tracked_incorrectly';
 
   const [helpText, setHelpText] = useState('');
   const [attachment, setAttachment] = useState<SupportTicketAttachment | null>(null);
@@ -68,6 +72,10 @@ export default function InvoiceProfitTrackedIncorrectly() {
     if (!queryInvoice) return '-';
     return queryInvoice.rewardPoints > 0 ? `${queryInvoice.rewardPoints} RP` : 'Pending Review';
   }, [queryInvoice]);
+
+  const pageTitle = queryType === 'different_query'
+    ? 'I have a different query.'
+    : 'My Profit has tracked incorrectly';
 
   const handleAttachmentChange = async (file: File | null) => {
     if (!file || !displayUser) {
@@ -114,9 +122,9 @@ export default function InvoiceProfitTrackedIncorrectly() {
         email: displayUser.email,
         category: 'affiliate_shopping',
         priority: 'medium',
-        subject: `Invoice Query: Profit tracked incorrectly - ${queryInvoice.retailerName}${queryInvoice.orderId ? ` (${queryInvoice.orderId})` : ''}`,
+        subject: `Invoice Query: ${queryType === 'different_query' ? 'Different query' : 'Profit tracked incorrectly'} - ${queryInvoice.retailerName}${queryInvoice.orderId ? ` (${queryInvoice.orderId})` : ''}`,
         message: [
-          'Invoice Query Type: My Profit has tracked incorrectly',
+          `Invoice Query Type: ${queryType === 'different_query' ? 'I have a different query.' : 'My Profit has tracked incorrectly'}`,
           `Retailer: ${queryInvoice.retailerName}`,
           `Order ID: ${queryInvoice.orderId || '-'}`,
           `RP Amount: ${rpAmountLabel}`,
@@ -167,7 +175,7 @@ export default function InvoiceProfitTrackedIncorrectly() {
                 <HelpCircle className="w-5 h-5 text-white" />
               </div>
               <div>
-                <p className="text-white font-semibold">My Profit has tracked incorrectly</p>
+                <p className="text-white font-semibold">{pageTitle}</p>
                 <p className="text-xs text-white/50">{queryInvoice.retailerName}</p>
               </div>
             </div>

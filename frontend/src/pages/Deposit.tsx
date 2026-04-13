@@ -12,8 +12,8 @@ import {
   AlertCircle, Upload, RefreshCw, Bitcoin, 
   ChevronRight, QrCode, LogOut, Maximize2, Download
 } from 'lucide-react';
-import { formatCurrency, copyToClipboard, readOptimizedUploadDataUrl } from '@/utils/helpers';
-import Database from '@/db';
+import { formatCurrency, copyToClipboard, uploadOptimizedFileToBackend } from '@/utils/helpers';
+import Database, { DB_KEYS } from '@/db';
 import type { PaymentMethod, Payment } from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { toast } from 'sonner';
@@ -43,21 +43,59 @@ export default function Deposit() {
   const DEPOSIT_MULTIPLE = 10;
 
   useEffect(() => {
+    let cancelled = false;
+
     if (!isAuthenticated) {
       navigate('/login');
       return;
     }
-    
-    // Load payment methods
-    const methods = Database.getPaymentMethods().filter(m => m.isActive);
-    setPaymentMethods(methods);
-    
-    // Load user payments
-    if (displayUser) {
-      loadWallet(displayUser.id);
-      const payments = Database.getUserPayments(displayUser.id);
-      setUserPayments(payments);
-    }
+
+    const loadDepositData = async () => {
+      let fetchedMethods: PaymentMethod[] = [];
+      try {
+        fetchedMethods = await Database.fetchPaymentMethodsFromBackend();
+      } catch (error) {
+        console.warn('Payment methods fetch failed:', error);
+      }
+
+      const localMethods = Database.getPaymentMethods();
+      const methodsSource = fetchedMethods.length > 0 ? fetchedMethods : localMethods;
+      const methods = methodsSource.filter(m => m.isActive);
+
+      if (cancelled) return;
+
+      setPaymentMethods(methods);
+      setSelectedMethod((previous) => {
+        if (methods.length === 0) return null;
+        if (!previous) return methods[0];
+        return methods.find((method) => method.id === previous.id) || methods[0];
+      });
+
+      try {
+        await Database.ensureFreshData({
+          keys: [DB_KEYS.PAYMENTS],
+          timeoutMs: 10000,
+          maxAttempts: 2,
+          retryDelayMs: 700
+        });
+      } catch (error) {
+        console.warn('Deposit payments refresh failed:', error);
+      }
+
+      if (cancelled) return;
+
+      if (displayUser) {
+        loadWallet(displayUser.id);
+        const payments = Database.getUserPayments(displayUser.id);
+        setUserPayments(payments);
+      }
+    };
+
+    void loadDepositData();
+
+    return () => {
+      cancelled = true;
+    };
   }, [isAuthenticated, displayUser, navigate, loadWallet, syncKey]);
 
   const handleCopy = async (text: string, field: string) => {
@@ -73,12 +111,13 @@ export default function Deposit() {
     const file = e.target.files?.[0];
     if (file) {
       try {
-        const dataUrl = await readOptimizedUploadDataUrl(file, {
+        const uploaded = await uploadOptimizedFileToBackend(file, {
+          scope: 'deposit-proofs',
           maxDimension: 1800,
           targetBytes: 650 * 1024,
           quality: 0.86
         });
-        setScreenshot(dataUrl);
+        setScreenshot(uploaded.fileUrl);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : 'Failed to process screenshot');
       }
@@ -150,6 +189,14 @@ export default function Deposit() {
     toast.success('Logged out successfully');
   };
 
+  const handleBackToDashboard = () => {
+    if (typeof window !== 'undefined') {
+      window.location.assign('/dashboard');
+      return;
+    }
+    navigate('/dashboard');
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'completed':
@@ -186,7 +233,7 @@ export default function Deposit() {
               <Button 
                 variant="ghost" 
                 size="icon"
-                onClick={() => navigate('/dashboard')}
+                onClick={handleBackToDashboard}
                 className="text-white/60 hover:text-white"
               >
                 <ArrowLeft className="w-5 h-5" />

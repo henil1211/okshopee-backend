@@ -31,6 +31,42 @@ function normalizeRemoteRebuildError(payload: Record<string, unknown>, fallback:
       : fallback;
 }
 
+function resolveCanonicalUserForWalletActions(userRef: string): User | undefined {
+  const resolved = Database.getUserById(userRef) || Database.getUserByUserId(userRef);
+  if (!resolved) return undefined;
+  return Database.getUserByUserId(resolved.userId) || resolved;
+}
+
+const WALLET_MAINTENANCE_INTERVAL_MS = 30_000;
+const walletMaintenanceState = new Map<string, {
+  at: number;
+  txCount: number;
+  userCount: number;
+  walletCount: number;
+}>();
+
+function shouldRunWalletMaintenance(userId: string): boolean {
+  const now = Date.now();
+  const snapshot = {
+    txCount: Database.getTransactions().length,
+    userCount: Database.getUsers().length,
+    walletCount: Database.getWallets().length
+  };
+  const previous = walletMaintenanceState.get(userId);
+  const hasStructureChange =
+    !previous
+    || previous.txCount !== snapshot.txCount
+    || previous.userCount !== snapshot.userCount
+    || previous.walletCount !== snapshot.walletCount;
+
+  if (hasStructureChange || !previous || (now - previous.at) >= WALLET_MAINTENANCE_INTERVAL_MS) {
+    walletMaintenanceState.set(userId, { at: now, ...snapshot });
+    return true;
+  }
+
+  return false;
+}
+
 async function createServerStateBackup(params?: {
   prefix?: string;
   source?: string;
@@ -95,7 +131,7 @@ async function dispatchSystemEmail(params: {
   purpose: SystemEmailPurpose;
   metadata?: Record<string, string>;
   timeoutMs?: number;
-}): Promise<{ success: boolean; mode: 'api' | 'local'; error?: string }> {
+}): Promise<{ success: boolean; mode: 'api' | 'local'; error?: string; deliveryState: 'sent' | 'pending' | 'failed' }> {
   const logId = `email_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   Database.createEmailLog({
     id: logId,
@@ -130,10 +166,12 @@ async function dispatchSystemEmail(params: {
   if (apiUrls.length === 0) {
     const message = 'Mail API URL is not configured';
     Database.updateEmailLog(logId, { status: 'failed', provider: 'local', error: message });
-    return { success: false, mode: 'local', error: message };
+    return { success: false, mode: 'local', error: message, deliveryState: 'failed' };
   }
 
   let firstError = '';
+  let hadTimeout = false;
+  let hadNonTimeoutError = false;
   for (const apiUrl of apiUrls) {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timeout = setTimeout(() => controller?.abort(), requestTimeoutMs);
@@ -164,21 +202,33 @@ async function dispatchSystemEmail(params: {
       }
 
       Database.updateEmailLog(logId, { status: 'sent', provider: 'api' });
-      return { success: true, mode: 'api' };
+      return { success: true, mode: 'api', deliveryState: 'sent' };
     } catch (error: unknown) {
+      const isTimeout = error instanceof Error && error.name === 'AbortError';
       const msg =
         error instanceof Error
-          ? (error.name === 'AbortError' ? `Email API timeout after ${requestTimeoutMs}ms` : error.message)
+          ? (isTimeout ? `Email API timeout after ${requestTimeoutMs}ms` : error.message)
           : 'Unknown email error';
+      if (isTimeout) {
+        hadTimeout = true;
+      } else {
+        hadNonTimeoutError = true;
+      }
       if (!firstError) firstError = msg;
     } finally {
       clearTimeout(timeout);
     }
   }
 
+  if (hadTimeout && !hadNonTimeoutError) {
+    const pendingMessage = `Email request timed out after ${requestTimeoutMs}ms, but the OTP may still arrive. Please check inbox/spam before retrying.`;
+    Database.updateEmailLog(logId, { status: 'queued', provider: 'api', error: pendingMessage });
+    return { success: true, mode: 'api', error: pendingMessage, deliveryState: 'pending' };
+  }
+
   const resolvedError = firstError || 'Email API request failed';
   Database.updateEmailLog(logId, { status: 'failed', provider: 'api', error: resolvedError });
-  return { success: false, mode: 'api', error: resolvedError };
+  return { success: false, mode: 'api', error: resolvedError, deliveryState: 'failed' };
 }
 
 // Auth Store - Updated with PIN-based registration
@@ -339,7 +389,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   register: async (userData: RegisterData) => {
-    await Database.ensureFreshData();
+    await Database.ensureFreshData({
+      keys: Database.getRegistrationFreshDataKeys(),
+      timeoutMs: 10000,
+      maxAttempts: 2,
+      retryDelayMs: 700
+    });
 
     const registrationGate = Database.getSensitiveActionSyncGate();
     // Allow registration if sync is just pending/slow; only block when truly offline
@@ -350,21 +405,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const { fullName, email, password, transactionPassword, phone, country, sponsorId, pinCode } = userData;
     const normalizedPhone = normalizePhoneNumber(phone);
 
-    // Check if email exists
-    if (Database.getUserByEmail(email)) {
-      return { success: false, message: 'Email already exists' };
-    }
-
     if (!isValidPhoneNumberForCountry(phone, country)) {
       return { success: false, message: 'Enter a valid mobile number for the selected country' };
     }
 
-    const phoneExists = Database.getUsers().some(
-      (existing) => normalizePhoneNumber(existing.phone) === normalizedPhone
-    );
-    if (phoneExists) {
-      return { success: false, message: 'Mobile number already exists' };
-    }
+    // Duplicate email/phone is allowed (multiple IDs can share contact info).
 
     // Validate PIN - MANDATORY
     if (!pinCode) {
@@ -389,7 +434,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (!sponsor) {
         return { success: false, message: 'Invalid Sponsor ID' };
       }
-      if (!sponsor.isActive || sponsor.accountStatus !== 'active') {
+      if (!Database.isNetworkActiveUser(sponsor)) {
         return { success: false, message: 'Sponsor account is inactive or blocked' };
       }
     }
@@ -525,7 +570,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // Referral income
         if (sponsor) {
           const sponsorWallet = Database.getWallet(sponsor.id);
-          if (sponsorWallet) {
+          const alreadyCredited = Database.hasCompletedReferralIncomeForIdentity({
+            sponsorInternalId: sponsor.id,
+            referredInternalId: createdUser.id,
+            referredUserId: createdUser.userId,
+            fullName: createdUser.fullName,
+            email: createdUser.email,
+            phone: createdUser.phone,
+            referenceTime: createdUser.createdAt
+          });
+          if (sponsorWallet && !alreadyCredited) {
             Database.updateWallet(sponsor.id, {
               incomeWallet: sponsorWallet.incomeWallet + directIncome,
               totalReceived: sponsorWallet.totalReceived + directIncome
@@ -587,17 +641,67 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       return { success: false, message: 'ID creation failed. Please try again after some time.' };
     }
 
+    try {
+      await Database.ensureFreshData({
+        keys: Database.getRegistrationFreshDataKeys(),
+        timeoutMs: 10000,
+        maxAttempts: 2,
+        retryDelayMs: 700
+      });
+    } catch {
+      // Best-effort refresh so we can resolve the final saved user after sync.
+    }
+
+    const canonicalRegisteredUser = (() => {
+      const byInternalId = Database.getUserById(newUser.id);
+      if (byInternalId) {
+        return Database.getUserByUserId(byInternalId.userId) || byInternalId;
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      const candidates = Database.getUsers()
+        .filter((candidate) => (
+          (candidate.email || '').trim().toLowerCase() === normalizedEmail
+          && normalizePhoneNumber(candidate.phone) === normalizedPhone
+          && (candidate.fullName || '').trim().toLowerCase() === fullName.trim().toLowerCase()
+          && (sponsor?.userId ? candidate.sponsorId === sponsor.userId : true)
+        ));
+
+      if (candidates.length === 0) {
+        const byGeneratedUserId = Database.getUserByUserId(newUserId);
+        return byGeneratedUserId || newUser;
+      }
+
+      const matrixUserIds = new Set(Database.getMatrix().map((node) => node.userId));
+      return [...candidates].sort((a, b) => {
+        const aMatrixScore = matrixUserIds.has(a.userId) ? 1 : 0;
+        const bMatrixScore = matrixUserIds.has(b.userId) ? 1 : 0;
+        if (aMatrixScore !== bMatrixScore) return bMatrixScore - aMatrixScore;
+
+        const aCreated = new Date(a.createdAt || 0).getTime();
+        const bCreated = new Date(b.createdAt || 0).getTime();
+        return bCreated - aCreated;
+      })[0];
+    })();
+
+    newUser = canonicalRegisteredUser;
+    newUserId = canonicalRegisteredUser.userId;
+
     const welcomeSubject = 'Welcome To ReferNex';
     const welcomeBody = [
       `Hello ${newUser.fullName},`,
       '',
-      'Your account is now active.',
+      'Welcome to ReferNex. Your account is now active.',
+      '',
       `Name: ${newUser.fullName}`,
       `User ID: ${newUser.userId}`,
-      `Password: ${password}`,
+      `Email: ${newUser.email}`,
+      `Phone: ${newUser.phone}`,
+      '',
+      `Login Password: ${password}`,
       `Transaction Password: ${transactionPassword}`,
       '',
-      'Keep these credentials secure.'
+      'This email is for the User ID shown above. Keep these credentials secure.'
     ].join('\n');
 
     void dispatchSystemEmail({
@@ -678,17 +782,22 @@ export const useWalletStore = create<WalletState>((set, get) => ({
   transactions: [],
 
   loadWallet: (userId: string) => {
-    Database.repairLockedIncomeTrackerFromTransactions(userId);
-    Database.repairIncomeWalletConsistency(userId);
-    Database.repairFundWalletConsistency(userId);
-    Database.repairRoyaltyWalletConsistency(userId);
-    Database.syncLockedIncomeWallet(userId);
+    const canonicalUser = resolveCanonicalUserForWalletActions(userId);
+    const effectiveUserId = canonicalUser?.id || userId;
+    if (shouldRunWalletMaintenance(effectiveUserId)) {
+      Database.recoverMissingReferralIncomeForUser(effectiveUserId);
+      Database.repairLockedIncomeTrackerFromTransactions(effectiveUserId);
+      Database.repairIncomeWalletConsistency(effectiveUserId);
+      Database.repairFundWalletConsistency(effectiveUserId);
+      Database.repairRoyaltyWalletConsistency(effectiveUserId);
+      Database.syncLockedIncomeWallet(effectiveUserId);
+    }
     // Process monthly system fee if due
-    Database.processMonthlySystemFee(userId);
+    Database.processMonthlySystemFee(effectiveUserId);
     // Check direct referral deadline auto-deactivation
-    Database.checkDirectReferralDeadline(userId);
-    const wallet = Database.getWallet(userId);
-    const transactions = Database.getUserTransactions(userId);
+    Database.checkDirectReferralDeadline(effectiveUserId);
+    const wallet = Database.getWallet(effectiveUserId);
+    const transactions = Database.getUserTransactions(effectiveUserId);
     set({ wallet, transactions });
   },
 
@@ -1203,9 +1312,12 @@ export const usePinStore = create<PinState>((set, get) => ({
       return { success: false, message: 'Quantity must be at least 1' };
     }
 
+    const walletOwner = resolveCanonicalUserForWalletActions(userId);
+    const effectiveUserId = walletOwner?.id || userId;
     const settings = Database.getSettings();
     const amount = quantity * settings.pinAmount;
-    const wallet = Database.getWallet(userId);
+    Database.repairFundWalletConsistency(effectiveUserId);
+    const wallet = Database.getWallet(effectiveUserId);
     if (!wallet) {
       return { success: false, message: 'Wallet not found' };
     }
@@ -1215,7 +1327,7 @@ export const usePinStore = create<PinState>((set, get) => ({
       if (wallet.depositWallet < amount) {
         return { success: false, message: 'Insufficient fund wallet balance' };
       }
-      Database.updateWallet(userId, {
+      Database.updateWallet(effectiveUserId, {
         depositWallet: wallet.depositWallet - amount
       });
     } else if (!options?.paymentProof) {
@@ -1224,7 +1336,7 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     Database.createTransaction({
       id: `tx_${Date.now()}_pin_request`,
-      userId,
+      userId: effectiveUserId,
       type: 'pin_purchase',
       amount: paidFromWallet ? -amount : 0,
       status: 'pending',
@@ -1236,7 +1348,7 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     const request: PinPurchaseRequest = {
       id: `ppr_${Date.now()}`,
-      userId,
+      userId: effectiveUserId,
       quantity,
       amount,
       status: 'pending',
@@ -1249,15 +1361,15 @@ export const usePinStore = create<PinState>((set, get) => ({
     };
 
     Database.createPinPurchaseRequest(request);
-    get().loadPurchaseRequests(userId);
-    useWalletStore.getState().loadWallet(userId);
+    get().loadPurchaseRequests(effectiveUserId);
+    useWalletStore.getState().loadWallet(effectiveUserId);
 
     try {
       await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
       await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
-      get().loadPins(userId);
-      get().loadPurchaseRequests(userId);
-      useWalletStore.getState().loadWallet(userId);
+      get().loadPins(effectiveUserId);
+      get().loadPurchaseRequests(effectiveUserId);
+      useWalletStore.getState().loadWallet(effectiveUserId);
     } catch {
       // best-effort sync; UI will show pending sync if offline
     }
@@ -1277,9 +1389,12 @@ export const usePinStore = create<PinState>((set, get) => ({
       return { success: false, message: 'Quantity must be at least 1' };
     }
 
+    const walletOwner = resolveCanonicalUserForWalletActions(userId);
+    const effectiveUserId = walletOwner?.id || userId;
     const settings = Database.getSettings();
     const amount = quantity * settings.pinAmount;
-    const wallet = Database.getWallet(userId);
+    Database.repairFundWalletConsistency(effectiveUserId);
+    const wallet = Database.getWallet(effectiveUserId);
     if (!wallet) {
       return { success: false, message: 'Wallet not found' };
     }
@@ -1289,17 +1404,17 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     const now = new Date().toISOString();
     const adminUser = Database.getUsers().find(u => u.isAdmin);
-    const processedBy = adminUser?.id || userId;
+    const processedBy = adminUser?.id || effectiveUserId;
 
-    Database.updateWallet(userId, {
+    Database.updateWallet(effectiveUserId, {
       depositWallet: wallet.depositWallet - amount
     });
 
-    const pins = Database.generatePins(quantity, userId, processedBy);
+    const pins = Database.generatePins(quantity, effectiveUserId, processedBy);
 
     Database.createTransaction({
       id: `tx_${Date.now()}_pin_direct_buy`,
-      userId,
+      userId: effectiveUserId,
       type: 'pin_purchase',
       amount: -amount,
       status: 'completed',
@@ -1310,7 +1425,7 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     Database.createPinPurchaseRequest({
       id: `ppr_${Date.now()}_direct`,
-      userId,
+      userId: effectiveUserId,
       quantity,
       amount,
       status: 'completed',
@@ -1325,7 +1440,7 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     Database.createNotification({
       id: `notif_${Date.now()}_direct_pin`,
-      userId,
+      userId: effectiveUserId,
       title: 'PIN Purchase Successful',
       message: `${quantity} PIN(s) purchased instantly from fund wallet.`,
       type: 'success',
@@ -1333,16 +1448,16 @@ export const usePinStore = create<PinState>((set, get) => ({
       createdAt: now
     });
 
-    get().loadPins(userId);
-    get().loadPurchaseRequests(userId);
-    useWalletStore.getState().loadWallet(userId);
+    get().loadPins(effectiveUserId);
+    get().loadPurchaseRequests(effectiveUserId);
+    useWalletStore.getState().loadWallet(effectiveUserId);
 
     try {
       await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
       await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
-      get().loadPins(userId);
-      get().loadPurchaseRequests(userId);
-      useWalletStore.getState().loadWallet(userId);
+      get().loadPins(effectiveUserId);
+      get().loadPurchaseRequests(effectiveUserId);
+      useWalletStore.getState().loadWallet(effectiveUserId);
     } catch {
       // best-effort sync; UI will show pending sync if offline
     }
@@ -1425,6 +1540,11 @@ interface AdminState {
     amount: number,
     walletType: 'deposit' | 'income' | 'royalty',
     note?: string
+  ) => Promise<{ success: boolean; message: string }>;
+  reverseRoyaltyFromUser: (
+    userId: string,
+    amount: number,
+    reason: string
   ) => Promise<{ success: boolean; message: string }>;
   bulkCreateUsersWithoutPin: (params: {
     sponsorUserId: string;
@@ -1775,72 +1895,176 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'User wallet not found' };
     }
 
-    if (walletType === 'royalty') {
-      const pool = Database.getSafetyPool();
-      if ((pool.totalAmount || 0) < amount) {
-        return { success: false, message: 'Insufficient safety pool balance for royalty payout' };
-      }
+    const normalizedAmount = Math.round(Number(amount || 0) * 100) / 100;
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+      return { success: false, message: 'Enter a valid amount' };
+    }
 
-      const txMessage = String(note || '').trim() || 'Royalty credited by admin';
-      const poolReason = `Royalty Payout: ${user.fullName} (${user.userId})${txMessage ? ` - ${txMessage}` : ''}`;
+    const pool = Database.getSafetyPool();
+    if ((pool.totalAmount || 0) < normalizedAmount) {
+      return {
+        success: false,
+        message: `Insufficient safety pool balance for ${walletType} wallet transfer`
+      };
+    }
 
-      await Database.runWithLocalStateTransaction(async () => {
-        Database.deductFromSafetyPool(amount, adminUser.id, poolReason);
+    const trimmedNote = String(note || '').trim();
+    const walletLabel = `${walletType} wallet`;
+    const walletActionLabel = walletType === 'royalty'
+      ? 'Royalty payout'
+      : `${walletType === 'deposit' ? 'Deposit' : 'Income'} wallet transfer`;
+    const txDescription = walletType === 'royalty'
+      ? (trimmedNote || 'Royalty credited by admin')
+      : `Admin transfer to ${walletLabel}${trimmedNote ? `: ${trimmedNote}` : ''}`;
+    const poolReason = `${walletActionLabel}: ${user.fullName} (${user.userId})${trimmedNote ? ` - ${trimmedNote}` : ''}`;
+
+    await Database.runWithLocalStateTransaction(async () => {
+      Database.deductFromSafetyPool(normalizedAmount, adminUser.id, poolReason);
+
+      if (walletType === 'royalty') {
         Database.updateWallet(user.id, {
-          royaltyWallet: (wallet.royaltyWallet || 0) + amount,
-          totalReceived: (wallet.totalReceived || 0) + amount
+          royaltyWallet: (wallet.royaltyWallet || 0) + normalizedAmount,
+          totalReceived: (wallet.totalReceived || 0) + normalizedAmount
         });
 
         Database.createTransaction({
           id: `tx_${Date.now()}_admin`,
           userId: user.id,
           type: 'royalty_income',
-          amount,
+          amount: normalizedAmount,
           status: 'completed',
-          description: txMessage,
+          description: txDescription,
           createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString()
+          completedAt: new Date().toISOString(),
+          ...(trimmedNote ? { adminReason: trimmedNote } : {}),
+          processedByAdminUserId: adminUser.id
         });
-      }, {
-        syncOnCommit: true,
-        syncOptions: {
-          full: false,
-          force: true,
-          timeoutMs: 30000,
-          maxAttempts: 3,
-          retryDelayMs: 1500
-        }
-      });
 
-      get().loadStats();
-      return { success: true, message: `Sent $${amount} royalty to user from safety pool` };
-    }
+        return;
+      }
 
-    if (walletType === 'deposit') {
-      Database.updateWallet(user.id, {
-        depositWallet: wallet.depositWallet + amount
-      });
-    } else {
-      Database.updateWallet(user.id, {
-        incomeWallet: wallet.incomeWallet + amount
-      });
-    }
+      if (walletType === 'deposit') {
+        Database.updateWallet(user.id, {
+          depositWallet: wallet.depositWallet + normalizedAmount
+        });
+      } else {
+        Database.updateWallet(user.id, {
+          incomeWallet: wallet.incomeWallet + normalizedAmount
+        });
+      }
 
-    Database.createTransaction({
-      id: `tx_${Date.now()}_admin`,
-      userId: user.id,
-      type: 'admin_credit',
-      amount,
-      status: 'completed',
-      description: `Admin fund addition to ${walletType} wallet`,
-      createdAt: new Date().toISOString(),
-      completedAt: new Date().toISOString()
+      Database.createTransaction({
+        id: `tx_${Date.now()}_admin`,
+        userId: user.id,
+        type: 'admin_credit',
+        amount: normalizedAmount,
+        status: 'completed',
+        description: txDescription,
+        createdAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        ...(trimmedNote ? { adminReason: trimmedNote } : {}),
+        processedByAdminUserId: adminUser.id
+      });
+    }, {
+      syncOnCommit: true,
+      syncOptions: {
+        full: false,
+        force: true,
+        timeoutMs: 30000,
+        maxAttempts: 3,
+        retryDelayMs: 1500
+      }
     });
 
-    Database.deductPendingSystemFee(user.id);
+    if (walletType !== 'royalty') {
+      Database.deductPendingSystemFee(user.id);
+    }
+    get().loadAllTransactions();
     get().loadStats();
 
-    return { success: true, message: `Added $${amount} to user's ${walletType} wallet` };
+    return {
+      success: true,
+      message: walletType === 'royalty'
+        ? `Sent $${normalizedAmount.toFixed(2)} royalty to user from safety pool`
+        : `Sent $${normalizedAmount.toFixed(2)} to user's ${walletLabel} from safety pool`
+    };
+  },
+
+  reverseRoyaltyFromUser: async (userId: string, amount: number, reason: string) => {
+    await Database.ensureFreshData();
+
+    const adminUser = Database.getCurrentUser();
+    if (!adminUser?.isAdmin) {
+      return { success: false, message: 'Only admin can reverse royalty' };
+    }
+
+    const user = Database.getUserByUserId(userId);
+    if (!user) {
+      return { success: false, message: 'User not found' };
+    }
+
+    const wallet = Database.getWallet(user.id);
+    if (!wallet) {
+      return { success: false, message: 'User wallet not found' };
+    }
+
+    const normalizedAmount = Math.round(Number(amount || 0) * 100) / 100;
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
+      return { success: false, message: 'Enter a valid royalty amount' };
+    }
+
+    const royaltyBalance = Math.round(Number(wallet.royaltyWallet || 0) * 100) / 100;
+    if (royaltyBalance < normalizedAmount) {
+      return {
+        success: false,
+        message: `User only has ${royaltyBalance.toFixed(2)} in royalty wallet`
+      };
+    }
+
+    const reversalReason = String(reason || '').trim();
+    if (!reversalReason) {
+      return { success: false, message: 'Reversal reason is required' };
+    }
+
+    const now = new Date().toISOString();
+    const poolReason = `Royalty Reversal: ${user.fullName} (${user.userId}) - ${reversalReason}`;
+
+    await Database.runWithLocalStateTransaction(async () => {
+      Database.updateWallet(user.id, {
+        royaltyWallet: Math.max(0, royaltyBalance - normalizedAmount),
+        totalReceived: Math.max(0, Number(wallet.totalReceived || 0) - normalizedAmount)
+      });
+
+      Database.addToSafetyPool(normalizedAmount, adminUser.id, poolReason);
+
+      Database.createTransaction({
+        id: `tx_${Date.now()}_royalty_reversal`,
+        userId: user.id,
+        type: 'admin_debit',
+        amount: -normalizedAmount,
+        status: 'completed',
+        description: `Admin reversal from royalty wallet: ${reversalReason}`,
+        createdAt: now,
+        completedAt: now,
+        adminReason: reversalReason,
+        processedByAdminUserId: adminUser.id
+      });
+    }, {
+      syncOnCommit: true,
+      syncOptions: {
+        full: false,
+        force: true,
+        timeoutMs: 30000,
+        maxAttempts: 3,
+        retryDelayMs: 1500
+      }
+    });
+
+    get().loadAllUsers();
+    get().loadAllTransactions();
+    get().loadStats();
+
+    return { success: true, message: `Took back $${normalizedAmount.toFixed(2)} royalty from user` };
   },
 
   bulkCreateUsersWithoutPin: async (params) => {
@@ -1858,7 +2082,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     if (!sponsor) {
       return { success: false, message: 'Sponsor ID not found' };
     }
-    if (!sponsor.isActive || sponsor.accountStatus !== 'active') {
+    if (!Database.isNetworkActiveUser(sponsor)) {
       return { success: false, message: 'Sponsor account is inactive or blocked' };
     }
 
@@ -1990,7 +2214,16 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           });
 
           const latestSponsorAfterCount = Database.getUserByUserId(sponsor.userId);
-          if (latestSponsorAfterCount) {
+          const alreadyCredited = Database.hasCompletedReferralIncomeForIdentity({
+            sponsorInternalId: latestSponsorAfterCount?.id || sponsor.id,
+            referredInternalId: newUser.id,
+            referredUserId: newUser.userId,
+            fullName: newUser.fullName,
+            email: newUser.email,
+            phone: newUser.phone,
+            referenceTime: newUser.createdAt
+          });
+          if (latestSponsorAfterCount && !alreadyCredited) {
             sponsorIncomeCredits += directIncome;
             deferredTransactions.push({
               id: `tx_${Date.now()}_admin_bulk_sponsor_${i}`,
@@ -2343,7 +2576,12 @@ export const useUIStore = create<UIState>((set) => ({
 interface OtpState {
   isOtpSent: boolean;
   otpExpiry: Date | null;
-  sendOtp: (userId: string, email: string, purpose: 'registration' | 'transaction' | 'withdrawal' | 'profile_update') => Promise<{ success: boolean; otp?: string; message: string }>;
+  sendOtp: (
+    userId: string,
+    email: string,
+    purpose: 'registration' | 'transaction' | 'withdrawal' | 'profile_update',
+    context?: { userId?: string; userName?: string }
+  ) => Promise<{ success: boolean; otp?: string; message: string; status: 'sent' | 'pending' | 'failed' }>;
   verifyOtp: (userId: string, otp: string, purpose: 'registration' | 'transaction' | 'withdrawal' | 'profile_update') => Promise<boolean>;
 }
 
@@ -2351,7 +2589,7 @@ export const useOtpStore = create<OtpState>((set) => ({
   isOtpSent: false,
   otpExpiry: null,
 
-  sendOtp: async (userId: string, email: string, purpose) => {
+  sendOtp: async (userId: string, email: string, purpose, context) => {
     const otpRecord = Database.generateOtp(userId, email, purpose);
     const purposeLabel = purpose === 'withdrawal'
       ? 'withdrawal'
@@ -2360,20 +2598,43 @@ export const useOtpStore = create<OtpState>((set) => ({
         : purpose === 'profile_update'
           ? 'profile update'
           : 'registration';
+    const resolvedUser =
+      Database.getUserById(userId) ||
+      Database.getUserByUserId(userId) ||
+      Database.getUserByEmail(email);
+    const resolvedUserId = context?.userId?.trim() || resolvedUser?.userId || '';
+    const resolvedName = context?.userName?.trim() || resolvedUser?.fullName || '';
+    const userIdLine = resolvedUserId
+      ? `User ID: ${resolvedUserId}`
+      : purpose === 'registration'
+        ? 'User ID: Pending (assigned after registration)'
+        : 'User ID: N/A';
+    const nameLine = resolvedName ? `Name: ${resolvedName}` : 'Name: N/A';
+    const otpLines = [
+      `Your OTP for ${purposeLabel} is ${otpRecord.otp}.`,
+      'This OTP will expire in 10 minutes.',
+      '',
+      'This OTP is for your ReferNex account:',
+      userIdLine,
+      nameLine,
+      `Email: ${email}`
+    ];
     const emailResult = await dispatchSystemEmail({
       to: email,
       subject: 'Your RefeNex OTP Code',
-      body: `Your OTP for ${purposeLabel} is ${otpRecord.otp}. This OTP will expire in 10 minutes.`,
+      body: otpLines.join('\n'),
       purpose: 'otp',
-      timeoutMs: 7000,
+      timeoutMs: 12000,
       metadata: {
-        userId,
-        action: purpose
+        userId: resolvedUserId || userId,
+        action: purpose,
+        userName: resolvedName || 'unknown'
       }
     });
     if (!emailResult.success) {
       return {
         success: false,
+        status: 'failed',
         message: emailResult.error
           ? `Failed to send OTP email: ${emailResult.error}`
           : 'Failed to send OTP email. Please try again later'
@@ -2387,7 +2648,10 @@ export const useOtpStore = create<OtpState>((set) => ({
 
     return {
       success: true,
-      message: 'OTP sent to your email'
+      status: emailResult.deliveryState,
+      message: emailResult.deliveryState === 'pending'
+        ? (emailResult.error || 'OTP request timed out, but the email may still arrive. Please check inbox/spam before retrying.')
+        : 'OTP sent to your email'
     };
   },
 

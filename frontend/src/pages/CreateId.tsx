@@ -46,6 +46,8 @@ export default function CreateId() {
   const [showTxPassword, setShowTxPassword] = useState(false);
   const [showConfirmTxPassword, setShowConfirmTxPassword] = useState(false);
   const [sponsorName, setSponsorName] = useState('');
+  const [sponsorStatusMessage, setSponsorStatusMessage] = useState('');
+  const [isSponsorEditing, setIsSponsorEditing] = useState(false);
   const [error, setError] = useState('');
   const [successUserId, setSuccessUserId] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -54,13 +56,12 @@ export default function CreateId() {
   const [otpVerified, setOtpVerified] = useState(false);
   const [isSendingOtp, setIsSendingOtp] = useState(false);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
-  const [emailInUse, setEmailInUse] = useState(false);
-  const [phoneInUse, setPhoneInUse] = useState(false);
   const [isPinChecking, setIsPinChecking] = useState(false);
   const pinRefreshInFlight = useRef<Promise<void> | null>(null);
   const lastPinRefresh = useRef<number>(0);
   const selectedPinRef = useRef('');
   const displayUserIdRef = useRef<string | null>(displayUser?.id ?? null);
+  const successBannerRef = useRef<HTMLDivElement | null>(null);
 
   const isEmailValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
@@ -79,47 +80,32 @@ export default function CreateId() {
     }
     if (!displayUser) return;
     loadPins(displayUser.id);
+  }, [displayUser, isAuthenticated, loadPins, navigate, syncKey]);
+
+  useEffect(() => {
+    if (!displayUser) return;
     setFormData(prev => ({ ...prev, sponsorId: displayUser.userId }));
     setSponsorName(displayUser.fullName);
-  }, [displayUser, isAuthenticated, loadPins, navigate, syncKey]);
+    setSponsorStatusMessage('');
+    setIsSponsorEditing(false);
+  }, [displayUser?.id, displayUser?.userId, displayUser?.fullName]);
 
   useEffect(() => {
     displayUserIdRef.current = displayUser?.id ?? null;
   }, [displayUser?.id]);
 
   useEffect(() => {
-    const email = formData.email.trim();
-    if (!email || !isEmailValid(email)) {
-      setEmailInUse(false);
-      return;
-    }
-    const existing = Database.getUserByEmail(email);
-    setEmailInUse(!!existing);
-  }, [formData.email, syncKey]);
-
-  useEffect(() => {
-    const phone = formData.phone.trim();
-    const country = formData.country.trim();
-    if (!phone || !country) {
-      setPhoneInUse(false);
-      return;
-    }
-    if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) {
-      setPhoneInUse(false);
-      return;
-    }
-    const normalized = normalizePhoneNumber(formData.phone);
-    if (!normalized) {
-      setPhoneInUse(false);
-      return;
-    }
-    const existing = Database.getUsers().some((u) => normalizePhoneNumber(u.phone) === normalized);
-    setPhoneInUse(existing);
-  }, [formData.phone, formData.country, syncKey]);
-
-  useEffect(() => {
     selectedPinRef.current = formData.pinCode;
   }, [formData.pinCode]);
+
+  useEffect(() => {
+    if (!successUserId) return;
+    const scrollTask = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      successBannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => window.cancelAnimationFrame(scrollTask);
+  }, [successUserId]);
 
   const refreshPins = async () => {
     const now = Date.now();
@@ -128,7 +114,13 @@ export default function CreateId() {
       await pinRefreshInFlight.current;
       return;
     }
-    const task = Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 })
+    const task = Database.hydrateFromServer({
+      strict: true,
+      maxAttempts: 2,
+      timeoutMs: 8000,
+      retryDelayMs: 600,
+      keys: Database.getPinFreshDataKeys()
+    })
       .then(() => {
         const currentUserId = displayUserIdRef.current;
         if (currentUserId) {
@@ -171,9 +163,39 @@ export default function CreateId() {
     if (cleanValue.length === 7) {
       const sponsor = Database.getUserByUserId(cleanValue);
       setSponsorName(sponsor?.fullName || '');
+      setSponsorStatusMessage(sponsor ? '' : 'User does not exist with this Sponsor ID');
     } else {
       setSponsorName('');
+      setSponsorStatusMessage(cleanValue ? 'Enter a valid 7-digit Sponsor ID' : '');
     }
+  };
+
+  const handleSponsorEditToggle = () => {
+    setError('');
+    setSponsorStatusMessage('');
+    setIsSponsorEditing(true);
+  };
+
+  const handleSponsorSave = () => {
+    const cleanSponsorId = formData.sponsorId.replace(/\D/g, '').slice(0, 7);
+    if (cleanSponsorId.length !== 7) {
+      setSponsorStatusMessage('Enter a valid 7-digit Sponsor ID');
+      setError('Enter a valid 7-digit Sponsor ID');
+      return;
+    }
+
+    const sponsor = Database.getUserByUserId(cleanSponsorId);
+    if (!sponsor) {
+      setSponsorStatusMessage('User does not exist with this Sponsor ID');
+      setError('Sponsor ID not found');
+      setSponsorName('');
+      return;
+    }
+
+    setFormData(prev => ({ ...prev, sponsorId: cleanSponsorId }));
+    setSponsorName(sponsor.fullName || '');
+    setSponsorStatusMessage('');
+    setIsSponsorEditing(false);
   };
 
   const resetOtpFlow = () => {
@@ -219,21 +241,15 @@ export default function CreateId() {
       setError('Enter a valid email before sending OTP');
       return;
     }
-    if (emailInUse) {
-      setError('Email is already used');
-      return;
-    }
     if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) {
       setError('Enter a valid mobile number before sending OTP');
       return;
     }
-    if (phoneInUse) {
-      setError('Phone number is already used');
-      return;
-    }
 
     setIsSendingOtp(true);
-    const result = await sendOtp(getCreateIdOtpKey(), formData.email.trim(), 'registration');
+    const result = await sendOtp(getCreateIdOtpKey(), formData.email.trim(), 'registration', {
+      userName: formData.fullName.trim()
+    });
     setIsSendingOtp(false);
 
     if (!result.success) {
@@ -267,11 +283,10 @@ export default function CreateId() {
   const validate = () => {
     if (!formData.fullName.trim()) return 'Name is required';
     if (!formData.email.trim()) return 'Email is required';
-    if (emailInUse) return 'Email is already used';
     if (!formData.phone.trim()) return 'Mobile number is required';
     if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) return 'Enter a valid mobile number for the selected country';
-    if (phoneInUse) return 'Mobile number is already used';
     if (!formData.country.trim()) return 'Country is required';
+    if (isSponsorEditing) return 'Save Sponsor ID before creating ID';
     if (!formData.sponsorId || formData.sponsorId.length !== 7) return 'Valid sponsor ID is required';
     if (!sponsorName) return 'Sponsor ID not found';
     if (!formData.pinCode) return 'Please select a PIN';
@@ -346,6 +361,8 @@ export default function CreateId() {
       confirmTransactionPassword: '',
       agreeTerms: false
     });
+    setSponsorName(displayUser?.fullName || '');
+    setIsSponsorEditing(false);
     resetOtpFlow();
   };
 
@@ -387,12 +404,27 @@ export default function CreateId() {
             )}
 
             {successUserId && (
-              <Alert className="mb-4 bg-emerald-500/10 border-emerald-500/30">
-                <AlertDescription className="text-emerald-400 flex items-center gap-2">
-                  <CheckCircle className="w-4 h-4" />
-                  New ID created successfully: {successUserId}
-                </AlertDescription>
-              </Alert>
+              <div
+                ref={successBannerRef}
+                className="mb-5 overflow-hidden rounded-2xl border border-emerald-400/30 bg-gradient-to-br from-emerald-500/18 via-emerald-500/8 to-[#0f172a] shadow-[0_0_0_1px_rgba(16,185,129,0.08)]"
+              >
+                <div className="p-5 sm:p-6">
+                  <div className="flex items-start gap-4">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/20 text-emerald-300">
+                      <CheckCircle className="h-7 w-7" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-300/80">Create ID Success</p>
+                      <h2 className="mt-1 text-2xl font-extrabold text-white sm:text-3xl">ID created successfully</h2>
+                      <p className="mt-2 text-sm text-emerald-100/80">The new account has been created and activated.</p>
+                      <div className="mt-4 inline-flex items-center rounded-xl border border-emerald-400/25 bg-black/20 px-4 py-3">
+                        <span className="text-xs uppercase tracking-[0.2em] text-emerald-200/70">New ID</span>
+                        <span className="ml-3 text-2xl font-black tracking-[0.18em] text-emerald-300">{successUserId}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             )}
 
             <form onSubmit={handleSubmit} className="space-y-4">
@@ -413,9 +445,6 @@ export default function CreateId() {
                     onChange={(e) => handleEmailChange(e.target.value)}
                     className="bg-[#1f2937] border-white/10 text-white"
                   />
-                  {emailInUse && (
-                    <p className="text-xs text-red-400">Email already in use</p>
-                  )}
                 </div>
               </div>
 
@@ -442,23 +471,36 @@ export default function CreateId() {
                     onChange={(e) => handlePhoneChange(e.target.value)}
                     className="bg-[#1f2937] border-white/10 text-white"
                   />
-                  {phoneInUse && (
-                    <p className="text-xs text-red-400">Mobile number already in use</p>
-                  )}
                 </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label className="text-white/80">Sponsor ID</Label>
-                  <Input
-                    value={formData.sponsorId}
-                    onChange={(e) => handleSponsorIdChange(e.target.value)}
-                    maxLength={7}
-                    className="bg-[#1f2937] border-white/10 text-white"
-                  />
+                  <div className="flex gap-2">
+                    <Input
+                      value={formData.sponsorId}
+                      onChange={(e) => handleSponsorIdChange(e.target.value)}
+                      maxLength={7}
+                      disabled={!isSponsorEditing}
+                      className="bg-[#1f2937] border-white/10 text-white disabled:opacity-100 disabled:cursor-default"
+                    />
+                    <Button
+                      type="button"
+                      variant={isSponsorEditing ? 'default' : 'outline'}
+                      onClick={isSponsorEditing ? handleSponsorSave : handleSponsorEditToggle}
+                      className={isSponsorEditing
+                        ? 'btn-primary whitespace-nowrap'
+                        : 'whitespace-nowrap border-white/20 text-white hover:bg-white/10'}
+                    >
+                      {isSponsorEditing ? 'Save Sponsor' : 'Change Sponsor'}
+                    </Button>
+                  </div>
                   {sponsorName && (
                     <p className="text-xs text-emerald-400">Sponsor: {sponsorName}</p>
+                  )}
+                  {!sponsorName && sponsorStatusMessage && (
+                    <p className="text-xs text-amber-400">{sponsorStatusMessage}</p>
                   )}
                 </div>
                 <div className="space-y-2">

@@ -28,7 +28,8 @@ import {
   getTransactionPasswordRequirementsText,
   isStrongPassword,
   isValidTransactionPassword,
-  readOptimizedUploadDataUrl
+  uploadDataUrlToBackend,
+  uploadOptimizedFileToBackend
 } from '@/utils/helpers';
 import { toast } from 'sonner';
 import Database, { DB_KEYS, helpDistributionTable } from '@/db';
@@ -115,6 +116,45 @@ interface WithdrawalGapScanRow {
   issue: string;
 }
 
+interface ReferralIncomeMismatchRow {
+  sponsorUserId: string;
+  sponsorName: string;
+  referredName: string;
+  likelyCorrectUserId: string;
+  directIncomeCount: number;
+  extraDirectIncomeCount: number;
+  totalCreditedAmount: number;
+  extraCreditedAmount: number;
+  currentRecoveryDue: number;
+  totalRecoveredSoFar: number;
+  remainingRecoveryAmount: number;
+  wrongUserIds: string[];
+  firstCreatedAt: string;
+  lastCreatedAt: string;
+}
+
+interface DuplicateLockedGiveHelpMismatchRow {
+  mismatchKey: string;
+  senderUserId: string;
+  senderName: string;
+  recipientUserId: string;
+  recipientName: string;
+  level: number;
+  giveAmount: number;
+  giveCount: number;
+  extraGiveCount: number;
+  receiveCount: number;
+  extraReceiveCount: number;
+  totalGivenAmount: number;
+  extraGivenAmount: number;
+  extraCreditedAmount: number;
+  currentRecoveryDue: number;
+  totalRecoveredSoFar: number;
+  remainingRecoveryAmount: number;
+  clusterStartedAt: string;
+  clusterEndedAt: string;
+}
+
 interface PaymentMethodDraft {
   type: PaymentMethodType;
   name: string;
@@ -139,6 +179,17 @@ interface LockedIncomeReportRow {
   directCount: number;
   requiredDirect: number;
   currentLevel: number;
+}
+
+interface WalletBalanceReportRow {
+  userId: string;
+  name: string;
+  mobile: string;
+  sponsorId: string;
+  sponsorName: string;
+  qualifiedLevel: number;
+  balance: number;
+  status: 'active' | 'inactive' | 'temp_blocked' | 'permanent_blocked';
 }
 
 type BulkCreateProgress = {
@@ -223,12 +274,13 @@ function MarketplaceRetailerForm({ retailer, categories, onSave, onCancel }: {
     if (!file) return;
     void (async () => {
       try {
-        const dataUrl = await readOptimizedUploadDataUrl(file, {
+        const uploaded = await uploadOptimizedFileToBackend(file, {
+          scope: 'marketplace-retailers',
           maxDimension: 1600,
           targetBytes: 500 * 1024,
           quality: 0.84
         });
-        setLogoUrl(dataUrl);
+        setLogoUrl(uploaded.fileUrl);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : 'Unable to read retailer logo');
       }
@@ -300,10 +352,31 @@ function MarketplaceCategoryForm({ category, onSave, onCancel }: {
   onSave: (data: Partial<MarketplaceCategory>) => void;
   onCancel: () => void;
 }) {
-  const ICON_OPTIONS = ['Star', 'GraduationCap', 'Laptop', 'Shirt', 'Landmark', 'Briefcase', 'Plane', 'Pill', 'UtensilsCrossed', 'Heart', 'Home', 'ShoppingBag', 'Gift', 'Music', 'Camera', 'Gamepad2', 'Dumbbell', 'Baby', 'Car', 'Smartphone'];
+  const ICON_OPTIONS = [
+    { label: 'Fashion', value: 'Handbag' },
+    { label: 'Beauty & Skin Care', value: 'SoapDispenserDroplet' },
+    { label: 'Jewellery', value: 'Gem' },
+    { label: 'Kidswear', value: 'Baby' },
+    { label: 'Toys & Gifts', value: 'Gift' },
+    { label: 'Perfume', value: 'SprayCan' },
+    { label: 'Female Only', value: 'Venus' },
+    { label: 'Men Only', value: 'Mars' },
+    { label: 'Astrology', value: 'WandSparkles' },
+    { label: 'Home & Kitchen', value: 'CookingPot' },
+    { label: 'Health Care & Medicine', value: 'Pill' },
+    { label: 'Finance', value: 'BadgeCent' },
+    { label: 'Gadgets & Accessories', value: 'Smartphone' },
+    { label: 'Tour & Travel Booking', value: 'Plane' },
+    { label: 'Car & Bike', value: 'Car' },
+    { label: 'Education', value: 'GraduationCap' },
+    { label: 'Popular E-commerce', value: 'Store' }
+  ];
+  const allowedIconValues = new Set(ICON_OPTIONS.map((option) => option.value));
   const [name, setName] = useState(category?.name || '');
   const [slug, setSlug] = useState(category?.slug || '');
-  const [icon, setIcon] = useState(category?.icon || 'Star');
+  const [icon, setIcon] = useState(
+    allowedIconValues.has(category?.icon || '') ? (category?.icon || ICON_OPTIONS[0].value) : ICON_OPTIONS[0].value
+  );
   const [sortOrder, setSortOrder] = useState(category?.sortOrder?.toString() || '0');
   const [isActive, setIsActive] = useState(category?.isActive ?? true);
 
@@ -322,7 +395,7 @@ function MarketplaceCategoryForm({ category, onSave, onCancel }: {
         <div className="space-y-1">
           <Label className="text-white/70 text-xs">Icon</Label>
           <select value={icon} onChange={e => setIcon(e.target.value)} className="w-full h-9 bg-[#1f2937] border border-white/10 text-white rounded-md px-2 text-sm">
-            {ICON_OPTIONS.map(i => <option key={i} value={i}>{i}</option>)}
+            {ICON_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
         </div>
         <div className="space-y-1">
@@ -361,12 +434,13 @@ function MarketplaceBannerForm({ banner, onSave, onCancel }: {
     if (!file) return;
     void (async () => {
       try {
-        const dataUrl = await readOptimizedUploadDataUrl(file, {
+        const uploaded = await uploadOptimizedFileToBackend(file, {
+          scope: 'marketplace-banners',
           maxDimension: 1800,
           targetBytes: 650 * 1024,
           quality: 0.84
         });
-        setImageUrl(dataUrl);
+        setImageUrl(uploaded.fileUrl);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : 'Unable to read banner image');
       }
@@ -435,12 +509,13 @@ function MarketplaceDealForm({ deal, retailers, onSave, onCancel }: {
     if (!file) return;
     void (async () => {
       try {
-        const dataUrl = await readOptimizedUploadDataUrl(file, {
+        const uploaded = await uploadOptimizedFileToBackend(file, {
+          scope: 'marketplace-deals',
           maxDimension: 1800,
           targetBytes: 650 * 1024,
           quality: 0.84
         });
-        setImageUrl(dataUrl);
+        setImageUrl(uploaded.fileUrl);
       } catch (error) {
         toast.error(error instanceof Error ? error.message : 'Unable to read deal image');
       }
@@ -511,7 +586,7 @@ export default function Admin() {
   const {
     stats, settings, allUsers, allTransactions, safetyPoolAmount, allPins, allPinRequests, pendingPinRequests,
     loadStats, loadSettings, loadAllUsers, loadAllTransactions, loadAllPins, loadAllPinRequests, loadPendingPinRequests,
-    updateSettings, addFundsToUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
+    updateSettings, addFundsToUser, reverseRoyaltyFromUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
     suspendPin, unsuspendPin, blockUser, unblockUser, reactivateAutoDeactivatedUser, bulkCreateUsersWithoutPin, createServerBackup,
     deleteAllIdsFromSystem, getLevelWiseReport,
     marketplaceCategories, marketplaceRetailers, marketplaceBanners, marketplaceDeals,
@@ -540,8 +615,10 @@ export default function Admin() {
   const [fundWalletType, setFundWalletType] = useState<'deposit' | 'income' | 'royalty'>('deposit');
   const [fundMessage, setFundMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [fundLoadingAction, setFundLoadingAction] = useState<'add' | 'reverse' | null>(null);
   const [orphanedPinCount, setOrphanedPinCount] = useState(0);
   const orphanedPinsNotifiedRef = useRef(false);
+  const legacyUploadMigrationRanRef = useRef(false);
   const [pendingPayments, setPendingPayments] = useState<Payment[]>([]);
   const [depositHistory, setDepositHistory] = useState<Payment[]>([]);
   const [depositHistoryStatusFilter, setDepositHistoryStatusFilter] = useState<'all' | 'pending' | 'under_review' | 'completed' | 'failed' | 'reversed'>('all');
@@ -637,6 +714,15 @@ export default function Admin() {
   const [isRestoringReceiveHelp, setIsRestoringReceiveHelp] = useState(false);
   const [isManualCreditingReceiveHelp, setIsManualCreditingReceiveHelp] = useState(false);
   const [isRepairingSelfFundCredits, setIsRepairingSelfFundCredits] = useState(false);
+  const [isRecoveringPaymentAndPinHistory, setIsRecoveringPaymentAndPinHistory] = useState(false);
+  const [isResyncingWalletLedger, setIsResyncingWalletLedger] = useState(false);
+  const [isApplyingActiveFundRecovery, setIsApplyingActiveFundRecovery] = useState(false);
+  const [isRebuildingLockedIncomeTracker, setIsRebuildingLockedIncomeTracker] = useState(false);
+  const [isRebuildingLockedIncomeAll, setIsRebuildingLockedIncomeAll] = useState(false);
+  const [isRecoveringReferralAndHelp, setIsRecoveringReferralAndHelp] = useState(false);
+  const [isProcessingLockedGiveHelp, setIsProcessingLockedGiveHelp] = useState(false);
+  const [isReroutingSafetyPooledGiveHelp, setIsReroutingSafetyPooledGiveHelp] = useState(false);
+  const [isForcingLockedRelease, setIsForcingLockedRelease] = useState(false);
   const [isRecalculatingQualifiedLevel, setIsRecalculatingQualifiedLevel] = useState(false);
   const [isMarkingLevelHelpComplete, setIsMarkingLevelHelpComplete] = useState(false);
   const [isReversingTemporarySelfFundCredits, setIsReversingTemporarySelfFundCredits] = useState(false);
@@ -644,6 +730,9 @@ export default function Admin() {
   const [isScanningHelpMismatches, setIsScanningHelpMismatches] = useState(false);
   const [isReversingInvalidRestoredHelp, setIsReversingInvalidRestoredHelp] = useState(false);
   const [restoringFromGiveHelpTxId, setRestoringFromGiveHelpTxId] = useState<string | null>(null);
+  const [recoveringFundMismatchUserId, setRecoveringFundMismatchUserId] = useState<string | null>(null);
+  const [recoveringReferralMismatchUserId, setRecoveringReferralMismatchUserId] = useState<string | null>(null);
+  const [recoveringDuplicateGiveMismatchKey, setRecoveringDuplicateGiveMismatchKey] = useState<string | null>(null);
 
   // Marketplace admin state
   const [mktSubTab, setMktSubTab] = useState<'banners' | 'deals' | 'categories' | 'retailers' | 'invoices' | 'redemptions'>('retailers');
@@ -652,6 +741,7 @@ export default function Admin() {
   const [mktEditingCategory, setMktEditingCategory] = useState<MarketplaceCategory | null>(null);
   const [mktEditingRetailer, setMktEditingRetailer] = useState<MarketplaceRetailer | null>(null);
   const [mktShowForm, setMktShowForm] = useState(false);
+  const [mktSearchQuery, setMktSearchQuery] = useState('');
 
   const syncMarketplaceChanges = useCallback(async (work: () => unknown, successMessage: string) => {
     try {
@@ -676,6 +766,302 @@ export default function Admin() {
       toast.error(error instanceof Error ? error.message : 'Failed to save marketplace changes to backend.');
     }
   }, [loadMarketplaceData]);
+
+  const normalizedMarketplaceSearch = useMemo(() => mktSearchQuery.trim().toLowerCase(), [mktSearchQuery]);
+  const filteredMarketplaceRetailers = useMemo(() => {
+    if (!normalizedMarketplaceSearch) return marketplaceRetailers;
+    return marketplaceRetailers.filter((retailer) => {
+      const categoryName = marketplaceCategories.find((category) => category.id === retailer.categoryId)?.name || '';
+      return [
+        retailer.name,
+        retailer.badgeText,
+        retailer.discountText,
+        retailer.websiteUrl,
+        retailer.affiliateLink,
+        categoryName
+      ].some((value) => String(value || '').toLowerCase().includes(normalizedMarketplaceSearch));
+    });
+  }, [marketplaceCategories, marketplaceRetailers, normalizedMarketplaceSearch]);
+  const filteredMarketplaceCategories = useMemo(() => {
+    if (!normalizedMarketplaceSearch) return marketplaceCategories;
+    return marketplaceCategories.filter((category) =>
+      [category.name, category.slug, category.icon]
+        .some((value) => String(value || '').toLowerCase().includes(normalizedMarketplaceSearch))
+    );
+  }, [marketplaceCategories, normalizedMarketplaceSearch]);
+  const filteredMarketplaceBanners = useMemo(() => {
+    if (!normalizedMarketplaceSearch) return marketplaceBanners;
+    return marketplaceBanners.filter((banner) =>
+      [banner.title, banner.subtitle, banner.linkUrl]
+        .some((value) => String(value || '').toLowerCase().includes(normalizedMarketplaceSearch))
+    );
+  }, [marketplaceBanners, normalizedMarketplaceSearch]);
+  const filteredMarketplaceDeals = useMemo(() => {
+    if (!normalizedMarketplaceSearch) return marketplaceDeals;
+    return marketplaceDeals.filter((deal) => {
+      const retailerName = marketplaceRetailers.find((retailer) => retailer.id === deal.retailerId)?.name || '';
+      return [deal.title, deal.description, deal.badgeText, deal.linkUrl, retailerName]
+        .some((value) => String(value || '').toLowerCase().includes(normalizedMarketplaceSearch));
+    });
+  }, [marketplaceDeals, marketplaceRetailers, normalizedMarketplaceSearch]);
+  const filteredMarketplaceInvoices = useMemo(() => {
+    if (!normalizedMarketplaceSearch) return marketplaceInvoices;
+    return marketplaceInvoices.filter((invoice) =>
+      [
+        invoice.userId,
+        invoice.retailerName,
+        invoice.orderId,
+        invoice.status,
+        invoice.adminNotes,
+        invoice.invoiceImageFileName
+      ].some((value) => String(value || '').toLowerCase().includes(normalizedMarketplaceSearch))
+    );
+  }, [marketplaceInvoices, normalizedMarketplaceSearch]);
+  const filteredMarketplaceRedemptions = useMemo(() => {
+    if (!normalizedMarketplaceSearch) return marketplaceRedemptions;
+    return marketplaceRedemptions.filter((redemption) =>
+      [
+        redemption.userId,
+        redemption.status,
+        redemption.adminNotes,
+        redemption.rewardPoints,
+        redemption.usdtAmount
+      ].some((value) => String(value || '').toLowerCase().includes(normalizedMarketplaceSearch))
+    );
+  }, [marketplaceRedemptions, normalizedMarketplaceSearch]);
+
+  const runLegacyUploadMigration = useCallback(async () => {
+    if (!user?.isAdmin || typeof window === 'undefined') return;
+
+    const migrationFlag = 'admin_legacy_upload_migration_v1';
+    if (localStorage.getItem(migrationFlag) === 'done') {
+      return;
+    }
+
+    const uploadCache = new Map<string, Promise<{ fileUrl: string; fileName: string; mimeType: string; sizeBytes: number }>>();
+    const migrateDataUrl = (
+      scope: string,
+      fileName: string,
+      dataUrl: string,
+      mimeType?: string
+    ) => {
+      const cacheKey = `${scope}::${fileName}::${mimeType || ''}::${dataUrl.slice(0, 128)}`;
+      const existing = uploadCache.get(cacheKey);
+      if (existing) return existing;
+      const pending = uploadDataUrlToBackend({ scope, fileName, dataUrl, mimeType });
+      uploadCache.set(cacheKey, pending);
+      return pending;
+    };
+
+    const migratedSections: string[] = [];
+    let changedAnything = false;
+
+    const syncOptions = { full: false, force: true, timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 2000 };
+
+    const supportTickets = Database.getSupportTickets();
+    if (supportTickets.some((ticket) => ticket.attachments.some((att) => att.data_url?.startsWith('data:')) || ticket.messages.some((msg) => msg.attachments.some((att) => att.data_url?.startsWith('data:'))))) {
+      const migratedSupportTickets = await Promise.all(supportTickets.map(async (ticket) => {
+        let changed = false;
+        const migrateAttachment = async (attachment: SupportTicketAttachment) => {
+          if (!attachment.data_url?.startsWith('data:')) return attachment;
+          const uploaded = await migrateDataUrl('support-attachments', attachment.file_name || 'support-attachment', attachment.data_url, attachment.file_type);
+          changed = true;
+          return {
+            ...attachment,
+            data_url: '',
+            file_url: uploaded.fileUrl,
+            file_name: uploaded.fileName || attachment.file_name,
+            file_type: uploaded.mimeType || attachment.file_type,
+            file_size: uploaded.sizeBytes || attachment.file_size
+          };
+        };
+
+        const attachments = await Promise.all(ticket.attachments.map(migrateAttachment));
+        const messages = await Promise.all(ticket.messages.map(async (message) => ({
+          ...message,
+          attachments: await Promise.all(message.attachments.map(migrateAttachment))
+        })));
+
+        return changed ? { ...ticket, attachments, messages } : ticket;
+      }));
+
+      if (JSON.stringify(migratedSupportTickets) !== JSON.stringify(supportTickets)) {
+        await Database.commitCriticalAction(() => {
+          Database.saveSupportTickets(migratedSupportTickets);
+          return migratedSupportTickets.length;
+        }, syncOptions);
+        migratedSections.push('support tickets');
+        changedAnything = true;
+      }
+    }
+
+    const payments = Database.getPayments();
+    if (payments.some((payment) => payment.screenshot?.startsWith('data:'))) {
+      const migratedPayments = await Promise.all(payments.map(async (payment) => {
+        if (!payment.screenshot?.startsWith('data:')) return payment;
+        const uploaded = await migrateDataUrl('deposit-proofs', `${payment.id}-deposit-proof`, payment.screenshot, 'image/jpeg');
+        return { ...payment, screenshot: uploaded.fileUrl };
+      }));
+      await Database.commitCriticalAction(() => {
+        Database.savePayments(migratedPayments);
+        return migratedPayments.length;
+      }, syncOptions);
+      migratedSections.push('deposit proofs');
+      changedAnything = true;
+    }
+
+    const pinRequests = Database.getPinPurchaseRequests();
+    if (pinRequests.some((request) => request.paymentProof?.startsWith('data:'))) {
+      const migratedPinRequests = await Promise.all(pinRequests.map(async (request) => {
+        if (!request.paymentProof?.startsWith('data:')) return request;
+        const uploaded = await migrateDataUrl('pin-request-proofs', `${request.id}-pin-proof`, request.paymentProof, 'image/jpeg');
+        return { ...request, paymentProof: uploaded.fileUrl };
+      }));
+      await Database.commitCriticalAction(() => {
+        Database.savePinPurchaseRequests(migratedPinRequests);
+        return migratedPinRequests.length;
+      }, syncOptions);
+      migratedSections.push('pin request proofs');
+      changedAnything = true;
+    }
+
+    const transactions = Database.getTransactions();
+    if (transactions.some((tx) => tx.adminReceipt?.startsWith('data:'))) {
+      const migratedTransactions = await Promise.all(transactions.map(async (tx) => {
+        if (!tx.adminReceipt?.startsWith('data:')) return tx;
+        const uploaded = await migrateDataUrl('withdrawal-receipts', `${tx.id}-withdrawal-receipt`, tx.adminReceipt, 'image/jpeg');
+        return { ...tx, adminReceipt: uploaded.fileUrl };
+      }));
+      await Database.commitCriticalAction(() => {
+        Database.saveTransactions(migratedTransactions);
+        return migratedTransactions.length;
+      }, syncOptions);
+      migratedSections.push('withdrawal receipts');
+      changedAnything = true;
+    }
+
+    const announcements = Database.getAnnouncements();
+    if (announcements.some((announcement) => announcement.imageUrl?.startsWith('data:'))) {
+      const migratedAnnouncements = await Promise.all(announcements.map(async (announcement) => {
+        if (!announcement.imageUrl?.startsWith('data:')) return announcement;
+        const uploaded = await migrateDataUrl('announcements', `${announcement.id}-announcement`, announcement.imageUrl, 'image/jpeg');
+        return { ...announcement, imageUrl: uploaded.fileUrl };
+      }));
+      await Database.commitCriticalAction(() => {
+        Database.saveAnnouncements(migratedAnnouncements);
+        return migratedAnnouncements.length;
+      }, syncOptions);
+      migratedSections.push('announcements');
+      changedAnything = true;
+    }
+
+    const paymentMethodsSnapshot = Database.getPaymentMethods();
+    if (paymentMethodsSnapshot.some((method) => method.qrCode?.startsWith('data:'))) {
+      const migratedPaymentMethods = await Promise.all(paymentMethodsSnapshot.map(async (method) => {
+        if (!method.qrCode?.startsWith('data:')) return method;
+        const uploaded = await migrateDataUrl('payment-methods', `${method.id}-qr`, method.qrCode, 'image/jpeg');
+        return { ...method, qrCode: uploaded.fileUrl };
+      }));
+      Database.savePaymentMethods(migratedPaymentMethods);
+      const synced = await Database.savePaymentMethodsToBackend(migratedPaymentMethods);
+      if (!synced) {
+        throw new Error('Failed to sync migrated payment methods to backend');
+      }
+      migratedSections.push('payment method QR codes');
+      changedAnything = true;
+    }
+
+    const marketplaceRetailersSnapshot = Database.getMarketplaceRetailers();
+    if (marketplaceRetailersSnapshot.some((retailer) => retailer.logoUrl?.startsWith('data:'))) {
+      const migratedRetailers = await Promise.all(marketplaceRetailersSnapshot.map(async (retailer) => {
+        if (!retailer.logoUrl?.startsWith('data:')) return retailer;
+        const uploaded = await migrateDataUrl('marketplace-retailers', `${retailer.id}-logo`, retailer.logoUrl, 'image/jpeg');
+        return { ...retailer, logoUrl: uploaded.fileUrl };
+      }));
+      await Database.commitCriticalAction(() => {
+        Database.saveMarketplaceRetailers(migratedRetailers);
+        return migratedRetailers.length;
+      }, syncOptions);
+      migratedSections.push('retailer logos');
+      changedAnything = true;
+    }
+
+    const marketplaceBannersSnapshot = Database.getMarketplaceBanners();
+    if (marketplaceBannersSnapshot.some((banner) => banner.imageUrl?.startsWith('data:'))) {
+      const migratedBanners = await Promise.all(marketplaceBannersSnapshot.map(async (banner) => {
+        if (!banner.imageUrl?.startsWith('data:')) return banner;
+        const uploaded = await migrateDataUrl('marketplace-banners', `${banner.id}-banner`, banner.imageUrl, 'image/jpeg');
+        return { ...banner, imageUrl: uploaded.fileUrl };
+      }));
+      await Database.commitCriticalAction(() => {
+        Database.saveMarketplaceBanners(migratedBanners);
+        return migratedBanners.length;
+      }, syncOptions);
+      migratedSections.push('banner images');
+      changedAnything = true;
+    }
+
+    const marketplaceDealsSnapshot = Database.getMarketplaceDeals();
+    if (marketplaceDealsSnapshot.some((deal) => deal.imageUrl?.startsWith('data:'))) {
+      const migratedDeals = await Promise.all(marketplaceDealsSnapshot.map(async (deal) => {
+        if (!deal.imageUrl?.startsWith('data:')) return deal;
+        const uploaded = await migrateDataUrl('marketplace-deals', `${deal.id}-deal`, deal.imageUrl, 'image/jpeg');
+        return { ...deal, imageUrl: uploaded.fileUrl };
+      }));
+      await Database.commitCriticalAction(() => {
+        Database.saveMarketplaceDeals(migratedDeals);
+        return migratedDeals.length;
+      }, syncOptions);
+      migratedSections.push('deal images');
+      changedAnything = true;
+    }
+
+    const invoices = Database.getMarketplaceInvoices();
+    if (invoices.some((invoice) => invoice.invoiceImage?.startsWith('data:'))) {
+      const migratedInvoices = await Promise.all(invoices.map(async (invoice) => {
+        if (!invoice.invoiceImage?.startsWith('data:')) return invoice;
+        const uploaded = await migrateDataUrl(
+          'marketplace-invoices',
+          invoice.invoiceImageFileName || `${invoice.id}-invoice`,
+          invoice.invoiceImage,
+          invoice.invoiceImageMimeType || 'image/jpeg'
+        );
+        return {
+          ...invoice,
+          invoiceImage: uploaded.fileUrl,
+          invoiceImageMimeType: uploaded.mimeType || invoice.invoiceImageMimeType || null,
+          invoiceImageFileName: uploaded.fileName || invoice.invoiceImageFileName || null
+        };
+      }));
+      await Database.commitCriticalAction(() => {
+        Database.saveMarketplaceInvoices(migratedInvoices);
+        return migratedInvoices.length;
+      }, syncOptions);
+      migratedSections.push('legacy invoices');
+      changedAnything = true;
+    }
+
+    localStorage.setItem(migrationFlag, 'done');
+
+    if (changedAnything) {
+      loadAllTransactions();
+      loadAllPinRequests();
+      loadPendingPinRequests();
+      loadPayments();
+      loadPaymentMethods();
+      loadMarketplaceData();
+      void loadSupportTickets();
+      void loadAnnouncementHistory();
+      toast.success(`Legacy file migration completed for ${migratedSections.join(', ')}.`);
+    }
+  }, [
+    loadAllPinRequests,
+    loadAllTransactions,
+    loadMarketplaceData,
+    loadPaymentMethods,
+    loadPendingPinRequests,
+    user?.isAdmin
+  ]);
 
   const [helpFlowView, setHelpFlowView] = useState<'sent' | 'received'>('sent');
   const [helpFlowDebugTick, setHelpFlowDebugTick] = useState(0);
@@ -759,6 +1145,30 @@ export default function Admin() {
     name: '',
     minAmount: ''
   });
+  const [incomeReportFilters, setIncomeReportFilters] = useState({
+    userId: '',
+    name: '',
+    sponsorId: '',
+    sponsorName: '',
+    minAmount: '',
+    status: ''
+  });
+  const [fundWalletReportFilters, setFundWalletReportFilters] = useState({
+    userId: '',
+    name: '',
+    sponsorId: '',
+    sponsorName: '',
+    minAmount: '',
+    status: ''
+  });
+  const [royaltyReportFilters, setRoyaltyReportFilters] = useState({
+    userId: '',
+    name: '',
+    sponsorId: '',
+    sponsorName: '',
+    minAmount: '',
+    status: ''
+  });
   const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([]);
   const [supportStatusFilter, setSupportStatusFilter] = useState<'all' | SupportTicketStatus>('all');
   const [supportSearch, setSupportSearch] = useState('');
@@ -821,6 +1231,7 @@ export default function Admin() {
       }
     }
 
+    await syncPaymentMethodsFromServer(true);
     reloadAdminDataFromBrowserState();
     void loadSupportTickets(true);
     if (import.meta.env.PROD) {
@@ -830,7 +1241,7 @@ export default function Admin() {
         loadAllPinRequests();
         loadPendingPinRequests();
         loadPayments();
-        loadPaymentMethods();
+        void syncPaymentMethodsFromServer(true);
         loadMarketplaceData();
         void loadAnnouncementHistory();
       });
@@ -902,6 +1313,8 @@ export default function Admin() {
       }
 
       if (cancelled) return;
+      await syncPaymentMethodsFromServer(true);
+      if (cancelled) return;
       reloadAdminDataFromBrowserState();
 
       if (import.meta.env.PROD) {
@@ -912,7 +1325,7 @@ export default function Admin() {
             loadAllPinRequests();
             loadPendingPinRequests();
             loadPayments();
-            loadPaymentMethods();
+            void syncPaymentMethodsFromServer(true);
             loadMarketplaceData();
           }
         });
@@ -928,7 +1341,7 @@ export default function Admin() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, user, navigate, loadStats, loadSettings, loadAllUsers, loadAllPins, loadAllPinRequests, loadPendingPinRequests, loadPayments, loadPaymentMethods]);
+  }, [isAuthenticated, user, navigate, loadStats, loadSettings, loadAllUsers, loadAllPins, loadAllPinRequests, loadPendingPinRequests, loadPayments]);
 
   // Auto-run a refresh once when admin loads panel
   const autoRefreshRanRef = useRef(false);
@@ -938,6 +1351,21 @@ export default function Admin() {
     autoRefreshRanRef.current = true;
     void runAdminRefresh();
   }, [isAuthenticated, user, runAdminRefresh]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !user?.isAdmin) return;
+    if (legacyUploadMigrationRanRef.current) return;
+    legacyUploadMigrationRanRef.current = true;
+
+    const timer = window.setTimeout(() => {
+      void runLegacyUploadMigration().catch((error) => {
+        console.warn('Legacy upload migration failed:', error);
+        toast.error(error instanceof Error ? error.message : 'Legacy file migration failed');
+      });
+    }, 4000);
+
+    return () => window.clearTimeout(timer);
+  }, [isAuthenticated, user, runLegacyUploadMigration]);
 
   useEffect(() => {
     if (!isReportsTabActive || reportsDataLoaded) return;
@@ -1005,6 +1433,52 @@ export default function Admin() {
 
   function loadPaymentMethods() {
     const methods = Database.getPaymentMethods();
+    setPaymentMethods(methods);
+  }
+
+  async function syncPaymentMethodsFromServer(repairFromLocal = false) {
+    const localSnapshot = Database.getPaymentMethods();
+
+    try {
+      await Database.fetchPaymentMethodsFromBackend();
+    } catch (error) {
+      console.warn('Payment methods hydrate failed:', error);
+    }
+
+    let methods = Database.getPaymentMethods();
+
+    if (repairFromLocal && methods.length === 0) {
+      const restorableLocalMethods = localSnapshot.filter((method) => {
+        const walletAddress = String(method.walletAddress || '').trim();
+        const qrCode = String(method.qrCode || '').trim();
+        const accountNumber = String(method.accountNumber || '').trim();
+        const upiId = String(method.upiId || '').trim();
+        const isPlaceholderDefault = method.id === 'crypto_usdt'
+          && walletAddress === '0x1234567890abcdef1234567890abcdef12345678';
+
+        return !isPlaceholderDefault && (
+          walletAddress.length > 0
+          || qrCode.length > 0
+          || accountNumber.length > 0
+          || upiId.length > 0
+        );
+      });
+
+      if (restorableLocalMethods.length > 0) {
+        try {
+          const repaired = await Database.savePaymentMethodsToBackend(localSnapshot);
+          if (!repaired) {
+            throw new Error('Failed to sync payment methods to backend');
+          }
+          await Database.fetchPaymentMethodsFromBackend();
+          methods = Database.getPaymentMethods();
+          toast.success('Payment methods restored from this admin device');
+        } catch (error) {
+          console.warn('Payment method restore failed:', error);
+        }
+      }
+    }
+
     setPaymentMethods(methods);
   }
 
@@ -1084,7 +1558,8 @@ export default function Admin() {
   }
 
   const readSupportAttachment = async (file: File): Promise<SupportTicketAttachment> => {
-    const dataUrl = await readOptimizedUploadDataUrl(file, {
+    const uploaded = await uploadOptimizedFileToBackend(file, {
+      scope: 'support-attachments',
       maxDimension: 1800,
       targetBytes: 650 * 1024,
       quality: 0.86
@@ -1092,10 +1567,11 @@ export default function Admin() {
 
     return {
       id: `support_admin_att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      file_name: file.name,
-      file_type: file.type || 'application/octet-stream',
-      file_size: file.size,
-      data_url: dataUrl,
+      file_name: uploaded.fileName,
+      file_type: uploaded.mimeType || file.type || 'application/octet-stream',
+      file_size: uploaded.sizeBytes || file.size,
+      data_url: '',
+      file_url: uploaded.fileUrl,
       uploaded_by: user?.userId || 'admin',
       uploaded_at: new Date().toISOString()
     };
@@ -1118,12 +1594,13 @@ export default function Admin() {
     }
 
     try {
-      const imageUrl = await readOptimizedUploadDataUrl(file, {
+      const uploaded = await uploadOptimizedFileToBackend(file, {
+        scope: 'announcements',
         maxDimension: 1800,
         targetBytes: 500 * 1024,
         quality: 0.82
       });
-      setAnnouncementData((prev) => ({ ...prev, imageUrl }));
+      setAnnouncementData((prev) => ({ ...prev, imageUrl: uploaded.fileUrl }));
       toast.success('Announcement image attached');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Unable to read image');
@@ -1394,12 +1871,13 @@ export default function Admin() {
     }
 
     try {
-      const dataUrl = await readOptimizedUploadDataUrl(file, {
+      const uploaded = await uploadOptimizedFileToBackend(file, {
+        scope: 'withdrawal-receipts',
         maxDimension: 1800,
         targetBytes: 650 * 1024,
         quality: 0.86
       });
-      setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: dataUrl }));
+      setWithdrawalReceiptDrafts((prev) => ({ ...prev, [requestId]: uploaded.fileUrl }));
       toast.success('Receipt attached');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Unable to read receipt');
@@ -1495,12 +1973,15 @@ export default function Admin() {
 
   const togglePaymentMethod = async (methodId: string, isActive: boolean) => {
     try {
-      await Database.commitCriticalAction(() => Database.updatePaymentMethod(methodId, { isActive }), {
-        timeoutMs: 120000,
-        maxAttempts: 3,
-        retryDelayMs: 2000
-      });
-      loadPaymentMethods();
+      const updated = Database.updatePaymentMethod(methodId, { isActive });
+      if (!updated) {
+        throw new Error('Failed to update payment method');
+      }
+      const synced = await Database.savePaymentMethodsToBackend(Database.getPaymentMethods());
+      if (!synced) {
+        throw new Error('Failed to sync payment method to backend');
+      }
+      await syncPaymentMethodsFromServer();
       toast.success(`Payment method ${isActive ? 'enabled' : 'disabled'}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to update payment method');
@@ -1571,12 +2052,13 @@ export default function Admin() {
     }
 
     try {
-      const dataUrl = await readOptimizedUploadDataUrl(file, {
+      const uploaded = await uploadOptimizedFileToBackend(file, {
+        scope: 'payment-methods',
         maxDimension: 1200,
         targetBytes: 350 * 1024,
         quality: 0.84
       });
-      updatePaymentMethodDraft('qrCode', dataUrl);
+      updatePaymentMethodDraft('qrCode', uploaded.fileUrl);
       toast.success('QR code updated in editor');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Unable to read QR image');
@@ -1645,11 +2127,7 @@ export default function Admin() {
           processingFee: processingFee || 0,
           processingTime: baseFields.processingTime || `Within ${settings.depositProcessingHours} hours`
         };
-        await Database.commitCriticalAction(() => Database.addPaymentMethod(newMethod), {
-          timeoutMs: 120000,
-          maxAttempts: 3,
-          retryDelayMs: 2000
-        });
+        Database.addPaymentMethod(newMethod);
       } else {
         const currentMethod = paymentMethods.find((method) => method.id === editingPaymentMethodId);
         if (!currentMethod) {
@@ -1664,18 +2142,19 @@ export default function Admin() {
           processingTime: baseFields.processingTime || currentMethod.processingTime || `Within ${settings.depositProcessingHours} hours`
         };
 
-        const updated = await Database.commitCriticalAction(() => Database.updatePaymentMethod(editingPaymentMethodId, updates), {
-          timeoutMs: 120000,
-          maxAttempts: 3,
-          retryDelayMs: 2000
-        });
+        const updated = Database.updatePaymentMethod(editingPaymentMethodId, updates);
         if (!updated) {
           toast.error('Failed to update payment method');
           return;
         }
       }
 
-      loadPaymentMethods();
+      const synced = await Database.savePaymentMethodsToBackend(Database.getPaymentMethods());
+      if (!synced) {
+        throw new Error('Failed to sync payment methods to backend');
+      }
+
+      await syncPaymentMethodsFromServer();
       closePaymentMethodEditor();
       toast.success(editingPaymentMethodId === 'new' ? 'Payment method added' : 'Payment method details updated');
     } catch (error) {
@@ -1693,13 +2172,15 @@ export default function Admin() {
     }
 
     setIsLoading(true);
+    setFundLoadingAction('add');
     const result = await addFundsToUser(
       selectedUser,
       parsedAmount,
       fundWalletType,
-      fundWalletType === 'royalty' ? fundMessage : undefined
+      fundMessage
     );
     setIsLoading(false);
+    setFundLoadingAction(null);
 
     if (result.success) {
       toast.success(result.message);
@@ -1708,6 +2189,62 @@ export default function Admin() {
       setFundWalletType('deposit');
       setSelectedUser(null);
       loadAllUsers();
+      if (searchedUser?.userId === selectedUser) {
+        searchUserById(selectedUser);
+      }
+    } else {
+      toast.error(result.message);
+    }
+  };
+
+  const fundWalletTitle = fundWalletType === 'royalty'
+    ? 'Manage Royalty Wallet'
+    : `Send ${fundWalletType === 'deposit' ? 'Deposit' : 'Income'} Wallet`;
+  const fundWalletActionLabel = fundWalletType === 'royalty'
+    ? 'royalty'
+    : `${fundWalletType === 'deposit' ? 'deposit' : 'income'} wallet`;
+  const fundPrimaryButtonLabel = fundWalletType === 'royalty'
+    ? 'Send Royalty'
+    : fundWalletType === 'deposit'
+      ? 'Send Deposit'
+      : 'Send Income';
+
+  const handleReverseRoyalty = async () => {
+    if (!selectedUser || !fundAmount) return;
+
+    const parsedAmount = parseFloat(fundAmount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      toast.error('Enter a valid amount');
+      return;
+    }
+
+    const reason = fundMessage.trim();
+    if (!reason) {
+      toast.error('Enter reversal reason');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Take back $${parsedAmount.toFixed(2)} royalty from user ${selectedUser}?`
+    );
+    if (!confirmed) return;
+
+    setIsLoading(true);
+    setFundLoadingAction('reverse');
+    const result = await reverseRoyaltyFromUser(selectedUser, parsedAmount, reason);
+    setIsLoading(false);
+    setFundLoadingAction(null);
+
+    if (result.success) {
+      toast.success(result.message);
+      setFundAmount('');
+      setFundMessage('');
+      setFundWalletType('deposit');
+      setSelectedUser(null);
+      loadAllUsers();
+      if (searchedUser?.userId === selectedUser) {
+        searchUserById(selectedUser);
+      }
     } else {
       toast.error(result.message);
     }
@@ -1756,6 +2293,7 @@ export default function Admin() {
         .reduce((sum, t) => sum + Math.abs(t.amount), 0);
 
       const qualifiedLevel = Database.getQualifiedLevel(foundUser.id);
+      const fundWalletForensics = Database.getFundWalletForensics(foundUser.id);
 
       setSearchedUser({
         ...foundUser,
@@ -1768,6 +2306,7 @@ export default function Admin() {
         directReferralIncome,
         qualifiedLevel,
         pins: userPins,
+        fundWalletForensics,
         pendingMatrixDebug,
         incomingPendingMatrixDebug,
         incomingGiveHelpCandidates
@@ -1888,21 +2427,6 @@ export default function Admin() {
       return;
     }
 
-    const allUsers = Database.getUsers();
-    const emailConflict = allUsers.find(
-      (u) => u.id !== searchedUser.id && u.email?.toLowerCase() === email.toLowerCase()
-    );
-    if (emailConflict) {
-      toast.error('Email is already used by another user');
-      return;
-    }
-    const phoneConflict = allUsers.find(
-      (u) => u.id !== searchedUser.id && u.phone?.trim() === phone
-    );
-    if (phoneConflict) {
-      toast.error('Phone number is already used by another user');
-      return;
-    }
 
     if (loginPassword && !isStrongPassword(loginPassword)) {
       toast.error(getPasswordRequirementsText());
@@ -2117,6 +2641,261 @@ export default function Admin() {
       toast.error(error instanceof Error ? error.message : 'Failed to repair missing self fund credits');
     } finally {
       setIsRepairingSelfFundCredits(false);
+    }
+  };
+
+  const handleRecoverPaymentAndPinHistory = async () => {
+    if (!searchedUser) return;
+    setIsRecoveringPaymentAndPinHistory(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.recoverMissingPaymentAndPinTransactions(searchedUser.id),
+        { timeoutMs: 90000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+      if (result.depositsCreated === 0 && result.pinPurchasesCreated === 0) {
+        toast.success('No missing deposit or PIN purchase history was found for this user.');
+      } else {
+        const parts: string[] = [];
+        if (result.depositsCreated > 0) {
+          parts.push(`${result.depositsCreated} deposit log${result.depositsCreated > 1 ? 's' : ''}`);
+        }
+        if (result.pinPurchasesCreated > 0) {
+          parts.push(`${result.pinPurchasesCreated} PIN purchase log${result.pinPurchasesCreated > 1 ? 's' : ''}`);
+        }
+        toast.success(`Recovered ${parts.join(' and ')}.`);
+        result.examples.slice(0, 3).forEach((example) => toast.message(example));
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to recover deposit / PIN history');
+    } finally {
+      setIsRecoveringPaymentAndPinHistory(false);
+    }
+  };
+
+  const handleResyncWalletLedger = async () => {
+    if (!searchedUser) return;
+    setIsResyncingWalletLedger(true);
+    try {
+      const result = await Database.commitCriticalAction(() => {
+        const tracker = Database.repairLockedIncomeTrackerFromTransactions(searchedUser.id);
+        const income = Database.repairIncomeWalletConsistency(searchedUser.id);
+        const locked = Database.syncLockedIncomeWallet(searchedUser.id);
+        return { tracker, income, locked };
+      }, { timeoutMs: 90000, maxAttempts: 3, retryDelayMs: 1500 });
+
+      if (!result.tracker.updated && result.income.repaired === 0 && result.locked.synced === 0) {
+        toast.success('Wallet ledger is already in sync for this user.');
+      } else {
+        const parts: string[] = [];
+        if (result.tracker.updated) {
+          parts.push(`tracker fixed across ${result.tracker.levels} level${result.tracker.levels !== 1 ? 's' : ''}`);
+        }
+        if (result.income.repaired > 0) {
+          parts.push('income / total earnings recalculated');
+        }
+        if (result.locked.synced > 0) {
+          parts.push('locked receive help synced');
+        }
+        toast.success(`Resynced wallet ledger: ${parts.join(', ')}.`);
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to resync wallet ledger');
+    } finally {
+      setIsResyncingWalletLedger(false);
+    }
+  };
+
+  const handleApplyActiveFundRecovery = async () => {
+    if (!searchedUser) return;
+    setIsApplyingActiveFundRecovery(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.applyActiveFundRecoveryNow(searchedUser.id),
+        { timeoutMs: 60000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+      if (result.success) {
+        toast.success(result.message);
+      } else {
+        toast.error(result.message);
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById(searchedUser.userId);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to run active fund recovery');
+    } finally {
+      setIsApplyingActiveFundRecovery(false);
+    }
+  };
+
+  const handleRebuildLockedIncomeTracker = async () => {
+    if (!searchedUser) return;
+    setIsRebuildingLockedIncomeTracker(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.rebuildLockedIncomeTracker(searchedUser.id),
+        { timeoutMs: 90000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+
+      if (!result.updated) {
+        toast.success('Locked income tracker is already up to date for this user.');
+      } else {
+        toast.success(
+          `Rebuilt locked income tracker across ${result.levels} level${result.levels !== 1 ? 's' : ''}. Locked give-help: $${result.giveHelpLocked.toFixed(2)}.`
+        );
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to rebuild locked income tracker');
+    } finally {
+      setIsRebuildingLockedIncomeTracker(false);
+    }
+  };
+
+  const handleRebuildLockedIncomeTrackerForAll = async () => {
+    if (!user?.isAdmin) return;
+    setIsRebuildingLockedIncomeAll(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.rebuildLockedIncomeTrackerForAllUsers(),
+        { timeoutMs: 180000, maxAttempts: 2, retryDelayMs: 3000 }
+      );
+
+      if (result.usersUpdated === 0) {
+        toast.success('Locked income tracker is already clean for all users.');
+      } else {
+        toast.success(
+          `Rebuilt locked tracker for ${result.usersUpdated}/${result.usersScanned} users (levels updated: ${result.levelsUpdated}).`
+        );
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to rebuild locked income tracker for all users');
+    } finally {
+      setIsRebuildingLockedIncomeAll(false);
+    }
+  };
+
+  const handleRecoverReferralAndHelp = async () => {
+    if (!searchedUser) return;
+    setIsRecoveringReferralAndHelp(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.recoverMissingReferralAndLevelOneHelp(searchedUser.id),
+        { timeoutMs: 90000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+      if (result.directIncomeCreated === 0 && result.levelOneHelpCreated === 0) {
+        toast.success('No missing referral income or level 1 help history was found for this user.');
+      } else {
+        const parts: string[] = [];
+        if (result.directIncomeCreated > 0) {
+          parts.push(`${result.directIncomeCreated} referral income log${result.directIncomeCreated > 1 ? 's' : ''}`);
+        }
+        if (result.levelOneHelpCreated > 0) {
+          parts.push(`${result.levelOneHelpCreated} level 1 help log${result.levelOneHelpCreated > 1 ? 's' : ''}`);
+        }
+        toast.success(`Recovered ${parts.join(' and ')}.`);
+        result.examples.slice(0, 3).forEach((example) => toast.message(example));
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to recover referral / level 1 help history');
+    } finally {
+      setIsRecoveringReferralAndHelp(false);
+    }
+  };
+
+  const handleProcessLockedGiveHelp = async () => {
+    if (!searchedUser) return;
+    setIsProcessingLockedGiveHelp(true);
+    try {
+      await Database.commitCriticalAction(() => {
+        Database.repairLockedIncomeTrackerFromTransactions(searchedUser.id);
+        Database.repairIncomeWalletConsistency(searchedUser.id);
+        Database.syncLockedIncomeWallet(searchedUser.id);
+        Database.processPendingMatrixContributionsForUser(searchedUser.id);
+        Database.releaseLockedGiveHelp(searchedUser.id);
+        Database.releaseLockedReceiveHelp(searchedUser.id);
+        Database.forceReleaseFirstTwoLockedHelp(searchedUser.id, 1);
+        Database.repairLockedIncomeTrackerFromTransactions(searchedUser.id);
+        Database.repairIncomeWalletConsistency(searchedUser.id);
+        Database.syncLockedIncomeWallet(searchedUser.id);
+        return true;
+      }, { timeoutMs: 90000, maxAttempts: 3, retryDelayMs: 1500 });
+
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+      toast.success('Processed locked give-help for this user.');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to process locked give-help');
+    } finally {
+      setIsProcessingLockedGiveHelp(false);
+    }
+  };
+
+  const handleRerouteSafetyPooledGiveHelp = async () => {
+    if (!searchedUser) return;
+    setIsReroutingSafetyPooledGiveHelp(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.rerouteSafetyPooledLockedGiveHelpToUpline(searchedUser.id),
+        { timeoutMs: 90000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+
+      if (result.rerouted === 0) {
+        toast.success(
+          result.scanned > 0
+            ? 'No safety-pooled locked give-help could be re-routed for this user.'
+            : 'No safety-pooled locked give-help entries were found for this user.'
+        );
+      } else {
+        toast.success(`Re-routed ${result.rerouted} safety-pooled locked give-help entr${result.rerouted > 1 ? 'ies' : 'y'}.`);
+      }
+      result.examples.slice(0, 3).forEach((example) => toast.message(example));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to re-route safety-pooled locked give-help');
+    } finally {
+      setIsReroutingSafetyPooledGiveHelp(false);
+    }
+  };
+
+  const handleForceReleaseLockedHelp = async () => {
+    if (!searchedUser) return;
+    setIsForcingLockedRelease(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.forceReleaseFirstTwoLockedHelp(searchedUser.id, 1),
+        { timeoutMs: 90000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+      if (result.released > 0) {
+        toast.success(`Force released $${result.released.toFixed(2)} from locked help.`);
+      } else {
+        toast.success(result.reason);
+      }
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to force release locked help');
+    } finally {
+      setIsForcingLockedRelease(false);
     }
   };
 
@@ -2798,6 +3577,10 @@ export default function Admin() {
 
   const userById = useMemo(() => new Map(allUsers.map(u => [u.id, u])), [allUsers]);
   const userByUserId = useMemo(() => new Map(allUsers.map(u => [u.userId, u])), [allUsers]);
+  const walletByInternalId = useMemo(
+    () => new Map(allUsers.map((u) => [u.id, Database.getWallet(u.id)])),
+    [allUsers, allTransactions]
+  );
 
   const memberReportRows = useMemo(() => {
     if (!isReportsTabActive || reportTab !== 'member-report') return [];
@@ -3274,6 +4057,126 @@ export default function Admin() {
     }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [allTransactions, userById, withdrawalReportFilters, isReportsTabActive, reportTab]);
 
+  const incomeReportRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'income-report') return [];
+    const rows: WalletBalanceReportRow[] = allUsers
+      .filter((u) => !u.isAdmin)
+      .map((u) => {
+        const sponsor = u.sponsorId ? userByUserId.get(u.sponsorId) : undefined;
+        const wallet = walletByInternalId.get(u.id);
+        const status: WalletBalanceReportRow['status'] = u.accountStatus === 'temp_blocked'
+          ? 'temp_blocked'
+          : u.accountStatus === 'permanent_blocked'
+            ? 'permanent_blocked'
+            : u.isActive
+              ? 'active'
+              : 'inactive';
+
+        return {
+          userId: u.userId,
+          name: u.fullName,
+          mobile: u.phone || '-',
+          sponsorId: u.sponsorId || '-',
+          sponsorName: sponsor?.fullName || '-',
+          qualifiedLevel: Database.getQualifiedLevel(u.id),
+          balance: wallet?.incomeWallet || 0,
+          status
+        };
+      });
+
+    return rows
+      .filter((r) => {
+        if (incomeReportFilters.userId && !safeText(r.userId).includes(incomeReportFilters.userId)) return false;
+        if (incomeReportFilters.name && !safeLower(r.name).includes(safeLower(incomeReportFilters.name))) return false;
+        if (incomeReportFilters.sponsorId && !safeText(r.sponsorId).includes(incomeReportFilters.sponsorId)) return false;
+        if (incomeReportFilters.sponsorName && !safeLower(r.sponsorName).includes(safeLower(incomeReportFilters.sponsorName))) return false;
+        if (incomeReportFilters.minAmount && r.balance < Number(incomeReportFilters.minAmount)) return false;
+        if (incomeReportFilters.status && r.status !== incomeReportFilters.status) return false;
+        return true;
+      })
+      .sort((a, b) => b.balance - a.balance || safeText(a.userId).localeCompare(safeText(b.userId)));
+  }, [allUsers, incomeReportFilters, isReportsTabActive, reportTab, userByUserId, walletByInternalId]);
+
+  const fundWalletReportRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'fund-wallet-report') return [];
+    const rows: WalletBalanceReportRow[] = allUsers
+      .filter((u) => !u.isAdmin)
+      .map((u) => {
+        const sponsor = u.sponsorId ? userByUserId.get(u.sponsorId) : undefined;
+        const wallet = walletByInternalId.get(u.id);
+        const status: WalletBalanceReportRow['status'] = u.accountStatus === 'temp_blocked'
+          ? 'temp_blocked'
+          : u.accountStatus === 'permanent_blocked'
+            ? 'permanent_blocked'
+            : u.isActive
+              ? 'active'
+              : 'inactive';
+
+        return {
+          userId: u.userId,
+          name: u.fullName,
+          mobile: u.phone || '-',
+          sponsorId: u.sponsorId || '-',
+          sponsorName: sponsor?.fullName || '-',
+          qualifiedLevel: Database.getQualifiedLevel(u.id),
+          balance: wallet?.depositWallet || 0,
+          status
+        };
+      });
+
+    return rows
+      .filter((r) => {
+        if (fundWalletReportFilters.userId && !safeText(r.userId).includes(fundWalletReportFilters.userId)) return false;
+        if (fundWalletReportFilters.name && !safeLower(r.name).includes(safeLower(fundWalletReportFilters.name))) return false;
+        if (fundWalletReportFilters.sponsorId && !safeText(r.sponsorId).includes(fundWalletReportFilters.sponsorId)) return false;
+        if (fundWalletReportFilters.sponsorName && !safeLower(r.sponsorName).includes(safeLower(fundWalletReportFilters.sponsorName))) return false;
+        if (fundWalletReportFilters.minAmount && r.balance < Number(fundWalletReportFilters.minAmount)) return false;
+        if (fundWalletReportFilters.status && r.status !== fundWalletReportFilters.status) return false;
+        return true;
+      })
+      .sort((a, b) => b.balance - a.balance || safeText(a.userId).localeCompare(safeText(b.userId)));
+  }, [allUsers, fundWalletReportFilters, isReportsTabActive, reportTab, userByUserId, walletByInternalId]);
+
+  const royaltyReportRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'royalty-report') return [];
+    const rows: WalletBalanceReportRow[] = allUsers
+      .filter((u) => !u.isAdmin)
+      .map((u) => {
+        const sponsor = u.sponsorId ? userByUserId.get(u.sponsorId) : undefined;
+        const wallet = walletByInternalId.get(u.id);
+        const status: WalletBalanceReportRow['status'] = u.accountStatus === 'temp_blocked'
+          ? 'temp_blocked'
+          : u.accountStatus === 'permanent_blocked'
+            ? 'permanent_blocked'
+            : u.isActive
+              ? 'active'
+              : 'inactive';
+
+        return {
+          userId: u.userId,
+          name: u.fullName,
+          mobile: u.phone || '-',
+          sponsorId: u.sponsorId || '-',
+          sponsorName: sponsor?.fullName || '-',
+          qualifiedLevel: Database.getQualifiedLevel(u.id),
+          balance: wallet?.royaltyWallet || 0,
+          status
+        };
+      });
+
+    return rows
+      .filter((r) => {
+        if (royaltyReportFilters.userId && !safeText(r.userId).includes(royaltyReportFilters.userId)) return false;
+        if (royaltyReportFilters.name && !safeLower(r.name).includes(safeLower(royaltyReportFilters.name))) return false;
+        if (royaltyReportFilters.sponsorId && !safeText(r.sponsorId).includes(royaltyReportFilters.sponsorId)) return false;
+        if (royaltyReportFilters.sponsorName && !safeLower(r.sponsorName).includes(safeLower(royaltyReportFilters.sponsorName))) return false;
+        if (royaltyReportFilters.minAmount && r.balance < Number(royaltyReportFilters.minAmount)) return false;
+        if (royaltyReportFilters.status && r.status !== royaltyReportFilters.status) return false;
+        return true;
+      })
+      .sort((a, b) => b.balance - a.balance || safeText(a.userId).localeCompare(safeText(b.userId)));
+  }, [allUsers, isReportsTabActive, reportTab, royaltyReportFilters, userByUserId, walletByInternalId]);
+
   const lockedIncomeRows = useMemo(() => {
     if (!isReportsTabActive || reportTab !== 'locked-income') return [];
     const rows: LockedIncomeReportRow[] = allUsers
@@ -3324,6 +4227,31 @@ export default function Admin() {
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [userById, safetyPoolFilters, isReportsTabActive, reportTab]);
+
+  const unsupportedDirectPinBuyRows = useMemo(() => {
+    if (!isReportsTabActive || reportTab !== 'pin-fund-mismatch') return [];
+    return Database.scanUsersForUnsupportedDirectFundPinBuys();
+  }, [isReportsTabActive, reportTab, allTransactions, allUsers]);
+
+  const unsupportedDirectPinBuyOnlyRows = useMemo(
+    () => unsupportedDirectPinBuyRows.filter((row) => (row.unsupportedDirectPinBuyAmount || 0) > 0.009),
+    [unsupportedDirectPinBuyRows]
+  );
+
+  const selfCreditRepairOnlyRows = useMemo(
+    () => unsupportedDirectPinBuyRows.filter((row) => (row.unsupportedDirectPinBuyAmount || 0) <= 0.009),
+    [unsupportedDirectPinBuyRows]
+  );
+
+  const referralIncomeMismatchRows = useMemo<ReferralIncomeMismatchRow[]>(() => {
+    if (!isReportsTabActive || reportTab !== 'referral-income-mismatch') return [];
+    return Database.scanReferralIncomeMismatches();
+  }, [isReportsTabActive, reportTab, allTransactions, allUsers]);
+
+  const duplicateLockedGiveHelpMismatchRows = useMemo<DuplicateLockedGiveHelpMismatchRow[]>(() => {
+    if (!isReportsTabActive || reportTab !== 'duplicate-give-mismatch') return [];
+    return Database.scanDuplicateLockedGiveHelpMismatches();
+  }, [isReportsTabActive, reportTab, allTransactions, allUsers]);
 
   const filteredPinRequests = useMemo(() => {
     if (pinRequestStatusFilter === 'all') return allPinRequests;
@@ -3511,6 +4439,137 @@ export default function Admin() {
     URL.revokeObjectURL(url);
 
     toast.success('Data exported successfully');
+  };
+
+  const exportPinFundMismatchRows = (rows: Array<{
+    userId: string;
+    fullName: string;
+    directPinPurchaseCount: number;
+    directPinPurchaseAmount: number;
+    unsupportedDirectPinBuyAmount: number;
+    combinedCreditTotal: number;
+    nonPinFundDebitTotal: number;
+    missingSelfFundCreditCandidates: number;
+    currentRecoveryDue: number;
+    txnDerivedFundWallet: number;
+  }>, filePrefix: string) => {
+    const csvRows = [
+      [
+        'User ID',
+        'Name',
+        'Direct PIN Buys',
+        'Direct Buy Amount',
+        'Unsupported Amount',
+        'Fund Credits',
+        'Other Fund Debits',
+        'Missing Self Credits',
+        'Current Recovery Due',
+        'Current Fund Wallet'
+      ],
+      ...rows.map((row) => [
+        row.userId,
+        row.fullName,
+        String(row.directPinPurchaseCount),
+        row.directPinPurchaseAmount.toFixed(2),
+        row.unsupportedDirectPinBuyAmount.toFixed(2),
+        row.combinedCreditTotal.toFixed(2),
+        row.nonPinFundDebitTotal.toFixed(2),
+        String(row.missingSelfFundCreditCandidates),
+        row.currentRecoveryDue.toFixed(2),
+        row.txnDerivedFundWallet.toFixed(2)
+      ])
+    ];
+
+    const csv = csvRows
+      .map((cells) => cells.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\r\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${filePrefix}-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    toast.success(`Exported ${rows.length} row(s)`);
+  };
+
+  const handleStartFundRecovery = async (targetUserId: string) => {
+    if (!user?.id) return;
+    setRecoveringFundMismatchUserId(targetUserId);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.startFundRecoveryForUnsupportedPinBuys(targetUserId),
+        { timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+      if (result.success) {
+        toast.success(result.message);
+      } else {
+        toast.error(result.message);
+      }
+      loadAllTransactions();
+      loadStats();
+      if (searchedUser?.userId === targetUserId) {
+        searchUserById(targetUserId);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to start recovery');
+    } finally {
+      setRecoveringFundMismatchUserId(null);
+    }
+  };
+
+  const handleStartReferralIncomeRecovery = async (targetUserId: string, likelyCorrectUserId: string) => {
+    if (!user?.id) return;
+    setRecoveringReferralMismatchUserId(targetUserId);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.startFundRecoveryForReferralIncomeMismatch(targetUserId, likelyCorrectUserId),
+        { timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+      if (result.success) {
+        toast.success(result.message);
+      } else {
+        toast.error(result.message);
+      }
+      loadAllTransactions();
+      loadStats();
+      if (searchedUser?.userId === targetUserId) {
+        searchUserById(targetUserId);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to start referral recovery');
+    } finally {
+      setRecoveringReferralMismatchUserId(null);
+    }
+  };
+
+  const handleStartDuplicateGiveRecovery = async (mismatchKey: string, refreshUserId?: string) => {
+    if (!user?.id) return;
+    setRecoveringDuplicateGiveMismatchKey(mismatchKey);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.startFundRecoveryForDuplicateLockedGiveHelpMismatch(mismatchKey),
+        { timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+      if (result.success) {
+        toast.success(result.message);
+      } else {
+        toast.error(result.message);
+      }
+      loadAllTransactions();
+      loadStats();
+      if (refreshUserId && searchedUser?.userId === refreshUserId) {
+        searchUserById(refreshUserId);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to start duplicate give-help recovery');
+    } finally {
+      setRecoveringDuplicateGiveMismatchKey(null);
+    }
   };
 
   if (!user?.isAdmin) return null;
@@ -5985,6 +7044,122 @@ export default function Admin() {
                       </div>
                     </div>
 
+                    {searchedUser.fundWalletForensics && (
+                      <div className="rounded-lg border border-cyan-500/20 bg-[#141c2a] p-4 space-y-4">
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          <div>
+                            <h4 className="text-white font-semibold">Fund Wallet Forensics</h4>
+                            <p className="text-xs text-white/55">
+                              Compares stored fund wallet values against transaction-derived balance for this 7-digit User ID.
+                            </p>
+                          </div>
+                          <Badge className={`${Math.abs((searchedUser.fundWalletForensics.storedCombinedBalance || 0) - (searchedUser.fundWalletForensics.computedCombinedBalance || 0)) > 0.009 ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'}`}>
+                            {Math.abs((searchedUser.fundWalletForensics.storedCombinedBalance || 0) - (searchedUser.fundWalletForensics.computedCombinedBalance || 0)) > 0.009 ? 'Mismatch Detected' : 'No Mismatch'}
+                          </Badge>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                          <div className="p-4 rounded-lg bg-[#1f2937]">
+                            <p className="text-sm text-white/50">Stored Fund Wallet</p>
+                            <p className="text-xl font-bold text-white">{formatCurrency(searchedUser.fundWalletForensics.storedCanonicalBalance || 0)}</p>
+                            <p className="text-xs text-white/45 mt-1">Canonical internal ID only</p>
+                          </div>
+                          <div className="p-4 rounded-lg bg-[#1f2937]">
+                            <p className="text-sm text-white/50">Txn-derived Fund Wallet</p>
+                            <p className="text-xl font-bold text-cyan-300">{formatCurrency(searchedUser.fundWalletForensics.computedCanonicalBalance || 0)}</p>
+                            <p className="text-xs text-white/45 mt-1">{searchedUser.fundWalletForensics.canonicalRelevantCount || 0} relevant txns</p>
+                          </div>
+                          <div className="p-4 rounded-lg bg-[#1f2937]">
+                            <p className="text-sm text-white/50">Stored Across Related IDs</p>
+                            <p className="text-xl font-bold text-white">{formatCurrency(searchedUser.fundWalletForensics.storedCombinedBalance || 0)}</p>
+                            <p className="text-xs text-white/45 mt-1">{searchedUser.fundWalletForensics.relatedInternalIds?.length || 0} internal IDs</p>
+                          </div>
+                          <div className="p-4 rounded-lg bg-[#1f2937]">
+                            <p className="text-sm text-white/50">Txn-derived Across Related IDs</p>
+                            <p className="text-xl font-bold text-cyan-300">{formatCurrency(searchedUser.fundWalletForensics.computedCombinedBalance || 0)}</p>
+                            <p className="text-xs text-white/45 mt-1">
+                              Credits {formatCurrency(searchedUser.fundWalletForensics.combinedCreditTotal || 0)} | Debits {formatCurrency(searchedUser.fundWalletForensics.combinedDebitTotal || 0)}
+                            </p>
+                          </div>
+                          <div className="p-4 rounded-lg bg-[#1f2937]">
+                            <p className="text-sm text-white/50">Mismatch Amount</p>
+                            <p className={`text-xl font-bold ${Math.abs((searchedUser.fundWalletForensics.storedCombinedBalance || 0) - (searchedUser.fundWalletForensics.computedCombinedBalance || 0)) > 0.009 ? 'text-amber-300' : 'text-emerald-300'}`}>
+                              {formatCurrency((searchedUser.fundWalletForensics.storedCombinedBalance || 0) - (searchedUser.fundWalletForensics.computedCombinedBalance || 0))}
+                            </p>
+                            <p className="text-xs text-white/45 mt-1">Stored minus transaction-derived</p>
+                          </div>
+                          <div className="p-4 rounded-lg bg-[#1f2937]">
+                            <p className="text-sm text-white/50">Direct Fund PIN Buys</p>
+                            <p className="text-xl font-bold text-white">{searchedUser.fundWalletForensics.directPinPurchaseCount || 0}</p>
+                            <p className="text-xs text-white/45 mt-1">{formatCurrency(searchedUser.fundWalletForensics.directPinPurchaseAmount || 0)} total</p>
+                          </div>
+                          <div className="p-4 rounded-lg bg-[#1f2937]">
+                            <p className="text-sm text-white/50">Missing Self Fund Credit Candidates</p>
+                            <p className={`text-xl font-bold ${(searchedUser.fundWalletForensics.missingSelfFundCreditCandidates || 0) > 0 ? 'text-amber-300' : 'text-emerald-300'}`}>
+                              {searchedUser.fundWalletForensics.missingSelfFundCreditCandidates || 0}
+                            </p>
+                            <p className="text-xs text-white/45 mt-1">Income-to-fund debits without matching fund credit</p>
+                          </div>
+                          <div className="p-4 rounded-lg bg-[#1f2937] md:col-span-2 xl:col-span-1">
+                            <p className="text-sm text-white/50">Duplicate Internal IDs</p>
+                            <p className="text-xl font-bold text-white">{searchedUser.fundWalletForensics.duplicateInternalIds?.length || 0}</p>
+                            <p className="text-xs text-white/45 mt-1 break-all">
+                              {searchedUser.fundWalletForensics.relatedInternalIds?.join(', ') || searchedUser.id}
+                            </p>
+                          </div>
+                          <div className="p-4 rounded-lg bg-[#1f2937] md:col-span-2 xl:col-span-1">
+                            <p className="text-sm text-white/50">Recovery Due / Recovered</p>
+                            <p className="text-xl font-bold text-amber-300">
+                              {formatCurrency(searchedUser.fundWalletForensics.currentRecoveryDue || 0)}
+                            </p>
+                            <p className="text-xs text-white/45 mt-1">
+                              Recovered: {formatCurrency(searchedUser.fundWalletForensics.totalRecoveredSoFar || 0)}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <Button
+                            onClick={handleApplyActiveFundRecovery}
+                            disabled={isApplyingActiveFundRecovery || !(searchedUser.wallet?.fundRecoveryDue > 0.009)}
+                            className="bg-amber-600 hover:bg-amber-500 text-white"
+                          >
+                            {isApplyingActiveFundRecovery ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wallet className="w-4 h-4 mr-2" />}
+                            {isApplyingActiveFundRecovery ? 'Running Active Recovery...' : 'Run Active Recovery Now'}
+                          </Button>
+                          <p className="text-xs text-white/50 self-center">
+                            Immediately deducts any currently available fund/income balance against this user&apos;s active recovery due.
+                          </p>
+                        </div>
+
+                        <div className="rounded-lg bg-[#1f2937] p-4">
+                          <p className="text-sm font-semibold text-white mb-3">Wallet Breakdown By Internal ID</p>
+                          <div className="space-y-2">
+                            {(searchedUser.fundWalletForensics.walletBreakdown || []).map((row: any) => (
+                              <div key={row.internalId} className="grid grid-cols-1 md:grid-cols-4 gap-2 rounded-lg border border-white/10 bg-black/10 p-3 text-sm">
+                                <div>
+                                  <p className="text-white/45 text-xs">Internal ID</p>
+                                  <p className="text-white font-mono break-all">{row.internalId}</p>
+                                </div>
+                                <div>
+                                  <p className="text-white/45 text-xs">Stored Fund Wallet</p>
+                                  <p className="text-white">{formatCurrency(row.storedBalance || 0)}</p>
+                                </div>
+                                <div>
+                                  <p className="text-white/45 text-xs">Txn-derived Fund Wallet</p>
+                                  <p className="text-cyan-300">{formatCurrency(row.computedBalance || 0)}</p>
+                                </div>
+                                <div>
+                                  <p className="text-white/45 text-xs">Transactions / Relevant</p>
+                                  <p className="text-white/80">{row.txCount || 0} / {row.relevantCount || 0}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Admin Profile Update */}
                     <div className="rounded-lg border border-white/10 bg-[#141c2a] p-4 space-y-4">
                       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -6124,6 +7299,78 @@ export default function Admin() {
                         </Button>
                         <Button
                           variant="outline"
+                          onClick={handleRecoverPaymentAndPinHistory}
+                          disabled={isRecoveringPaymentAndPinHistory}
+                          className="border-violet-400/40 text-violet-300 hover:bg-violet-400/10 w-full"
+                        >
+                          {isRecoveringPaymentAndPinHistory ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <FileText className="w-4 h-4 mr-2" />}
+                          {isRecoveringPaymentAndPinHistory ? 'Recovering Deposit / PIN History...' : 'Recover Deposit / PIN History'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleRecoverReferralAndHelp}
+                          disabled={isRecoveringReferralAndHelp}
+                          className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-400/10 w-full"
+                        >
+                          {isRecoveringReferralAndHelp ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Award className="w-4 h-4 mr-2" />}
+                          {isRecoveringReferralAndHelp ? 'Recovering Referral / L1 Help...' : 'Recover Referral / L1 Help'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleProcessLockedGiveHelp}
+                          disabled={isProcessingLockedGiveHelp}
+                          className="border-sky-400/40 text-sky-300 hover:bg-sky-400/10 w-full"
+                        >
+                          {isProcessingLockedGiveHelp ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wrench className="w-4 h-4 mr-2" />}
+                          {isProcessingLockedGiveHelp ? 'Processing Locked Give-Help...' : 'Process Locked Give-Help'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleForceReleaseLockedHelp}
+                          disabled={isForcingLockedRelease}
+                          className="border-rose-400/40 text-rose-300 hover:bg-rose-400/10 w-full"
+                        >
+                          {isForcingLockedRelease ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <AlertTriangle className="w-4 h-4 mr-2" />}
+                          {isForcingLockedRelease ? 'Force Releasing Locked Help...' : 'Force Release L1 Locked Help'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleRerouteSafetyPooledGiveHelp}
+                          disabled={isReroutingSafetyPooledGiveHelp}
+                          className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10 w-full"
+                        >
+                          {isReroutingSafetyPooledGiveHelp ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <RotateCcw className="w-4 h-4 mr-2" />}
+                          {isReroutingSafetyPooledGiveHelp ? 'Re-routing Safety-Pooled Give-Help...' : 'Re-route Safety-Pooled Give-Help'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleResyncWalletLedger}
+                          disabled={isResyncingWalletLedger}
+                          className="border-lime-400/40 text-lime-300 hover:bg-lime-400/10 w-full"
+                        >
+                          {isResyncingWalletLedger ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wallet className="w-4 h-4 mr-2" />}
+                          {isResyncingWalletLedger ? 'Resyncing Wallet Ledger...' : 'Resync Wallet Ledger'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleRebuildLockedIncomeTracker}
+                          disabled={isRebuildingLockedIncomeTracker}
+                          className="border-indigo-400/40 text-indigo-300 hover:bg-indigo-400/10 w-full"
+                        >
+                          {isRebuildingLockedIncomeTracker ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wrench className="w-4 h-4 mr-2" />}
+                          {isRebuildingLockedIncomeTracker ? 'Rebuilding Locked Tracker...' : 'Rebuild Locked Income Tracker'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleRebuildLockedIncomeTrackerForAll}
+                          disabled={isRebuildingLockedIncomeAll}
+                          className="border-indigo-400/40 text-indigo-300 hover:bg-indigo-400/10 w-full"
+                        >
+                          {isRebuildingLockedIncomeAll ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wrench className="w-4 h-4 mr-2" />}
+                          {isRebuildingLockedIncomeAll ? 'Rebuilding Locked Tracker (All)...' : 'Rebuild Locked Tracker (All Users)'}
+                        </Button>
+                        <Button
+                          variant="outline"
                           onClick={handleRecalculateQualifiedLevel}
                           disabled={isRecalculatingQualifiedLevel}
                           className="border-sky-400/40 text-sky-300 hover:bg-sky-400/10 w-full"
@@ -6168,6 +7415,9 @@ export default function Admin() {
                           {isReversingInvalidRestoredHelp ? 'Reversing Invalid Credits...' : 'Reverse Invalid Restored Credit'}
                         </Button>
                       </div>
+                      <p className="text-xs text-white/50">
+                        Locked help at Level N funds give-help at Level N+1. Strict level-only consumption applies after the cutover date.
+                      </p>
                     </div>
 
                     {/* Pending Matrix Debug */}
@@ -6779,24 +8029,28 @@ export default function Admin() {
                                   )}
                                   {msg.attachments.length > 0 && (
                                     <div className="mt-2 space-y-2">
-                                      {msg.attachments.map((att) => (
-                                        <div key={att.id}>
-                                          {(att.file_type?.startsWith('image/') || att.data_url?.startsWith('data:image/')) ? (
-                                            <a href={att.data_url} target="_blank" rel="noreferrer" className="block">
-                                              <img
-                                                src={att.data_url}
-                                                alt={att.file_name}
-                                                className="max-w-[280px] max-h-[200px] rounded-lg border border-white/10 object-contain cursor-pointer hover:opacity-80 transition-opacity"
-                                              />
-                                              <p className="text-xs text-[#7cc9ff] mt-1">{att.file_name}</p>
-                                            </a>
-                                          ) : (
-                                            <a href={att.data_url} target="_blank" rel="noreferrer" className="block text-xs text-[#7cc9ff] hover:underline">
-                                              📎 {att.file_name}
-                                            </a>
-                                          )}
-                                        </div>
-                                      ))}
+                                        {msg.attachments.map((att) => (
+                                          <div key={att.id}>
+                                            {(() => {
+                                              const attachmentUrl = att.file_url || att.data_url;
+                                              const isImage = att.file_type?.startsWith('image/') || attachmentUrl?.startsWith('data:image/');
+                                              return isImage ? (
+                                              <a href={attachmentUrl} target="_blank" rel="noreferrer" className="block">
+                                                <img
+                                                  src={attachmentUrl}
+                                                  alt={att.file_name}
+                                                  className="max-w-[280px] max-h-[200px] rounded-lg border border-white/10 object-contain cursor-pointer hover:opacity-80 transition-opacity"
+                                                />
+                                                <p className="text-xs text-[#7cc9ff] mt-1">{att.file_name}</p>
+                                              </a>
+                                            ) : (
+                                              <a href={attachmentUrl} target="_blank" rel="noreferrer" className="block text-xs text-[#7cc9ff] hover:underline">
+                                                📎 {att.file_name}
+                                              </a>
+                                            );
+                                            })()}
+                                          </div>
+                                        ))}
                                     </div>
                                   )}
                                 </div>
@@ -6962,6 +8216,9 @@ export default function Admin() {
                 <Tabs value={reportTab} onValueChange={setReportTab} className="space-y-4">
                   <TabsList className="bg-[#1f2937] border border-white/10 flex-wrap h-auto">
                     <TabsTrigger value="member-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Member Report</TabsTrigger>
+                    <TabsTrigger value="income-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Income Report</TabsTrigger>
+                    <TabsTrigger value="fund-wallet-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Fund Wallet</TabsTrigger>
+                    <TabsTrigger value="royalty-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Royalty Report</TabsTrigger>
                     <TabsTrigger value="receive-help" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Receive Help</TabsTrigger>
                     <TabsTrigger value="give-help" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Give Help</TabsTrigger>
                     <TabsTrigger value="deposit-report" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Deposit Report</TabsTrigger>
@@ -6970,6 +8227,9 @@ export default function Admin() {
                     <TabsTrigger value="offer-achievers" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Offer Achievers</TabsTrigger>
                     <TabsTrigger value="all-level" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">All Level Report</TabsTrigger>
                     <TabsTrigger value="safety-pool" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Safety Pool</TabsTrigger>
+                    <TabsTrigger value="pin-fund-mismatch" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">PIN Fund Mismatch</TabsTrigger>
+                    <TabsTrigger value="referral-income-mismatch" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Referral Income Mismatch</TabsTrigger>
+                    <TabsTrigger value="duplicate-give-mismatch" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Duplicate Give-Help</TabsTrigger>
                   </TabsList>
 
                   <TabsContent value="member-report" className="space-y-4">
@@ -7003,7 +8263,7 @@ export default function Admin() {
                             <th className="text-left py-2 px-3 text-white/60">Name</th>
                             <th className="text-left py-2 px-3 text-white/60">Mobile</th>
                             <th className="text-left py-2 px-3 text-white/60">Sponsor Name</th>
-                            <th className="text-left py-2 px-3 text-white/60">Current Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor ID</th>
                             <th className="text-left py-2 px-3 text-white/60">Qualified Level</th>
                             <th className="text-left py-2 px-3 text-white/60">Offer</th>
                             <th className="text-left py-2 px-3 text-white/60">Status</th>
@@ -7017,7 +8277,7 @@ export default function Admin() {
                               <td className="py-2 px-3 text-white">{r.name}</td>
                               <td className="py-2 px-3 text-white/60">{r.mobile}</td>
                               <td className="py-2 px-3 text-white/60">{r.sponsorName}</td>
-                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{r.currentLevelDisplay}</td>
+                              <td className="py-2 px-3 text-white/60 font-mono">{r.sponsorId}</td>
                               <td className="py-2 px-3 text-white/60">L{r.qualifiedLevel}</td>
                               <td className="py-2 px-3 text-white/60">{r.achievedOffer}</td>
                               <td className="py-2 px-3 text-white/60">{r.blockStatus}</td>
@@ -7027,6 +8287,192 @@ export default function Admin() {
                         </tbody>
                       </table>
                       {memberReportRows.length === 0 && <p className="text-center text-white/50 py-6">No matching members</p>}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="income-report" className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3">
+                      <Input placeholder="User ID" value={incomeReportFilters.userId} onChange={(e) => setIncomeReportFilters({ ...incomeReportFilters, userId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Name" value={incomeReportFilters.name} onChange={(e) => setIncomeReportFilters({ ...incomeReportFilters, name: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Sponsor ID" value={incomeReportFilters.sponsorId} onChange={(e) => setIncomeReportFilters({ ...incomeReportFilters, sponsorId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Sponsor Name" value={incomeReportFilters.sponsorName} onChange={(e) => setIncomeReportFilters({ ...incomeReportFilters, sponsorName: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Min Amount" type="number" value={incomeReportFilters.minAmount} onChange={(e) => setIncomeReportFilters({ ...incomeReportFilters, minAmount: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <select value={incomeReportFilters.status} onChange={(e) => setIncomeReportFilters({ ...incomeReportFilters, status: e.target.value })} className="px-3 h-10 bg-[#1f2937] border border-white/10 rounded-md text-white">
+                        <option value="">All Status</option>
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                        <option value="temp_blocked">Temp Blocked</option>
+                        <option value="permanent_blocked">Permanent Blocked</option>
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Users Shown</p>
+                        <p className="text-2xl font-bold text-white">{incomeReportRows.length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Positive Wallets</p>
+                        <p className="text-2xl font-bold text-emerald-400">{incomeReportRows.filter((row) => row.balance > 0.0001).length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Total Available Income</p>
+                        <p className="text-2xl font-bold text-[#118bdd]">{formatCurrency(incomeReportRows.reduce((sum, row) => sum + row.balance, 0))}</p>
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Mobile</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Qualified Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Status</th>
+                            <th className="text-left py-2 px-3 text-white/60">Available Income</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {incomeReportRows.slice(0, 300).map((row) => (
+                            <tr key={row.userId} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{row.userId}</td>
+                              <td className="py-2 px-3 text-white">{row.name}</td>
+                              <td className="py-2 px-3 text-white/60">{row.mobile}</td>
+                              <td className="py-2 px-3 text-white/60 font-mono">{row.sponsorId}</td>
+                              <td className="py-2 px-3 text-white/60">{row.sponsorName}</td>
+                              <td className="py-2 px-3 text-white/60">L{row.qualifiedLevel}</td>
+                              <td className="py-2 px-3 text-white/60">{row.status}</td>
+                              <td className="py-2 px-3 text-emerald-400 font-medium">{formatCurrency(row.balance)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {incomeReportRows.length === 0 && <p className="text-center text-white/50 py-6">No matching income wallet records</p>}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="fund-wallet-report" className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3">
+                      <Input placeholder="User ID" value={fundWalletReportFilters.userId} onChange={(e) => setFundWalletReportFilters({ ...fundWalletReportFilters, userId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Name" value={fundWalletReportFilters.name} onChange={(e) => setFundWalletReportFilters({ ...fundWalletReportFilters, name: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Sponsor ID" value={fundWalletReportFilters.sponsorId} onChange={(e) => setFundWalletReportFilters({ ...fundWalletReportFilters, sponsorId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Sponsor Name" value={fundWalletReportFilters.sponsorName} onChange={(e) => setFundWalletReportFilters({ ...fundWalletReportFilters, sponsorName: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Min Amount" type="number" value={fundWalletReportFilters.minAmount} onChange={(e) => setFundWalletReportFilters({ ...fundWalletReportFilters, minAmount: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <select value={fundWalletReportFilters.status} onChange={(e) => setFundWalletReportFilters({ ...fundWalletReportFilters, status: e.target.value })} className="px-3 h-10 bg-[#1f2937] border border-white/10 rounded-md text-white">
+                        <option value="">All Status</option>
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                        <option value="temp_blocked">Temp Blocked</option>
+                        <option value="permanent_blocked">Permanent Blocked</option>
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Users Shown</p>
+                        <p className="text-2xl font-bold text-white">{fundWalletReportRows.length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Positive Wallets</p>
+                        <p className="text-2xl font-bold text-emerald-400">{fundWalletReportRows.filter((row) => row.balance > 0.0001).length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Total Available Fund</p>
+                        <p className="text-2xl font-bold text-[#118bdd]">{formatCurrency(fundWalletReportRows.reduce((sum, row) => sum + row.balance, 0))}</p>
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Mobile</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Qualified Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Status</th>
+                            <th className="text-left py-2 px-3 text-white/60">Available Fund</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {fundWalletReportRows.slice(0, 300).map((row) => (
+                            <tr key={row.userId} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{row.userId}</td>
+                              <td className="py-2 px-3 text-white">{row.name}</td>
+                              <td className="py-2 px-3 text-white/60">{row.mobile}</td>
+                              <td className="py-2 px-3 text-white/60 font-mono">{row.sponsorId}</td>
+                              <td className="py-2 px-3 text-white/60">{row.sponsorName}</td>
+                              <td className="py-2 px-3 text-white/60">L{row.qualifiedLevel}</td>
+                              <td className="py-2 px-3 text-white/60">{row.status}</td>
+                              <td className="py-2 px-3 text-cyan-300 font-medium">{formatCurrency(row.balance)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {fundWalletReportRows.length === 0 && <p className="text-center text-white/50 py-6">No matching fund wallet records</p>}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="royalty-report" className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3">
+                      <Input placeholder="User ID" value={royaltyReportFilters.userId} onChange={(e) => setRoyaltyReportFilters({ ...royaltyReportFilters, userId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Name" value={royaltyReportFilters.name} onChange={(e) => setRoyaltyReportFilters({ ...royaltyReportFilters, name: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Sponsor ID" value={royaltyReportFilters.sponsorId} onChange={(e) => setRoyaltyReportFilters({ ...royaltyReportFilters, sponsorId: e.target.value.replace(/\D/g, '').slice(0, 7) })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Sponsor Name" value={royaltyReportFilters.sponsorName} onChange={(e) => setRoyaltyReportFilters({ ...royaltyReportFilters, sponsorName: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <Input placeholder="Min Amount" type="number" value={royaltyReportFilters.minAmount} onChange={(e) => setRoyaltyReportFilters({ ...royaltyReportFilters, minAmount: e.target.value })} className="bg-[#1f2937] border-white/10 text-white" />
+                      <select value={royaltyReportFilters.status} onChange={(e) => setRoyaltyReportFilters({ ...royaltyReportFilters, status: e.target.value })} className="px-3 h-10 bg-[#1f2937] border border-white/10 rounded-md text-white">
+                        <option value="">All Status</option>
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                        <option value="temp_blocked">Temp Blocked</option>
+                        <option value="permanent_blocked">Permanent Blocked</option>
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Users Shown</p>
+                        <p className="text-2xl font-bold text-white">{royaltyReportRows.length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Positive Wallets</p>
+                        <p className="text-2xl font-bold text-emerald-400">{royaltyReportRows.filter((row) => row.balance > 0.0001).length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Total Royalty Balance</p>
+                        <p className="text-2xl font-bold text-[#118bdd]">{formatCurrency(royaltyReportRows.reduce((sum, row) => sum + row.balance, 0))}</p>
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Mobile</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Qualified Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Status</th>
+                            <th className="text-left py-2 px-3 text-white/60">Royalty Balance</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {royaltyReportRows.slice(0, 300).map((row) => (
+                            <tr key={row.userId} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{row.userId}</td>
+                              <td className="py-2 px-3 text-white">{row.name}</td>
+                              <td className="py-2 px-3 text-white/60">{row.mobile}</td>
+                              <td className="py-2 px-3 text-white/60 font-mono">{row.sponsorId}</td>
+                              <td className="py-2 px-3 text-white/60">{row.sponsorName}</td>
+                              <td className="py-2 px-3 text-white/60">L{row.qualifiedLevel}</td>
+                              <td className="py-2 px-3 text-white/60">{row.status}</td>
+                              <td className="py-2 px-3 text-amber-300 font-medium">{formatCurrency(row.balance)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {royaltyReportRows.length === 0 && <p className="text-center text-white/50 py-6">No matching royalty wallet records</p>}
                     </div>
                   </TabsContent>
 
@@ -7391,6 +8837,349 @@ export default function Admin() {
                       {safetyPoolRows.length === 0 && <p className="text-center text-white/50 py-6">No safety pool records found</p>}
                     </div>
                   </TabsContent>
+
+                  <TabsContent value="pin-fund-mismatch" className="space-y-4">
+                    <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-4">
+                      <p className="text-sm text-amber-200">
+                        Shows users where direct PIN buys from fund wallet are larger than what transaction-derived fund credits can support after other fund debits are accounted for.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                        onClick={() => exportPinFundMismatchRows(unsupportedDirectPinBuyOnlyRows, 'unsupported-pin-fund-buy-cases')}
+                        disabled={unsupportedDirectPinBuyOnlyRows.length === 0}
+                      >
+                        <Download className="w-4 h-4 mr-2" />
+                        Export Unsupported Cases
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="border-cyan-400/40 text-cyan-300 hover:bg-cyan-400/10"
+                        onClick={() => exportPinFundMismatchRows(unsupportedDirectPinBuyRows, 'pin-fund-mismatch-all')}
+                        disabled={unsupportedDirectPinBuyRows.length === 0}
+                      >
+                        <Download className="w-4 h-4 mr-2" />
+                        Export All Rows
+                      </Button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Unsupported Cases</p>
+                        <p className="text-2xl font-bold text-white">{unsupportedDirectPinBuyOnlyRows.length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Unsupported Amount</p>
+                        <p className="text-2xl font-bold text-amber-300">
+                          {formatCurrency(unsupportedDirectPinBuyOnlyRows.reduce((sum, row) => sum + (row.unsupportedDirectPinBuyAmount || 0), 0))}
+                        </p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Direct PIN Buy Total</p>
+                        <p className="text-2xl font-bold text-white">
+                          {formatCurrency(unsupportedDirectPinBuyOnlyRows.reduce((sum, row) => sum + (row.directPinPurchaseAmount || 0), 0))}
+                        </p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Repair-only Cases</p>
+                        <p className="text-2xl font-bold text-cyan-300">
+                          {selfCreditRepairOnlyRows.length}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <h4 className="text-white font-semibold">Unsupported Direct Fund PIN Buy Cases</h4>
+                      <div className="overflow-x-auto admin-table-scroll">
+                        <table className="w-full admin-table">
+                          <thead>
+                            <tr className="border-b border-white/10">
+                              <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                              <th className="text-left py-2 px-3 text-white/60">Name</th>
+                              <th className="text-left py-2 px-3 text-white/60">Direct PIN Buys</th>
+                              <th className="text-left py-2 px-3 text-white/60">Direct Buy Amount</th>
+                              <th className="text-left py-2 px-3 text-white/60">Unsupported Amount</th>
+                              <th className="text-left py-2 px-3 text-white/60">Fund Credits</th>
+                              <th className="text-left py-2 px-3 text-white/60">Other Fund Debits</th>
+                              <th className="text-left py-2 px-3 text-white/60">Missing Self Credits</th>
+                              <th className="text-left py-2 px-3 text-white/60">Recovery Due</th>
+                              <th className="text-left py-2 px-3 text-white/60">Recovered</th>
+                              <th className="text-left py-2 px-3 text-white/60">Current Fund Wallet</th>
+                              <th className="text-left py-2 px-3 text-white/60">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {unsupportedDirectPinBuyOnlyRows.slice(0, 300).map((row) => (
+                              <tr key={row.userId} className="border-b border-white/5">
+                                <td className="py-2 px-3 text-[#118bdd] font-mono">{row.userId}</td>
+                                <td className="py-2 px-3 text-white">{row.fullName}</td>
+                                <td className="py-2 px-3 text-white/70">{row.directPinPurchaseCount}</td>
+                                <td className="py-2 px-3 text-white">{formatCurrency(row.directPinPurchaseAmount)}</td>
+                                <td className="py-2 px-3 text-amber-300 font-medium">{formatCurrency(row.unsupportedDirectPinBuyAmount)}</td>
+                                <td className="py-2 px-3 text-emerald-400">{formatCurrency(row.combinedCreditTotal)}</td>
+                                <td className="py-2 px-3 text-rose-300">{formatCurrency(row.nonPinFundDebitTotal)}</td>
+                                <td className="py-2 px-3 text-cyan-300">{row.missingSelfFundCreditCandidates}</td>
+                                <td className="py-2 px-3 text-amber-200">{formatCurrency(row.currentRecoveryDue || 0)}</td>
+                                <td className="py-2 px-3 text-cyan-300">{formatCurrency(row.totalRecoveredSoFar || 0)}</td>
+                                <td className="py-2 px-3 text-white/70">{formatCurrency(row.txnDerivedFundWallet)}</td>
+                                <td className="py-2 px-3">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                                    disabled={(row.currentRecoveryDue || 0) > 0.009 || (row.remainingRecoveryAmount || 0) <= 0.009 || recoveringFundMismatchUserId === row.userId}
+                                    onClick={() => { void handleStartFundRecovery(row.userId); }}
+                                  >
+                                    {recoveringFundMismatchUserId === row.userId
+                                      ? <RefreshCw className="w-4 h-4 animate-spin" />
+                                      : ((row.currentRecoveryDue || 0) > 0.009
+                                        ? 'Recovery Active'
+                                        : ((row.remainingRecoveryAmount || 0) <= 0.009 ? 'Recovered' : 'Start Recovery'))}
+                                  </Button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {unsupportedDirectPinBuyOnlyRows.length === 0 && <p className="text-center text-white/50 py-6">No unsupported direct fund PIN buy cases found.</p>}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <h4 className="text-white font-semibold">Self-credit Repair-only Cases</h4>
+                      <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 p-3">
+                        <p className="text-sm text-cyan-200">
+                          These users have missing self income-to-fund credits to repair, but their direct PIN buys are still supported by transaction-derived fund credits.
+                        </p>
+                      </div>
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Direct PIN Buys</th>
+                            <th className="text-left py-2 px-3 text-white/60">Direct Buy Amount</th>
+                            <th className="text-left py-2 px-3 text-white/60">Unsupported Amount</th>
+                            <th className="text-left py-2 px-3 text-white/60">Fund Credits</th>
+                            <th className="text-left py-2 px-3 text-white/60">Other Fund Debits</th>
+                            <th className="text-left py-2 px-3 text-white/60">Missing Self Credits</th>
+                            <th className="text-left py-2 px-3 text-white/60">Current Fund Wallet</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selfCreditRepairOnlyRows.slice(0, 300).map((row) => (
+                            <tr key={row.userId} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{row.userId}</td>
+                              <td className="py-2 px-3 text-white">{row.fullName}</td>
+                              <td className="py-2 px-3 text-white/70">{row.directPinPurchaseCount}</td>
+                              <td className="py-2 px-3 text-white">{formatCurrency(row.directPinPurchaseAmount)}</td>
+                              <td className="py-2 px-3 text-emerald-300 font-medium">{formatCurrency(row.unsupportedDirectPinBuyAmount)}</td>
+                              <td className="py-2 px-3 text-emerald-400">{formatCurrency(row.combinedCreditTotal)}</td>
+                              <td className="py-2 px-3 text-rose-300">{formatCurrency(row.nonPinFundDebitTotal)}</td>
+                              <td className="py-2 px-3 text-cyan-300">{row.missingSelfFundCreditCandidates}</td>
+                              <td className="py-2 px-3 text-white/70">{formatCurrency(row.txnDerivedFundWallet)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {selfCreditRepairOnlyRows.length === 0 && <p className="text-center text-white/50 py-6">No repair-only cases found.</p>}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="referral-income-mismatch" className="space-y-4">
+                    <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-4">
+                      <p className="text-sm text-amber-200">
+                        Flags sponsors who received multiple referral-income credits for what looks like one real referral.
+                        It compares the credited rows against the likely canonical referred User ID and lists the wrong IDs seen in transaction history.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Mismatch Cases</p>
+                        <p className="text-2xl font-bold text-white">{referralIncomeMismatchRows.length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Extra Credits</p>
+                        <p className="text-2xl font-bold text-amber-300">
+                          {referralIncomeMismatchRows.reduce((sum, row) => sum + (row.extraDirectIncomeCount || 0), 0)}
+                        </p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Extra Amount</p>
+                        <p className="text-2xl font-bold text-rose-300">
+                          {formatCurrency(referralIncomeMismatchRows.reduce((sum, row) => sum + (row.extraCreditedAmount || 0), 0))}
+                        </p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Wrong IDs Seen</p>
+                        <p className="text-2xl font-bold text-cyan-300">
+                          {referralIncomeMismatchRows.reduce((sum, row) => sum + row.wrongUserIds.length, 0)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 p-3">
+                      <p className="text-sm text-cyan-200">
+                        Start Recovery first takes back whatever is currently available from the sponsor&apos;s fund + income balance.
+                        Any remaining amount becomes active recovery due and future fund/income credits will auto-deduct until it is fully recovered.
+                      </p>
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Referral Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Likely Correct ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Credited Rows</th>
+                            <th className="text-left py-2 px-3 text-white/60">Extra Rows</th>
+                            <th className="text-left py-2 px-3 text-white/60">Total Credited</th>
+                            <th className="text-left py-2 px-3 text-white/60">Extra Amount</th>
+                            <th className="text-left py-2 px-3 text-white/60">Recovery Due</th>
+                            <th className="text-left py-2 px-3 text-white/60">Recovered</th>
+                            <th className="text-left py-2 px-3 text-white/60">Wrong IDs Seen</th>
+                            <th className="text-left py-2 px-3 text-white/60">Window</th>
+                            <th className="text-left py-2 px-3 text-white/60">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {referralIncomeMismatchRows.slice(0, 300).map((row) => (
+                            <tr key={`${row.sponsorUserId}-${row.likelyCorrectUserId}`} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{row.sponsorUserId}</td>
+                              <td className="py-2 px-3 text-white">{row.sponsorName}</td>
+                              <td className="py-2 px-3 text-white/80">{row.referredName}</td>
+                              <td className="py-2 px-3 text-emerald-300 font-mono">{row.likelyCorrectUserId}</td>
+                              <td className="py-2 px-3 text-white/70">{row.directIncomeCount}</td>
+                              <td className="py-2 px-3 text-amber-300 font-medium">{row.extraDirectIncomeCount}</td>
+                              <td className="py-2 px-3 text-white">{formatCurrency(row.totalCreditedAmount)}</td>
+                              <td className="py-2 px-3 text-rose-300 font-medium">{formatCurrency(row.extraCreditedAmount)}</td>
+                              <td className="py-2 px-3 text-amber-200">{formatCurrency(row.currentRecoveryDue || 0)}</td>
+                              <td className="py-2 px-3 text-cyan-300">{formatCurrency(row.totalRecoveredSoFar || 0)}</td>
+                              <td className="py-2 px-3 text-cyan-300 font-mono text-xs">
+                                {row.wrongUserIds.length > 0 ? row.wrongUserIds.join(', ') : '-'}
+                              </td>
+                              <td className="py-2 px-3 text-white/50 text-xs whitespace-nowrap">
+                                {formatDate(row.firstCreatedAt)} to {formatDate(row.lastCreatedAt)}
+                              </td>
+                              <td className="py-2 px-3">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                                  disabled={(row.currentRecoveryDue || 0) > 0.009 || (row.remainingRecoveryAmount || 0) <= 0.009 || recoveringReferralMismatchUserId === row.sponsorUserId}
+                                  onClick={() => { void handleStartReferralIncomeRecovery(row.sponsorUserId, row.likelyCorrectUserId); }}
+                                >
+                                  {recoveringReferralMismatchUserId === row.sponsorUserId
+                                    ? <RefreshCw className="w-4 h-4 animate-spin" />
+                                    : ((row.currentRecoveryDue || 0) > 0.009
+                                      ? 'Recovery Active'
+                                      : ((row.remainingRecoveryAmount || 0) <= 0.009 ? 'Recovered' : 'Start Recovery'))}
+                                </Button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {referralIncomeMismatchRows.length === 0 && <p className="text-center text-white/50 py-6">No referral income mismatch cases found.</p>}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="duplicate-give-mismatch" className="space-y-4">
+                    <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-4">
+                      <p className="text-sm text-amber-200">
+                        Flags duplicate locked give-help clusters where the same sender auto-sent the same help to the same recipient twice inside the same short window.
+                        Start Recovery targets the recipient who got the extra credit.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Mismatch Cases</p>
+                        <p className="text-2xl font-bold text-white">{duplicateLockedGiveHelpMismatchRows.length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Extra Give Rows</p>
+                        <p className="text-2xl font-bold text-amber-300">
+                          {duplicateLockedGiveHelpMismatchRows.reduce((sum, row) => sum + (row.extraGiveCount || 0), 0)}
+                        </p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Extra Given</p>
+                        <p className="text-2xl font-bold text-rose-300">
+                          {formatCurrency(duplicateLockedGiveHelpMismatchRows.reduce((sum, row) => sum + (row.extraGivenAmount || 0), 0))}
+                        </p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Extra Credited</p>
+                        <p className="text-2xl font-bold text-cyan-300">
+                          {formatCurrency(duplicateLockedGiveHelpMismatchRows.reduce((sum, row) => sum + (row.extraCreditedAmount || 0), 0))}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 p-3">
+                      <p className="text-sm text-cyan-200">
+                        Recovery first takes back whatever is currently available from the recipient&apos;s fund + income balance.
+                        Any remaining amount becomes active recovery due and future fund/income credits will auto-deduct until it is fully recovered.
+                      </p>
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60">Sender ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sender Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Recipient ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Recipient Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Give Rows</th>
+                            <th className="text-left py-2 px-3 text-white/60">Extra Rows</th>
+                            <th className="text-left py-2 px-3 text-white/60">Total Given</th>
+                            <th className="text-left py-2 px-3 text-white/60">Extra Given</th>
+                            <th className="text-left py-2 px-3 text-white/60">Extra Credited</th>
+                            <th className="text-left py-2 px-3 text-white/60">Recovery Due</th>
+                            <th className="text-left py-2 px-3 text-white/60">Recovered</th>
+                            <th className="text-left py-2 px-3 text-white/60">Window</th>
+                            <th className="text-left py-2 px-3 text-white/60">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {duplicateLockedGiveHelpMismatchRows.slice(0, 300).map((row) => (
+                            <tr key={row.mismatchKey} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{row.senderUserId}</td>
+                              <td className="py-2 px-3 text-white">{row.senderName}</td>
+                              <td className="py-2 px-3 text-cyan-300 font-mono">{row.recipientUserId}</td>
+                              <td className="py-2 px-3 text-white/80">{row.recipientName}</td>
+                              <td className="py-2 px-3 text-white/70">{row.level}</td>
+                              <td className="py-2 px-3 text-white/70">{row.giveCount}</td>
+                              <td className="py-2 px-3 text-amber-300 font-medium">{row.extraGiveCount}</td>
+                              <td className="py-2 px-3 text-white">{formatCurrency(row.totalGivenAmount)}</td>
+                              <td className="py-2 px-3 text-rose-300 font-medium">{formatCurrency(row.extraGivenAmount)}</td>
+                              <td className="py-2 px-3 text-cyan-300 font-medium">{formatCurrency(row.extraCreditedAmount)}</td>
+                              <td className="py-2 px-3 text-amber-200">{formatCurrency(row.currentRecoveryDue || 0)}</td>
+                              <td className="py-2 px-3 text-cyan-300">{formatCurrency(row.totalRecoveredSoFar || 0)}</td>
+                              <td className="py-2 px-3 text-white/50 text-xs whitespace-nowrap">
+                                {formatDate(row.clusterStartedAt)} to {formatDate(row.clusterEndedAt)}
+                              </td>
+                              <td className="py-2 px-3">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                                  disabled={(row.currentRecoveryDue || 0) > 0.009 || (row.remainingRecoveryAmount || 0) <= 0.009 || recoveringDuplicateGiveMismatchKey === row.mismatchKey}
+                                  onClick={() => { void handleStartDuplicateGiveRecovery(row.mismatchKey, row.recipientUserId); }}
+                                >
+                                  {recoveringDuplicateGiveMismatchKey === row.mismatchKey
+                                    ? <RefreshCw className="w-4 h-4 animate-spin" />
+                                    : ((row.currentRecoveryDue || 0) > 0.009
+                                      ? 'Recovery Active'
+                                      : ((row.remainingRecoveryAmount || 0) <= 0.009 ? 'Recovered' : 'Start Recovery'))}
+                                </Button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {duplicateLockedGiveHelpMismatchRows.length === 0 && <p className="text-center text-white/50 py-6">No duplicate locked give-help mismatch cases found.</p>}
+                    </div>
+                  </TabsContent>
                 </Tabs>
               </CardContent>
             </Card>
@@ -7632,7 +9421,7 @@ export default function Admin() {
                       key={tab}
                       variant={mktSubTab === tab ? 'default' : 'outline'}
                       size="sm"
-                      onClick={() => { setMktSubTab(tab); setMktShowForm(false); setMktEditingBanner(null); setMktEditingDeal(null); setMktEditingCategory(null); setMktEditingRetailer(null); }}
+                      onClick={() => { setMktSubTab(tab); setMktSearchQuery(''); setMktShowForm(false); setMktEditingBanner(null); setMktEditingDeal(null); setMktEditingCategory(null); setMktEditingRetailer(null); }}
                       className={mktSubTab === tab ? 'bg-[#118bdd]' : 'border-white/20 text-white/70 hover:text-white'}
                     >
                       {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -7643,11 +9432,24 @@ export default function Admin() {
                 {/* === RETAILERS SUB-TAB === */}
                 {mktSubTab === 'retailers' && (
                   <div className="space-y-4">
-                    <div className="flex justify-between items-center">
-                      <h3 className="text-white/80 text-sm font-medium">Retailers ({marketplaceRetailers.length})</h3>
-                      <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingRetailer(null); setMktShowForm(true); }}>
-                        <Plus className="w-4 h-4 mr-1" /> Add Retailer
-                      </Button>
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                      <h3 className="text-white/80 text-sm font-medium">
+                        Retailers ({filteredMarketplaceRetailers.length}{normalizedMarketplaceSearch ? ` / ${marketplaceRetailers.length}` : ''})
+                      </h3>
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-3 lg:min-w-[520px]">
+                        <div className="relative flex-1">
+                          <Search className="w-4 h-4 text-white/40 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <Input
+                            value={mktSearchQuery}
+                            onChange={(e) => setMktSearchQuery(e.target.value)}
+                            placeholder="Search retailers by name, category, URL, offer..."
+                            className="bg-[#1f2937] border-white/10 text-white pl-9"
+                          />
+                        </div>
+                        <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingRetailer(null); setMktShowForm(true); }}>
+                          <Plus className="w-4 h-4 mr-1" /> Add Retailer
+                        </Button>
+                      </div>
                     </div>
                     {mktShowForm && (
                       <MarketplaceRetailerForm
@@ -7669,7 +9471,7 @@ export default function Admin() {
                       />
                     )}
                     <div className="space-y-2">
-                      {marketplaceRetailers
+                      {filteredMarketplaceRetailers
                         .sort((a, b) => a.sortOrder - b.sortOrder)
                         .map(r => (
                         <div key={r.id} className="flex items-center justify-between p-3 bg-[#1f2937] rounded-lg border border-white/10">
@@ -7696,7 +9498,11 @@ export default function Admin() {
                           </div>
                         </div>
                       ))}
-                      {marketplaceRetailers.length === 0 && <p className="text-white/40 text-sm text-center py-4">No retailers added yet</p>}
+                      {filteredMarketplaceRetailers.length === 0 && (
+                        <p className="text-white/40 text-sm text-center py-4">
+                          {normalizedMarketplaceSearch ? 'No retailers match this search' : 'No retailers added yet'}
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -7704,11 +9510,24 @@ export default function Admin() {
                 {/* === CATEGORIES SUB-TAB === */}
                 {mktSubTab === 'categories' && (
                   <div className="space-y-4">
-                    <div className="flex justify-between items-center">
-                      <h3 className="text-white/80 text-sm font-medium">Categories ({marketplaceCategories.length})</h3>
-                      <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingCategory(null); setMktShowForm(true); }}>
-                        <Plus className="w-4 h-4 mr-1" /> Add Category
-                      </Button>
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                      <h3 className="text-white/80 text-sm font-medium">
+                        Categories ({filteredMarketplaceCategories.length}{normalizedMarketplaceSearch ? ` / ${marketplaceCategories.length}` : ''})
+                      </h3>
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-3 lg:min-w-[520px]">
+                        <div className="relative flex-1">
+                          <Search className="w-4 h-4 text-white/40 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <Input
+                            value={mktSearchQuery}
+                            onChange={(e) => setMktSearchQuery(e.target.value)}
+                            placeholder="Search categories by name, slug, icon..."
+                            className="bg-[#1f2937] border-white/10 text-white pl-9"
+                          />
+                        </div>
+                        <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingCategory(null); setMktShowForm(true); }}>
+                          <Plus className="w-4 h-4 mr-1" /> Add Category
+                        </Button>
+                      </div>
                     </div>
                     {mktShowForm && (
                       <MarketplaceCategoryForm
@@ -7729,7 +9548,7 @@ export default function Admin() {
                       />
                     )}
                     <div className="space-y-2">
-                      {marketplaceCategories
+                      {filteredMarketplaceCategories
                         .sort((a, b) => a.sortOrder - b.sortOrder)
                         .map(c => (
                         <div key={c.id} className="flex items-center justify-between p-3 bg-[#1f2937] rounded-lg border border-white/10">
@@ -7751,6 +9570,11 @@ export default function Admin() {
                           </div>
                         </div>
                       ))}
+                      {filteredMarketplaceCategories.length === 0 && (
+                        <p className="text-white/40 text-sm text-center py-4">
+                          {normalizedMarketplaceSearch ? 'No categories match this search' : 'No categories added yet'}
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -7758,11 +9582,24 @@ export default function Admin() {
                 {/* === BANNERS SUB-TAB === */}
                 {mktSubTab === 'banners' && (
                   <div className="space-y-4">
-                    <div className="flex justify-between items-center">
-                      <h3 className="text-white/80 text-sm font-medium">Banners ({marketplaceBanners.length})</h3>
-                      <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingBanner(null); setMktShowForm(true); }}>
-                        <Plus className="w-4 h-4 mr-1" /> Add Banner
-                      </Button>
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                      <h3 className="text-white/80 text-sm font-medium">
+                        Banners ({filteredMarketplaceBanners.length}{normalizedMarketplaceSearch ? ` / ${marketplaceBanners.length}` : ''})
+                      </h3>
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-3 lg:min-w-[520px]">
+                        <div className="relative flex-1">
+                          <Search className="w-4 h-4 text-white/40 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <Input
+                            value={mktSearchQuery}
+                            onChange={(e) => setMktSearchQuery(e.target.value)}
+                            placeholder="Search banners by title, subtitle, CTA..."
+                            className="bg-[#1f2937] border-white/10 text-white pl-9"
+                          />
+                        </div>
+                        <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingBanner(null); setMktShowForm(true); }}>
+                          <Plus className="w-4 h-4 mr-1" /> Add Banner
+                        </Button>
+                      </div>
                     </div>
                     {mktShowForm && (
                       <MarketplaceBannerForm
@@ -7783,7 +9620,7 @@ export default function Admin() {
                       />
                     )}
                     <div className="space-y-2">
-                      {marketplaceBanners
+                      {filteredMarketplaceBanners
                         .sort((a, b) => a.sortOrder - b.sortOrder)
                         .map(b => (
                         <div key={b.id} className="flex items-center justify-between p-3 bg-[#1f2937] rounded-lg border border-white/10">
@@ -7809,7 +9646,11 @@ export default function Admin() {
                           </div>
                         </div>
                       ))}
-                      {marketplaceBanners.length === 0 && <p className="text-white/40 text-sm text-center py-4">No banners added yet</p>}
+                      {filteredMarketplaceBanners.length === 0 && (
+                        <p className="text-white/40 text-sm text-center py-4">
+                          {normalizedMarketplaceSearch ? 'No banners match this search' : 'No banners added yet'}
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -7817,11 +9658,24 @@ export default function Admin() {
                 {/* === DEALS SUB-TAB === */}
                 {mktSubTab === 'deals' && (
                   <div className="space-y-4">
-                    <div className="flex justify-between items-center">
-                      <h3 className="text-white/80 text-sm font-medium">Deals ({marketplaceDeals.length})</h3>
-                      <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingDeal(null); setMktShowForm(true); }}>
-                        <Plus className="w-4 h-4 mr-1" /> Add Deal
-                      </Button>
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                      <h3 className="text-white/80 text-sm font-medium">
+                        Deals ({filteredMarketplaceDeals.length}{normalizedMarketplaceSearch ? ` / ${marketplaceDeals.length}` : ''})
+                      </h3>
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-3 lg:min-w-[520px]">
+                        <div className="relative flex-1">
+                          <Search className="w-4 h-4 text-white/40 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <Input
+                            value={mktSearchQuery}
+                            onChange={(e) => setMktSearchQuery(e.target.value)}
+                            placeholder="Search deals by title, badge, retailer..."
+                            className="bg-[#1f2937] border-white/10 text-white pl-9"
+                          />
+                        </div>
+                        <Button size="sm" className="bg-[#118bdd]" onClick={() => { setMktEditingDeal(null); setMktShowForm(true); }}>
+                          <Plus className="w-4 h-4 mr-1" /> Add Deal
+                        </Button>
+                      </div>
                     </div>
                     {mktShowForm && (
                       <MarketplaceDealForm
@@ -7843,7 +9697,7 @@ export default function Admin() {
                       />
                     )}
                     <div className="space-y-2">
-                      {marketplaceDeals
+                      {filteredMarketplaceDeals
                         .sort((a, b) => a.sortOrder - b.sortOrder)
                         .map(d => (
                         <div key={d.id} className="flex items-center justify-between p-3 bg-[#1f2937] rounded-lg border border-white/10">
@@ -7869,7 +9723,11 @@ export default function Admin() {
                           </div>
                         </div>
                       ))}
-                      {marketplaceDeals.length === 0 && <p className="text-white/40 text-sm text-center py-4">No deals added yet</p>}
+                      {filteredMarketplaceDeals.length === 0 && (
+                        <p className="text-white/40 text-sm text-center py-4">
+                          {normalizedMarketplaceSearch ? 'No deals match this search' : 'No deals added yet'}
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -7877,14 +9735,23 @@ export default function Admin() {
                 {/* === INVOICES SUB-TAB === */}
                 {mktSubTab === 'invoices' && (
                   <div className="space-y-4">
-                    <div className="flex justify-between items-center">
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
                       <h3 className="text-white/80 text-sm font-medium flex items-center gap-2">
                         <FileText className="w-4 h-4 text-[#118bdd]" />
-                        Invoice Verification ({marketplaceInvoices.filter(i => i.status === 'pending').length} pending)
+                        Invoice Verification ({filteredMarketplaceInvoices.filter(i => i.status === 'pending').length} pending{normalizedMarketplaceSearch ? ` / ${marketplaceInvoices.filter(i => i.status === 'pending').length}` : ''})
                       </h3>
+                      <div className="relative w-full lg:w-[420px]">
+                        <Search className="w-4 h-4 text-white/40 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <Input
+                          value={mktSearchQuery}
+                          onChange={(e) => setMktSearchQuery(e.target.value)}
+                          placeholder="Search invoices by user, retailer, order, status..."
+                          className="bg-[#1f2937] border-white/10 text-white pl-9"
+                        />
+                      </div>
                     </div>
                     <div className="space-y-2">
-                      {[...marketplaceInvoices]
+                      {[...filteredMarketplaceInvoices]
                         .sort((a, b) => {
                           if (a.status === 'pending' && b.status !== 'pending') return -1;
                           if (a.status !== 'pending' && b.status === 'pending') return 1;
@@ -8013,7 +9880,11 @@ export default function Admin() {
                           )}
                         </div>
                       ))}
-                      {marketplaceInvoices.length === 0 && <p className="text-white/40 text-sm text-center py-4">No invoices submitted yet</p>}
+                      {filteredMarketplaceInvoices.length === 0 && (
+                        <p className="text-white/40 text-sm text-center py-4">
+                          {normalizedMarketplaceSearch ? 'No invoices match this search' : 'No invoices submitted yet'}
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -8021,14 +9892,23 @@ export default function Admin() {
                 {/* === REDEMPTIONS SUB-TAB === */}
                 {mktSubTab === 'redemptions' && (
                   <div className="space-y-4">
-                    <div className="flex justify-between items-center">
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
                       <h3 className="text-white/80 text-sm font-medium flex items-center gap-2">
                         <Award className="w-4 h-4 text-[#118bdd]" />
-                        Redemption Requests ({marketplaceRedemptions.filter(r => r.status === 'pending').length} pending)
+                        Redemption Requests ({filteredMarketplaceRedemptions.filter(r => r.status === 'pending').length} pending{normalizedMarketplaceSearch ? ` / ${marketplaceRedemptions.filter(r => r.status === 'pending').length}` : ''})
                       </h3>
+                      <div className="relative w-full lg:w-[420px]">
+                        <Search className="w-4 h-4 text-white/40 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <Input
+                          value={mktSearchQuery}
+                          onChange={(e) => setMktSearchQuery(e.target.value)}
+                          placeholder="Search redemptions by user, offer, status..."
+                          className="bg-[#1f2937] border-white/10 text-white pl-9"
+                        />
+                      </div>
                     </div>
                     <div className="space-y-2">
-                      {[...marketplaceRedemptions]
+                      {[...filteredMarketplaceRedemptions]
                         .sort((a, b) => {
                           if (a.status === 'pending' && b.status !== 'pending') return -1;
                           if (a.status !== 'pending' && b.status === 'pending') return 1;
@@ -8091,7 +9971,11 @@ export default function Admin() {
                           </div>
                         </div>
                       ))}
-                      {marketplaceRedemptions.length === 0 && <p className="text-white/40 text-sm text-center py-4">No redemption requests yet</p>}
+                      {filteredMarketplaceRedemptions.length === 0 && (
+                        <p className="text-white/40 text-sm text-center py-4">
+                          {normalizedMarketplaceSearch ? 'No redemption requests match this search' : 'No redemption requests yet'}
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -8221,19 +10105,20 @@ export default function Admin() {
         selectedUser && (
           <div
             className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-            onClick={() => {
-              setSelectedUser(null);
-              setFundAmount('');
-              setFundMessage('');
-              setFundWalletType('deposit');
-            }}
+              onClick={() => {
+                setSelectedUser(null);
+                setFundAmount('');
+                setFundMessage('');
+                setFundWalletType('deposit');
+                setFundLoadingAction(null);
+              }}
           >
             <Card
               className="glass border-white/10 bg-[#111827] max-w-md w-full"
               onClick={(e) => e.stopPropagation()}
             >
               <CardHeader>
-                <CardTitle className="text-white">{fundWalletType === 'royalty' ? 'Send Royalty to User' : 'Add Funds'}</CardTitle>
+                <CardTitle className="text-white">{fundWalletTitle}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
@@ -8258,26 +10143,26 @@ export default function Admin() {
                     className="bg-[#1f2937] border-white/10 text-white"
                   />
                 </div>
-                {fundWalletType === 'royalty' && (
-                  <div className="space-y-3">
-                    <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
-                      <p className="text-xs text-white/60">Current Safety Pool Balance</p>
-                      <p className="text-lg font-bold text-amber-300">{formatCurrency(safetyPoolAmount)}</p>
-                      <p className="text-[11px] text-white/50 mt-1">
-                        Royalty payout will be deducted from safety pool balance.
-                      </p>
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-white/80">Transaction Message</Label>
-                      <Textarea
-                        value={fundMessage}
-                        onChange={(e) => setFundMessage(e.target.value)}
-                        placeholder="Shown in the user's transaction history"
-                        className="bg-[#1f2937] border-white/10 text-white min-h-[96px]"
-                      />
-                    </div>
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+                    <p className="text-xs text-white/60">Current Safety Pool Balance</p>
+                    <p className="text-lg font-bold text-amber-300">{formatCurrency(safetyPoolAmount)}</p>
+                    <p className="text-[11px] text-white/50 mt-1">
+                      {fundWalletType === 'royalty'
+                        ? 'Sending royalty deducts from safety pool. Taking it back adds the same amount back to safety pool with an audit entry.'
+                        : `Sending to ${fundWalletActionLabel} also deducts the same amount from safety pool and stores your note in the user transaction history and admin audit log.`}
+                    </p>
                   </div>
-                )}
+                  <div className="space-y-2">
+                    <Label className="text-white/80">Message / Reason</Label>
+                    <Textarea
+                      value={fundMessage}
+                      onChange={(e) => setFundMessage(e.target.value)}
+                      placeholder="Shown in the user's transaction history and admin audit log"
+                      className="bg-[#1f2937] border-white/10 text-white min-h-[96px]"
+                    />
+                  </div>
+                </div>
                 <div className="flex flex-col sm:flex-row gap-3">
                   <Button
                     variant="outline"
@@ -8286,18 +10171,38 @@ export default function Admin() {
                       setFundAmount('');
                       setFundMessage('');
                       setFundWalletType('deposit');
+                      setFundLoadingAction(null);
                     }}
                     className="flex-1 border-white/20 text-white hover:bg-white/10"
                   >
                     Cancel
                   </Button>
-                  <Button
-                    onClick={handleAddFunds}
-                    disabled={isLoading}
-                    className="flex-1 btn-primary"
-                  >
-                    {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : (fundWalletType === 'royalty' ? 'Send Royalty' : 'Add Funds')}
-                  </Button>
+                  {fundWalletType === 'royalty' ? (
+                    <>
+                      <Button
+                        onClick={handleReverseRoyalty}
+                        disabled={isLoading}
+                        className="flex-1 bg-red-600 text-white hover:bg-red-500"
+                      >
+                        {isLoading && fundLoadingAction === 'reverse' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Take Back Royalty'}
+                      </Button>
+                      <Button
+                        onClick={handleAddFunds}
+                        disabled={isLoading}
+                        className="flex-1 btn-primary"
+                      >
+                        {isLoading && fundLoadingAction === 'add' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send Royalty'}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      onClick={handleAddFunds}
+                      disabled={isLoading}
+                      className="flex-1 btn-primary"
+                    >
+                      {isLoading && fundLoadingAction === 'add' ? <RefreshCw className="w-4 h-4 animate-spin" /> : fundPrimaryButtonLabel}
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -8507,9 +10412,9 @@ export default function Admin() {
                 {(tx.status === 'completed' || tx.status === 'failed') && tx.adminReceipt && (
                   <div className="rounded-lg border border-white/10 p-3 bg-white/5 max-w-sm">
                     <p className="text-white/60 text-xs mb-2">Admin receipt/proof</p>
-                    {tx.adminReceipt.startsWith('data:image') ? (
+                    {(tx.adminReceipt.startsWith('data:image') || /\.(png|jpe?g|webp|gif)(?:$|[?#])/i.test(tx.adminReceipt)) ? (
                       <img src={tx.adminReceipt} alt="Withdrawal proof" className="w-full max-h-48 object-contain rounded" />
-                    ) : tx.adminReceipt.startsWith('data:application/pdf') ? (
+                    ) : (tx.adminReceipt.startsWith('data:application/pdf') || /\.pdf(?:$|[?#])/i.test(tx.adminReceipt)) ? (
                       <a href={tx.adminReceipt} download={`withdrawal-proof-${tx.id}.pdf`} className="text-[#118bdd] text-xs underline">
                         Download PDF proof
                       </a>

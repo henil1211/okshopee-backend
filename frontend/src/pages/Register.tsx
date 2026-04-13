@@ -61,9 +61,8 @@ export default function Register() {
   const [otpVerified, setOtpVerified] = useState(false);
   const [isSendingOtp, setIsSendingOtp] = useState(false);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
-  const [emailInUse, setEmailInUse] = useState(false);
-  const [phoneInUse, setPhoneInUse] = useState(false);
   const [isPinChecking, setIsPinChecking] = useState(false);
+  const successBannerRef = useRef<HTMLDivElement | null>(null);
   const pinCodeRef = useRef('');
   const pinRefreshInFlight = useRef<Promise<void> | null>(null);
   const lastPinRefresh = useRef<{ code: string; at: number } | null>(null);
@@ -82,38 +81,17 @@ export default function Register() {
   }, [formData.sponsorId, syncKey]);
 
   useEffect(() => {
-    const email = formData.email.trim();
-    if (!email || !isEmailValid(email)) {
-      setEmailInUse(false);
-      return;
-    }
-    const existing = Database.getUserByEmail(email);
-    setEmailInUse(!!existing);
-  }, [formData.email, syncKey]);
-
-  useEffect(() => {
-    const phone = formData.phone.trim();
-    const country = formData.country.trim();
-    if (!phone || !country) {
-      setPhoneInUse(false);
-      return;
-    }
-    if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) {
-      setPhoneInUse(false);
-      return;
-    }
-    const normalized = normalizePhoneNumber(formData.phone);
-    if (!normalized) {
-      setPhoneInUse(false);
-      return;
-    }
-    const existing = Database.getUsers().some((u) => normalizePhoneNumber(u.phone) === normalized);
-    setPhoneInUse(existing);
-  }, [formData.phone, formData.country, syncKey]);
-
-  useEffect(() => {
     pinCodeRef.current = formData.pinCode;
   }, [formData.pinCode]);
+
+  useEffect(() => {
+    if (!success) return;
+    const scrollTask = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      successBannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => window.cancelAnimationFrame(scrollTask);
+  }, [success]);
 
   // Check sponsor ID when entered
   const handleSponsorIdChange = (value: string) => {
@@ -235,21 +213,15 @@ export default function Register() {
       setError('Enter a valid email before sending OTP');
       return;
     }
-    if (emailInUse) {
-      setError('Email is already used');
-      return;
-    }
     if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) {
       setError('Enter a valid mobile number before sending OTP');
       return;
     }
-    if (phoneInUse) {
-      setError('Phone number is already used');
-      return;
-    }
 
     setIsSendingOtp(true);
-    const result = await sendOtp(getRegistrationOtpKey(), formData.email.trim(), 'registration');
+    const result = await sendOtp(getRegistrationOtpKey(), formData.email.trim(), 'registration', {
+      userName: formData.fullName.trim()
+    });
     setIsSendingOtp(false);
 
     if (!result.success) {
@@ -284,7 +256,6 @@ export default function Register() {
     if (!formData.fullName.trim()) return 'Full name is required';
     if (!formData.email.trim()) return 'Email is required';
     if (!isEmailValid(formData.email)) return 'Invalid email format';
-    if (emailInUse) return 'Email is already used';
     if (!formData.sponsorId?.trim()) return 'Sponsor ID is required';
     if (formData.sponsorId.length !== 7) return 'Sponsor ID must be 7 digits';
     const sponsor = Database.getUserByUserId(formData.sponsorId);
@@ -310,10 +281,8 @@ export default function Register() {
     if (!isValidTransactionPassword(formData.transactionPassword)) return getTransactionPasswordRequirementsText();
     if (formData.transactionPassword !== formData.confirmTransactionPassword) return 'Transaction passwords do not match';
     if (formData.transactionPassword === formData.password) return 'Transaction password should be different from login password';
-    if (emailInUse) return 'Email is already used';
     if (!formData.phone?.trim()) return 'Phone number is required';
     if (!isValidPhoneNumberForCountry(formData.phone, formData.country)) return 'Enter a valid mobile number for the selected country';
-    if (phoneInUse) return 'Phone number is already used';
     if (!formData.country?.trim()) return 'Country is required';
     if (!otpVerified) return 'Verify OTP sent to your email before creating account';
     return '';
@@ -410,7 +379,7 @@ export default function Register() {
       <div className="min-h-screen bg-[#0a0e17] flex flex-col">
         <div className="flex-1 flex items-center justify-center p-4 network-bg">
           <Card className="glass border-white/10 max-w-md w-full">
-            <CardContent className="p-8">
+            <CardContent ref={successBannerRef} className="p-8">
               <div className="text-center mb-6">
                 <div className="w-20 h-20 rounded-full bg-emerald-500/20 flex items-center justify-center mx-auto mb-4">
                   <CheckCircle className="w-10 h-10 text-emerald-500" />
@@ -585,9 +554,6 @@ export default function Register() {
                         className="pl-10 bg-[#1f2937] border-white/10 text-white placeholder:text-white/40 focus:border-[#118bdd] focus:ring-[#118bdd]/20"
                       />
                     </div>
-                    {emailInUse && (
-                      <p className="text-sm text-red-400">Email already in use</p>
-                    )}
                   </div>
 
                   <div className="space-y-2">
@@ -815,9 +781,6 @@ export default function Register() {
                         className="pl-10 bg-[#1f2937] border-white/10 text-white placeholder:text-white/40 focus:border-[#118bdd] focus:ring-[#118bdd]/20"
                       />
                     </div>
-                    {phoneInUse && (
-                      <p className="text-sm text-red-400">Phone number already in use</p>
-                    )}
                   </div>
 
                   <div className="space-y-3 rounded-lg border border-white/10 bg-[#1f2937]/50 p-3">

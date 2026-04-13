@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore, useOtpStore, useSyncRefreshKey } from '@/store';
-import Database from '@/db';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -121,7 +120,11 @@ export default function Profile() {
     setSendingOtpFor(null);
 
     if (result.success) {
-      toast.success(`OTP sent to ${selectedEmail}`);
+      if (result.status === 'pending') {
+        toast.warning(result.message);
+      } else {
+        toast.success(result.message);
+      }
     } else {
       toast.error(result.message);
     }
@@ -157,14 +160,6 @@ export default function Profile() {
     if (!otpValid) {
       toast.error('Invalid or expired OTP');
       return;
-    }
-
-    if (contactData.newEmail.trim()) {
-      const existingUser = Database.getUserByEmail(contactData.newEmail.trim());
-      if (existingUser && existingUser.id !== displayUser.id) {
-        toast.error('Email already in use by another user');
-        return;
-      }
     }
 
     const newLastActions = { ...(displayUser.lastActions || {}) };
