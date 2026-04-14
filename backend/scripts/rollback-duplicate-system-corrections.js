@@ -39,7 +39,12 @@ function buildUsersById(users) {
   return map;
 }
 
-function findDuplicateCorrectionDebits(transactions) {
+function getCanonicalPublicUserId(userRef, usersById) {
+  const resolved = usersById.get(String(userRef || ''));
+  return String(resolved?.userId || userRef || '');
+}
+
+function findDuplicateCorrectionDebits(transactions, usersById) {
   const correctionDebits = transactions.filter((tx) =>
     tx?.type === 'fund_recovery'
     && tx?.status === 'completed'
@@ -49,9 +54,10 @@ function findDuplicateCorrectionDebits(transactions) {
 
   const grouped = new Map();
   for (const tx of correctionDebits) {
+    const canonicalUserId = getCanonicalPublicUserId(tx.userId, usersById);
     const normalizedDescription = normalizeText(tx.description).replace(/\(source tx:[^\)]*\)/gi, '').trim();
     const key = [
-      String(tx.userId || ''),
+      canonicalUserId,
       normalizedDescription,
       Math.abs(round2(tx.amount)).toFixed(2)
     ].join('__');
@@ -105,7 +111,7 @@ async function run() {
     const wallets = JSON.parse(walletsRow[0].state_value || '[]');
     const usersById = buildUsersById(users);
 
-    const rollbackTargets = findDuplicateCorrectionDebits(transactions);
+    const rollbackTargets = findDuplicateCorrectionDebits(transactions, usersById);
     if (rollbackTargets.length === 0) {
       console.log('No duplicate system correction debits found with time-gap heuristic.');
       return;
