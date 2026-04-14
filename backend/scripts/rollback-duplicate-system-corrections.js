@@ -39,26 +39,47 @@ function buildUsersById(users) {
   return map;
 }
 
+function isSystemCorrectionDebit(tx) {
+  return normalizeText(tx?.type) === 'fund_recovery'
+    && (normalizeText(tx?.status) === 'completed' || normalizeText(tx?.status) === 'success')
+    && toNumber(tx?.amount) < 0
+    && normalizeText(tx?.description).includes('system correction:');
+}
+
+function extractCorrectionSignature(description) {
+  const normalized = normalizeText(description)
+    .replace(/\(source tx:[^\)]*\)/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const invalidReceiveHelpMatch = normalized.match(/removed invalid receive help from user\s+(\d{5,12})/i);
+  if (invalidReceiveHelpMatch) {
+    return `removed_invalid_receive_help:${invalidReceiveHelpMatch[1]}`;
+  }
+
+  const duplicateReferralMatch = normalized.match(/removed duplicate referral income(?:\s+from\s+user)?\s+(\d{5,12})/i);
+  if (duplicateReferralMatch) {
+    return `removed_duplicate_referral_income:${duplicateReferralMatch[1]}`;
+  }
+
+  return normalized;
+}
+
 function getCanonicalPublicUserId(userRef, usersById) {
   const resolved = usersById.get(String(userRef || ''));
   return String(resolved?.userId || userRef || '');
 }
 
 function findDuplicateCorrectionDebits(transactions, usersById) {
-  const correctionDebits = transactions.filter((tx) =>
-    tx?.type === 'fund_recovery'
-    && tx?.status === 'completed'
-    && toNumber(tx?.amount) < 0
-    && String(tx?.description || '').startsWith('System correction:')
-  );
+  const correctionDebits = transactions.filter((tx) => isSystemCorrectionDebit(tx));
 
   const grouped = new Map();
   for (const tx of correctionDebits) {
     const canonicalUserId = getCanonicalPublicUserId(tx.userId, usersById);
-    const normalizedDescription = normalizeText(tx.description).replace(/\(source tx:[^\)]*\)/gi, '').trim();
+    const signature = extractCorrectionSignature(tx.description);
     const key = [
       canonicalUserId,
-      normalizedDescription,
+      signature,
       Math.abs(round2(tx.amount)).toFixed(2)
     ].join('__');
     if (!grouped.has(key)) grouped.set(key, []);
@@ -66,20 +87,40 @@ function findDuplicateCorrectionDebits(transactions, usersById) {
   }
 
   const rollbackTargets = [];
+  let duplicateGroups = 0;
+  let fallbackWithoutGap = 0;
   for (const txs of grouped.values()) {
     if (txs.length <= 1) continue;
+    duplicateGroups += 1;
     txs.sort((a, b) => txTime(a) - txTime(b));
     const baselineTime = txTime(txs[0]);
+
+    let addedByGap = 0;
 
     for (let i = 1; i < txs.length; i++) {
       const current = txs[i];
       if (txTime(current) - baselineTime >= MIN_GAP_MS) {
         rollbackTargets.push(current);
+        addedByGap += 1;
+      }
+    }
+
+    // Fallback: if a duplicate group exists but no item matched the time-gap heuristic,
+    // still treat later entries as duplicate rerun artifacts.
+    if (addedByGap === 0) {
+      for (let i = 1; i < txs.length; i++) {
+        rollbackTargets.push(txs[i]);
+        fallbackWithoutGap += 1;
       }
     }
   }
 
-  return rollbackTargets;
+  return {
+    rollbackTargets,
+    correctionDebitCount: correctionDebits.length,
+    duplicateGroups,
+    fallbackWithoutGap
+  };
 }
 
 async function run() {
@@ -111,10 +152,17 @@ async function run() {
     const wallets = JSON.parse(walletsRow[0].state_value || '[]');
     const usersById = buildUsersById(users);
 
-    const rollbackTargets = findDuplicateCorrectionDebits(transactions, usersById);
+    const detection = findDuplicateCorrectionDebits(transactions, usersById);
+    const rollbackTargets = detection.rollbackTargets;
     if (rollbackTargets.length === 0) {
+      console.log(`System correction debit candidates scanned: ${detection.correctionDebitCount}`);
+      console.log(`Duplicate groups found: ${detection.duplicateGroups}`);
       console.log('No duplicate system correction debits found with time-gap heuristic.');
       return;
+    }
+
+    if (detection.fallbackWithoutGap > 0) {
+      console.log(`Note: ${detection.fallbackWithoutGap} duplicate(s) were detected via no-gap fallback.`);
     }
 
     const totalRollbackAmount = round2(
