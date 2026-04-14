@@ -27,6 +27,43 @@ function resolveTransactionLevel(tx) {
   return match ? Number(match[1]) : undefined;
 }
 
+function normalizeText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function extractCorrectionSourceTxId(description) {
+  const match = String(description || '').match(/\(source tx:\s*([^\)]+)\)/i);
+  return match ? String(match[1] || '').trim() : '';
+}
+
+function hasExistingSystemCorrectionDebit(transactions, params) {
+  const userId = String(params?.userId || '');
+  const sourceTxId = String(params?.sourceTxId || '').trim();
+  const targetAmount = Math.abs(Number(params?.amount || 0));
+  const normalizedDescription = normalizeText(params?.description).replace(/\(source tx:[^\)]*\)/gi, '').trim();
+
+  return transactions.some((tx) => {
+    if (tx?.type !== 'fund_recovery' || tx?.status !== 'completed') return false;
+    if (String(tx?.userId || '') !== userId) return false;
+
+    const txAmount = Math.abs(Number(tx?.amount || 0));
+    if (!Number.isFinite(txAmount) || Math.abs(txAmount - targetAmount) > 0.0001) return false;
+
+    const txDescription = String(tx?.description || '');
+    if (!txDescription.toLowerCase().startsWith('system correction:')) return false;
+
+    if (sourceTxId) {
+      const existingSourceTxId = extractCorrectionSourceTxId(txDescription);
+      if (existingSourceTxId && existingSourceTxId === sourceTxId) {
+        return true;
+      }
+    }
+
+    const normalizedTxDescription = normalizeText(txDescription).replace(/\(source tx:[^\)]*\)/gi, '').trim();
+    return normalizedTxDescription === normalizedDescription;
+  });
+}
+
 async function runAudit() {
   console.log("=== Phase 1: AUDIT & DETECT (Read-Only) ===");
 
@@ -90,6 +127,17 @@ async function runAudit() {
             w.incomeWallet -= Math.abs(txs[i].amount);
             w.totalReceived -= Math.abs(txs[i].amount);
           }
+
+          const correctionDescription = `System correction: Removed duplicate referral income from user ${fromPublicUserId} (source tx: ${txs[i].id})`;
+          if (hasExistingSystemCorrectionDebit(projectedTransactions, {
+            userId: txs[i].userId,
+            amount: txs[i].amount,
+            description: correctionDescription,
+            sourceTxId: txs[i].id
+          })) {
+            auditLog.push(`DUPLICATE DIRECT INCOME: Skipped duplicate correction entry for source tx ${txs[i].id}.`);
+            continue;
+          }
           
           projectedTransactions.push({
             id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
@@ -98,7 +146,7 @@ async function runAudit() {
             amount: -Math.abs(txs[i].amount),
             fromUserId: txs[i].fromUserId,
             status: 'completed',
-            description: `System correction: Removed duplicate referral income from user ${fromPublicUserId}`,
+            description: correctionDescription,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
@@ -164,6 +212,17 @@ async function runAudit() {
             w.totalReceived -= Math.abs(tx.amount);
           }
 
+          const correctionDescription = `System correction: Removed invalid level ${L} help from user ${fromPublicUserId} (source tx: ${tx.id})`;
+          if (hasExistingSystemCorrectionDebit(projectedTransactions, {
+            userId: tx.userId,
+            amount: tx.amount,
+            description: correctionDescription,
+            sourceTxId: tx.id
+          })) {
+            auditLog.push(`GHOST HELP: Skipped duplicate correction entry for source tx ${tx.id}.`);
+            continue;
+          }
+
           projectedTransactions.push({
             id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
             userId: tx.userId,
@@ -171,7 +230,7 @@ async function runAudit() {
             amount: -Math.abs(tx.amount),
             fromUserId: tx.fromUserId,
             status: 'completed',
-            description: `System correction: Removed invalid level ${L} help from user ${fromPublicUserId}`,
+            description: correctionDescription,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
@@ -206,6 +265,17 @@ async function runAudit() {
             w.totalReceived -= Math.abs(txs[i].amount);
           }
 
+          const correctionDescription = `System correction: Removed duplicate level ${extractedLevel} help from user ${fromPublicUserId} (source tx: ${txs[i].id})`;
+          if (hasExistingSystemCorrectionDebit(projectedTransactions, {
+            userId: txs[i].userId,
+            amount: txs[i].amount,
+            description: correctionDescription,
+            sourceTxId: txs[i].id
+          })) {
+            auditLog.push(`DUPLICATE HELP: Skipped duplicate correction entry for source tx ${txs[i].id}.`);
+            continue;
+          }
+
           projectedTransactions.push({
             id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
             userId: txs[i].userId,
@@ -213,7 +283,7 @@ async function runAudit() {
             amount: -Math.abs(txs[i].amount),
             fromUserId: txs[i].fromUserId,
             status: 'completed',
-            description: `System correction: Removed duplicate level ${extractedLevel} help from user ${fromPublicUserId}`,
+            description: correctionDescription,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
@@ -259,6 +329,17 @@ async function runAudit() {
               w.incomeWallet += transferAmount;
            }
 
+           const correctionDescription = `System correction: Refunded an invalid give-help entry (source tx: ${gTx.id})`;
+           if (hasExistingSystemCorrectionDebit(projectedTransactions, {
+             userId: w.userId,
+             amount: gTx.amount,
+             description: correctionDescription,
+             sourceTxId: gTx.id
+           })) {
+             auditLog.push(`CASCADING FIX: Skipped duplicate refund correction for source tx ${gTx.id}.`);
+             continue;
+           }
+
            projectedTransactions.push({
              id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
              userId: w.userId,
@@ -266,7 +347,7 @@ async function runAudit() {
              amount: Math.abs(gTx.amount), 
              fromUserId: 'system',
              status: 'completed',
-             description: `System correction: Refunded an invalid give-help entry`,
+             description: correctionDescription,
              createdAt: new Date().toISOString(),
              completedAt: new Date().toISOString()
            });
@@ -286,6 +367,17 @@ async function runAudit() {
                 }
                 rec_w.totalReceived -= Math.abs(matchedReceive.amount);
 
+                const correctionDescription = `System correction: Removed invalid receive help from user ${resolvePublicUserId(matchedReceive.fromUserId, users)} (source tx: ${matchedReceive.id})`;
+                if (hasExistingSystemCorrectionDebit(projectedTransactions, {
+                  userId: rec_w.userId,
+                  amount: matchedReceive.amount,
+                  description: correctionDescription,
+                  sourceTxId: matchedReceive.id
+                })) {
+                  auditLog.push(`CASCADING FIX: Skipped duplicate receive-help correction for source tx ${matchedReceive.id}.`);
+                  continue;
+                }
+
                 projectedTransactions.push({
                   id: `tx_${Date.now()}_rev_${Math.random().toString(36).substr(2, 5)}`,
                   userId: rec_w.userId,
@@ -293,7 +385,7 @@ async function runAudit() {
                   amount: -Math.abs(matchedReceive.amount),
                   fromUserId: matchedReceive.fromUserId,
                   status: 'completed',
-                  description: `System correction: Removed invalid receive help from user ${resolvePublicUserId(matchedReceive.fromUserId, users)}`,
+                  description: correctionDescription,
                   createdAt: new Date().toISOString(),
                   completedAt: new Date().toISOString()
                 });

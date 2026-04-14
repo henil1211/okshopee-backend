@@ -49,10 +49,10 @@ function findDuplicateCorrectionDebits(transactions) {
 
   const grouped = new Map();
   for (const tx of correctionDebits) {
+    const normalizedDescription = normalizeText(tx.description).replace(/\(source tx:[^\)]*\)/gi, '').trim();
     const key = [
       String(tx.userId || ''),
-      String(tx.fromUserId || ''),
-      normalizeText(tx.description),
+      normalizedDescription,
       Math.abs(round2(tx.amount)).toFixed(2)
     ].join('__');
     if (!grouped.has(key)) grouped.set(key, []);
