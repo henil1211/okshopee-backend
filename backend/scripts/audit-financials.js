@@ -12,6 +12,14 @@ function resolveUser(ref, users) {
   return users.find(u => u.id === ref || u.userId === ref);
 }
 
+function resolvePublicUserId(ref, users) {
+  if (!ref) return 'Unknown';
+  const user = resolveUser(ref, users);
+  if (user?.userId) return user.userId;
+  const value = String(ref).trim();
+  return value || 'Unknown';
+}
+
 function resolveTransactionLevel(tx) {
   if (tx.level !== undefined && tx.level !== null) return Number(tx.level);
   const match = String(tx.description || '').match(/level\s+(\d+)/i);
@@ -72,6 +80,7 @@ async function runAudit() {
 
     for (const [key, txs] of directIncomes.entries()) {
       if (txs.length > 1) {
+        const fromPublicUserId = resolvePublicUserId(key.split('__')[1], users);
         txs.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
         for (let i = 1; i < txs.length; i++) {
           txs[i]._isReversed = true;
@@ -88,12 +97,12 @@ async function runAudit() {
             amount: -Math.abs(txs[i].amount),
             fromUserId: txs[i].fromUserId,
             status: 'completed',
-            description: `System Reversed: Duplicate direct income received from ${key.split('__')[1]}`,
+            description: `System Reversed: Duplicate direct income received from ${fromPublicUserId}`,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
 
-          auditLog.push(`DUPLICATE DIRECT INCOME: User ${w?.userId || txs[i].userId} received extra $${txs[i].amount} from ${key.split('__')[1]}. Added Reversal.`);
+          auditLog.push(`DUPLICATE DIRECT INCOME: User ${w?.userId || txs[i].userId} received extra $${txs[i].amount} from ${fromPublicUserId}. Added Reversal.`);
         }
       }
     }
@@ -141,6 +150,7 @@ async function runAudit() {
 
         if (ghost) {
           tx._isReversed = true;
+          const fromPublicUserId = resolvePublicUserId(tx.fromUserId, users);
           let w = resolveUser(tx.userId, projectedWallets);
           if (w) {
             // Fix: Level 1 help goes to incomeWallet (Unlocked). Level 2+ usually goes to lockedIncomeWallet if description contains "locked"
@@ -160,12 +170,12 @@ async function runAudit() {
             amount: -Math.abs(tx.amount),
             fromUserId: tx.fromUserId,
             status: 'completed',
-            description: `System Reversed: Ghost receive help at Level ${L} from non-existent user ${tx.fromUserId || 'Unknown'}`,
+            description: `System Reversed: Ghost receive help at Level ${L} from non-existent user ${fromPublicUserId}`,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
 
-          auditLog.push(`GHOST HELP: User ${w?.userId || tx.userId} got fake $${tx.amount} at Level ${L} from phantom ID: ${tx.fromUserId}. Added Reversal.`);
+          auditLog.push(`GHOST HELP: User ${w?.userId || tx.userId} got fake $${tx.amount} at Level ${L} from phantom ID: ${fromPublicUserId}. Added Reversal.`);
         } else {
           // Check for duplicate help at ALL levels
           const realFromUserId = fromUser ? fromUser.id : tx.fromUserId;
@@ -179,6 +189,7 @@ async function runAudit() {
     // Process duplicate helps across all levels
     for (const [k, txs] of levelHelps.entries()) {
       if (txs.length > 1) {
+        const fromPublicUserId = resolvePublicUserId(k.split('__')[1], users);
         txs.sort((a,b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
         for (let i = 1; i < txs.length; i++) {
           txs[i]._isReversed = true;
@@ -201,12 +212,12 @@ async function runAudit() {
             amount: -Math.abs(txs[i].amount),
             fromUserId: txs[i].fromUserId,
             status: 'completed',
-            description: `System Reversed: Duplicate receive help at Level ${extractedLevel} from ${k.split('__')[1]}`,
+            description: `System Reversed: Duplicate receive help at Level ${extractedLevel} from ${fromPublicUserId}`,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
 
-          auditLog.push(`DUPLICATE HELP: User ${w?.userId} got double $${txs[i].amount} at Level ${extractedLevel} from ${k.split('__')[1]}. Added Reversal.`);
+          auditLog.push(`DUPLICATE HELP: User ${w?.userId} got double $${txs[i].amount} at Level ${extractedLevel} from ${fromPublicUserId}. Added Reversal.`);
         }
       }
     }
@@ -281,7 +292,7 @@ async function runAudit() {
                   amount: -Math.abs(matchedReceive.amount),
                   fromUserId: matchedReceive.fromUserId,
                   status: 'completed',
-                  description: `System Reversed: receive_help from ${matchedReceive.fromUserId} invalid due to cascaded ghost deduction`,
+                  description: `System Reversed: Removed invalid receive help from user ${resolvePublicUserId(matchedReceive.fromUserId, users)}`,
                   createdAt: new Date().toISOString(),
                   completedAt: new Date().toISOString()
                 });
