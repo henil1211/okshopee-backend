@@ -215,6 +215,41 @@ async function run() {
       if (detection.alreadyRolledBackCount > 0) {
         console.log(`Already rolled-back source debits tracked: ${detection.alreadyRolledBackCount}`);
       }
+
+      if (APPLY_MODE && detection.alreadyRolledBackCount > 0) {
+        const rollbackSourceTxIds = getRolledBackSourceTxIdSet(transactions);
+        let removedHistoryRows = 0;
+        for (let i = transactions.length - 1; i >= 0; i--) {
+          const tx = transactions[i];
+          if (!isSystemCorrectionDebit(tx)) continue;
+          const txId = String(tx?.id || '');
+          if (!rollbackSourceTxIds.has(txId)) continue;
+          transactions.splice(i, 1);
+          removedHistoryRows += 1;
+        }
+
+        if (removedHistoryRows > 0) {
+          const backupDir = path.join(__dirname, '..', 'data', 'backups');
+          await fs.mkdir(backupDir, { recursive: true });
+          const backupName = `pre-clean-rolledback-dup-corrections-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+          await fs.writeFile(
+            path.join(backupDir, backupName),
+            JSON.stringify({ transactions }, null, 2),
+            'utf8'
+          );
+          console.log(`Backup created: backend/data/backups/${backupName}`);
+
+          await pool.query(
+            "UPDATE state_store SET state_value = ?, updated_at = NOW() WHERE state_key = 'mlm_transactions'",
+            [JSON.stringify(transactions)]
+          );
+
+          console.log(`Removed ${removedHistoryRows} already-rolled-back duplicate debit row(s) from transaction history.`);
+          console.log('Done. Restart backend and verify affected users.');
+          return;
+        }
+      }
+
       const preview = findCorrectionLikeDebitPreview(transactions, usersById, 10);
       if (preview.length > 0) {
         console.log('Recent correction-like debit preview (for diagnosis):');
