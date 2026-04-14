@@ -1,6 +1,7 @@
 import { clsx, type ClassValue } from 'clsx';
 import { getCountryCallingCode, isValidPhoneNumber as isValidPhoneNumberLib, type CountryCode } from 'libphonenumber-js';
 import { twMerge } from 'tailwind-merge';
+import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
 
 // Tailwind class merger
 export function cn(...inputs: ClassValue[]) {
@@ -271,8 +272,7 @@ export async function readOptimizedUploadDataUrl(
 
 const BACKEND_UPLOAD_BASE_URL = (() => {
   const configured = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL;
-  const fallback = typeof window !== 'undefined' ? window.location.origin : '';
-  return (configured || fallback).replace(/\/+$/, '');
+  return resolveBackendBaseUrl(configured);
 })();
 
 export async function uploadDataUrlToBackend(params: {

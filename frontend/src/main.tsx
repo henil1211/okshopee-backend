@@ -4,6 +4,7 @@ import { ThemeProvider } from 'next-themes'
 import './index.css'
 import App from './App.tsx'
 import Database from './db'
+import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl'
 
 // Emergency reset mode: visit localhost:5173?reset=true to bypass heavy loading
 const isEmergencyReset = new URLSearchParams(window.location.search).get('reset') === 'true';
@@ -51,8 +52,9 @@ async function bootstrap() {
 
               try {
                 // Call the backend cleanup endpoint directly
-                const backendBase = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL || window.location.origin;
-                const response = await fetch(`${backendBase.replace(/\/+$/, '')}/api/cleanup-for-rebuild`, {
+                const configuredBackend = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL;
+                const backendBase = resolveBackendBaseUrl(configuredBackend);
+                const response = await fetch(`${backendBase}/api/cleanup-for-rebuild`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' }
                 });

@@ -17,7 +17,8 @@ function resolvePublicUserId(ref, users) {
   const user = resolveUser(ref, users);
   if (user?.userId) return user.userId;
   const value = String(ref).trim();
-  return value || 'Unknown';
+  if (/^\d{7}$/.test(value)) return value;
+  return 'Unknown';
 }
 
 function resolveTransactionLevel(tx) {
@@ -97,7 +98,7 @@ async function runAudit() {
             amount: -Math.abs(txs[i].amount),
             fromUserId: txs[i].fromUserId,
             status: 'completed',
-            description: `System Reversed: Duplicate direct income received from ${fromPublicUserId}`,
+            description: `System correction: Removed duplicate referral income from user ${fromPublicUserId}`,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
@@ -170,7 +171,7 @@ async function runAudit() {
             amount: -Math.abs(tx.amount),
             fromUserId: tx.fromUserId,
             status: 'completed',
-            description: `System Reversed: Ghost receive help at Level ${L} from non-existent user ${fromPublicUserId}`,
+            description: `System correction: Removed invalid level ${L} help from user ${fromPublicUserId}`,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
@@ -212,7 +213,7 @@ async function runAudit() {
             amount: -Math.abs(txs[i].amount),
             fromUserId: txs[i].fromUserId,
             status: 'completed',
-            description: `System Reversed: Duplicate receive help at Level ${extractedLevel} from ${fromPublicUserId}`,
+            description: `System correction: Removed duplicate level ${extractedLevel} help from user ${fromPublicUserId}`,
             createdAt: new Date().toISOString(),
             completedAt: new Date().toISOString()
           });
@@ -265,7 +266,7 @@ async function runAudit() {
              amount: Math.abs(gTx.amount), 
              fromUserId: 'system',
              status: 'completed',
-             description: `System Reversed: Refund for invalid give_help due to cascaded ghost income`,
+             description: `System correction: Refunded an invalid give-help entry`,
              createdAt: new Date().toISOString(),
              completedAt: new Date().toISOString()
            });
@@ -292,7 +293,7 @@ async function runAudit() {
                   amount: -Math.abs(matchedReceive.amount),
                   fromUserId: matchedReceive.fromUserId,
                   status: 'completed',
-                  description: `System Reversed: Removed invalid receive help from user ${resolvePublicUserId(matchedReceive.fromUserId, users)}`,
+                  description: `System correction: Removed invalid receive help from user ${resolvePublicUserId(matchedReceive.fromUserId, users)}`,
                   createdAt: new Date().toISOString(),
                   completedAt: new Date().toISOString()
                 });

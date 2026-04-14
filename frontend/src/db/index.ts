@@ -11,6 +11,8 @@ import type {
   MarketplaceInvoice, RewardRedemption
 } from '@/types';
 
+import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
+
 // Database Keys
 const DB_KEYS = {
   USERS: 'mlm_users',
@@ -377,8 +379,7 @@ export interface SensitiveActionSyncGate {
 class Database {
   private static readonly REMOTE_SYNC_BASE_URL = (() => {
     const configured = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL;
-    const fallback = typeof window !== 'undefined' ? window.location.origin : '';
-    return (configured || fallback).replace(/\/+$/, '');
+    return resolveBackendBaseUrl(configured);
   })();
   private static readonly REMOTE_SYNC_KEYS = new Set<string>(
     Object.values(DB_KEYS).filter(
@@ -4586,12 +4587,17 @@ class Database {
     directIncomeCreated: number;
     examples: string[];
   } {
-    const targetUser = userRef
+    let targetUser = userRef
       ? (this.getUserById(userRef) || this.getUserByUserId(userRef))
       : null;
 
+    // During startup a stale internal ID can exist in session storage briefly.
+    // Never throw here from wallet bootstrap; just skip until identity resolves.
     if (userRef && !targetUser) {
-      throw new Error('User not found');
+      const sessionUser = this.getCurrentUser();
+      if (sessionUser?.userId) {
+        targetUser = this.getUserByUserId(sessionUser.userId) || null;
+      }
     }
 
     if (!targetUser) {
@@ -9702,6 +9708,62 @@ class Database {
     return this.hydratedRemoteKeys.has(key);
   }
 
+  private static toSimpleUserLabel(refText?: string): string {
+    const raw = String(refText || '').trim();
+    if (!raw) return 'unknown user';
+
+    const resolved = this.resolveUserByRef(raw);
+    if (resolved?.userId) return `user ${resolved.userId}`;
+
+    const sevenDigitMatch = raw.match(/\b(\d{7})\b/);
+    if (sevenDigitMatch) return `user ${sevenDigitMatch[1]}`;
+
+    return 'unknown user';
+  }
+
+  private static simplifySystemRecoveryDescription(description: string): string {
+    const desc = String(description || '').trim();
+    if (!desc) return desc;
+
+    if (/refund for invalid give_help due to cascaded ghost income/i.test(desc)) {
+      return 'System correction: Refunded an invalid give-help entry';
+    }
+
+    const ghostReceiveMatch = desc.match(/ghost receive help at level\s*(\d+)\s*from non-existent user\s*(.+)$/i);
+    if (ghostReceiveMatch) {
+      const level = ghostReceiveMatch[1];
+      const userLabel = this.toSimpleUserLabel(ghostReceiveMatch[2]);
+      return `System correction: Removed invalid level ${level} help from ${userLabel}`;
+    }
+
+    const duplicateReceiveMatch = desc.match(/duplicate receive help at level\s*(\d+)\s*from\s*(.+)$/i);
+    if (duplicateReceiveMatch) {
+      const level = duplicateReceiveMatch[1];
+      const userLabel = this.toSimpleUserLabel(duplicateReceiveMatch[2]);
+      return `System correction: Removed duplicate level ${level} help from ${userLabel}`;
+    }
+
+    const duplicateDirectMatch = desc.match(/duplicate direct income received from\s*(.+)$/i);
+    if (duplicateDirectMatch) {
+      const userLabel = this.toSimpleUserLabel(duplicateDirectMatch[1]);
+      return `System correction: Removed duplicate referral income from ${userLabel}`;
+    }
+
+    const cascadedReceiveMatch = desc.match(/receive_help from\s*(.+?)\s*invalid due to cascaded ghost deduction/i);
+    if (cascadedReceiveMatch) {
+      const userLabel = this.toSimpleUserLabel(cascadedReceiveMatch[1]);
+      return `System correction: Removed invalid receive help from ${userLabel}`;
+    }
+
+    const removedInvalidReceiveMatch = desc.match(/removed invalid receive help from user\s*(.+)$/i);
+    if (removedInvalidReceiveMatch) {
+      const userLabel = this.toSimpleUserLabel(removedInvalidReceiveMatch[1]);
+      return `System correction: Removed invalid receive help from ${userLabel}`;
+    }
+
+    return desc;
+  }
+
   private static normalizeTransactionRecord(tx: Transaction): Transaction {
     const normalizedType = this.normalizeTransactionType((tx as any).type);
     let nextTx: Transaction = tx;
@@ -9716,6 +9778,15 @@ class Database {
         ...nextTx,
         description: 'Fund wallet credited from your income wallet transfer'
       };
+    }
+    if (nextTx.type === 'fund_recovery') {
+      const nextDescription = this.simplifySystemRecoveryDescription(String(nextTx.description || ''));
+      if (nextDescription && nextDescription !== nextTx.description) {
+        nextTx = {
+          ...nextTx,
+          description: nextDescription
+        };
+      }
     }
     return nextTx;
   }

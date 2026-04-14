@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import PublicFooter from '@/components/PublicFooter';
+import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
 
 type SendMailResult = {
   ok: boolean;
@@ -18,8 +19,7 @@ type SendMailResult = {
 
 const BACKEND_URL = (() => {
   const configured = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL;
-  const fallback = typeof window !== 'undefined' ? window.location.origin : '';
-  return (configured || fallback).replace(/\/+$/, '');
+  return resolveBackendBaseUrl(configured);
 })();
 
 export default function DummyMail() {

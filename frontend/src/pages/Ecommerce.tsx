@@ -12,12 +12,12 @@ import { copyToClipboard, formatAmountForCountryCurrency, getCurrencyLabelForCou
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { toast } from 'sonner';
 import Database from '@/db';
+import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
 import type { MarketplaceRetailer, MarketplaceInvoice, RewardRedemption } from '@/types';
 
 const BACKEND_BASE_URL = (() => {
   const configured = (import.meta as { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_URL;
-  const fallback = typeof window !== 'undefined' ? window.location.origin : '';
-  return (configured || fallback).replace(/\/+$/, '');
+  return resolveBackendBaseUrl(configured);
 })();
 
 async function uploadMarketplaceFile(dataUrl: string, fileName: string, mimeType?: string): Promise<{

@@ -7,6 +7,7 @@ import type {
   MarketplaceInvoice, RewardRedemption
 } from '@/types';
 import Database from '@/db';
+import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
 import { isValidPhoneNumberForCountry, normalizePhoneNumber } from '@/utils/helpers';
 
 type SystemEmailPurpose = 'otp' | 'welcome' | 'system';
@@ -14,13 +15,7 @@ type SystemEmailPurpose = 'otp' | 'welcome' | 'system';
 function getBackendApiBase(): string {
   const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
   const configured = typeof env.VITE_BACKEND_URL === 'string' ? env.VITE_BACKEND_URL.trim() : '';
-  if (configured) {
-    return configured.replace(/\/+$/, '');
-  }
-  if (typeof window !== 'undefined') {
-    return window.location.origin.replace(/\/+$/, '');
-  }
-  return '';
+  return resolveBackendBaseUrl(configured);
 }
 
 function normalizeRemoteRebuildError(payload: Record<string, unknown>, fallback: string): string {
@@ -38,6 +33,17 @@ function resolveCanonicalUserForWalletActions(userRef: string): User | undefined
 }
 
 const WALLET_MAINTENANCE_INTERVAL_MS = 30_000;
+const AUTO_WALLET_MAINTENANCE_ENABLED = (() => {
+  const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
+  const configured = typeof env.VITE_ENABLE_AUTO_WALLET_MAINTENANCE === 'string'
+    ? env.VITE_ENABLE_AUTO_WALLET_MAINTENANCE.trim().toLowerCase()
+    : '';
+  if (configured) {
+    return configured === '1' || configured === 'true' || configured === 'yes';
+  }
+  return !!env.DEV;
+})();
+
 const walletMaintenanceState = new Map<string, {
   at: number;
   txCount: number;
@@ -147,11 +153,11 @@ async function dispatchSystemEmail(params: {
 
   const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
   const configuredMailApi = typeof env.VITE_MAIL_API_URL === 'string' ? env.VITE_MAIL_API_URL.trim() : '';
-  const backendBase = typeof env.VITE_BACKEND_URL === 'string' ? env.VITE_BACKEND_URL.trim() : '';
-  const backendMailApi = backendBase ? `${backendBase.replace(/\/+$/, '')}/api/send-mail` : '';
+  const backendBase = resolveBackendBaseUrl(typeof env.VITE_BACKEND_URL === 'string' ? env.VITE_BACKEND_URL : '');
+  const backendMailApi = backendBase ? `${backendBase}/api/send-mail` : '';
   // Only use the same-origin URL if no backend URL is configured at all
   const hasExplicitBackend = !!(configuredMailApi || backendMailApi);
-  const sameOriginApi = !hasExplicitBackend && typeof window !== 'undefined' ? `${window.location.origin.replace(/\/+$/, '')}/api/send-mail` : '';
+  const sameOriginApi = !hasExplicitBackend ? `${resolveBackendBaseUrl()}/api/send-mail` : '';
   const requestTimeoutMs = Number.isFinite(Number(params.timeoutMs)) ? Math.max(1500, Number(params.timeoutMs)) : 8000;
   const candidates = [configuredMailApi, backendMailApi, sameOriginApi].filter(Boolean);
   const seen = new Set<string>();
@@ -781,8 +787,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
   loadWallet: (userId: string) => {
     const canonicalUser = resolveCanonicalUserForWalletActions(userId);
-    const effectiveUserId = canonicalUser?.id || userId;
-    if (shouldRunWalletMaintenance(effectiveUserId)) {
+    const resolvedUser = canonicalUser
+      || Database.getUserById(userId)
+      || Database.getUserByUserId(userId);
+    const effectiveUserId = resolvedUser?.id || userId;
+    if (AUTO_WALLET_MAINTENANCE_ENABLED && resolvedUser && shouldRunWalletMaintenance(effectiveUserId)) {
       Database.recoverMissingReferralIncomeForUser(effectiveUserId);
       Database.repairLockedIncomeTrackerFromTransactions(effectiveUserId);
       Database.repairIncomeWalletConsistency(effectiveUserId);
