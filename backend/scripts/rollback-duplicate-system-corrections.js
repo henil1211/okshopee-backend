@@ -42,10 +42,15 @@ function buildUsersById(users) {
 function isSystemCorrectionDebit(tx) {
   const txType = normalizeText(tx?.type);
   const isDebitType = txType === 'fund_recovery' || txType === 'admin_debit';
+  const description = normalizeText(tx?.description);
+  const isSystemTagged =
+    description.includes('system correction')
+    || description.includes('system reversed')
+    || description.includes('system reverse');
   return isDebitType
     && (normalizeText(tx?.status) === 'completed' || normalizeText(tx?.status) === 'success')
     && toNumber(tx?.amount) < 0
-    && normalizeText(tx?.description).includes('system correction');
+    && isSystemTagged;
 }
 
 function extractCorrectionSignature(description) {
