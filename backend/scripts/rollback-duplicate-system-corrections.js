@@ -77,8 +77,30 @@ function getCanonicalPublicUserId(userRef, usersById) {
   return String(resolved?.userId || userRef || '');
 }
 
+function extractSourceTxIdFromRollbackDescription(description) {
+  const match = String(description || '').match(/\(source tx:\s*([^\)]+)\)/i);
+  return match ? String(match[1]).trim() : '';
+}
+
+function getRolledBackSourceTxIdSet(transactions) {
+  const ids = new Set();
+  for (const tx of transactions) {
+    if (normalizeText(tx?.type) !== 'admin_credit') continue;
+    const status = normalizeText(tx?.status);
+    if (status !== 'completed' && status !== 'success') continue;
+    const desc = String(tx?.description || '');
+    if (!/duplicate system correction debit/i.test(desc)) continue;
+    const sourceTxId = extractSourceTxIdFromRollbackDescription(desc);
+    if (sourceTxId) ids.add(sourceTxId);
+  }
+  return ids;
+}
+
 function findDuplicateCorrectionDebits(transactions, usersById) {
-  const correctionDebits = transactions.filter((tx) => isSystemCorrectionDebit(tx));
+  const alreadyRolledBackSourceTxIds = getRolledBackSourceTxIdSet(transactions);
+  const correctionDebits = transactions.filter((tx) =>
+    isSystemCorrectionDebit(tx) && !alreadyRolledBackSourceTxIds.has(String(tx?.id || ''))
+  );
 
   const grouped = new Map();
   for (const tx of correctionDebits) {
@@ -126,7 +148,8 @@ function findDuplicateCorrectionDebits(transactions, usersById) {
     rollbackTargets,
     correctionDebitCount: correctionDebits.length,
     duplicateGroups,
-    fallbackWithoutGap
+    fallbackWithoutGap,
+    alreadyRolledBackCount: alreadyRolledBackSourceTxIds.size
   };
 }
 
@@ -189,6 +212,9 @@ async function run() {
     if (rollbackTargets.length === 0) {
       console.log(`System correction debit candidates scanned: ${detection.correctionDebitCount}`);
       console.log(`Duplicate groups found: ${detection.duplicateGroups}`);
+      if (detection.alreadyRolledBackCount > 0) {
+        console.log(`Already rolled-back source debits tracked: ${detection.alreadyRolledBackCount}`);
+      }
       const preview = findCorrectionLikeDebitPreview(transactions, usersById, 10);
       if (preview.length > 0) {
         console.log('Recent correction-like debit preview (for diagnosis):');
@@ -245,6 +271,7 @@ async function run() {
 
     const now = new Date().toISOString();
     let appliedCount = 0;
+    const appliedSourceTxIds = new Set();
 
     for (const tx of rollbackTargets) {
       const amount = Math.abs(toNumber(tx.amount));
@@ -267,7 +294,25 @@ async function run() {
         completedAt: now
       });
 
+      appliedSourceTxIds.add(String(tx.id || ''));
       appliedCount += 1;
+    }
+
+    // Remove duplicate debit rows from history once rollback credit has been created.
+    const removableSourceTxIds = new Set([
+      ...Array.from(getRolledBackSourceTxIdSet(transactions)),
+      ...Array.from(appliedSourceTxIds)
+    ]);
+    let removedHistoryRows = 0;
+    if (removableSourceTxIds.size > 0) {
+      for (let i = transactions.length - 1; i >= 0; i--) {
+        const tx = transactions[i];
+        if (!isSystemCorrectionDebit(tx)) continue;
+        const txId = String(tx?.id || '');
+        if (!removableSourceTxIds.has(txId)) continue;
+        transactions.splice(i, 1);
+        removedHistoryRows += 1;
+      }
     }
 
     await pool.query(
@@ -280,6 +325,9 @@ async function run() {
     );
 
     console.log(`Applied rollback credits for ${appliedCount} duplicate correction debit(s).`);
+    if (removedHistoryRows > 0) {
+      console.log(`Removed ${removedHistoryRows} rolled-back duplicate debit row(s) from transaction history.`);
+    }
     console.log('Done. Restart backend and verify a few affected users.');
   } catch (error) {
     console.error('Rollback script failed:', error);
