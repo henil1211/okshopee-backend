@@ -40,10 +40,12 @@ function buildUsersById(users) {
 }
 
 function isSystemCorrectionDebit(tx) {
-  return normalizeText(tx?.type) === 'fund_recovery'
+  const txType = normalizeText(tx?.type);
+  const isDebitType = txType === 'fund_recovery' || txType === 'admin_debit';
+  return isDebitType
     && (normalizeText(tx?.status) === 'completed' || normalizeText(tx?.status) === 'success')
     && toNumber(tx?.amount) < 0
-    && normalizeText(tx?.description).includes('system correction:');
+    && normalizeText(tx?.description).includes('system correction');
 }
 
 function extractCorrectionSignature(description) {
@@ -123,6 +125,31 @@ function findDuplicateCorrectionDebits(transactions, usersById) {
   };
 }
 
+function findCorrectionLikeDebitPreview(transactions, usersById, limit = 12) {
+  const rows = transactions
+    .filter((tx) => {
+      if (!(toNumber(tx?.amount) < 0)) return false;
+      const status = normalizeText(tx?.status);
+      if (status !== 'completed' && status !== 'success') return false;
+      const desc = normalizeText(tx?.description);
+      return desc.includes('correction') || desc.includes('invalid receive help') || desc.includes('duplicate referral income');
+    })
+    .sort((a, b) => txTime(b) - txTime(a))
+    .slice(0, Math.max(1, limit))
+    .map((tx) => {
+      const user = usersById.get(String(tx.userId || ''));
+      return {
+        id: String(tx.id || ''),
+        type: String(tx.type || ''),
+        status: String(tx.status || ''),
+        userId: String(user?.userId || tx.userId || ''),
+        amount: round2(tx.amount),
+        description: String(tx.description || '')
+      };
+    });
+  return rows;
+}
+
 async function run() {
   console.log('=== Duplicate System Correction Rollback Utility ===');
   console.log(APPLY_MODE
@@ -157,6 +184,15 @@ async function run() {
     if (rollbackTargets.length === 0) {
       console.log(`System correction debit candidates scanned: ${detection.correctionDebitCount}`);
       console.log(`Duplicate groups found: ${detection.duplicateGroups}`);
+      const preview = findCorrectionLikeDebitPreview(transactions, usersById, 10);
+      if (preview.length > 0) {
+        console.log('Recent correction-like debit preview (for diagnosis):');
+        for (const row of preview) {
+          console.log(`- tx=${row.id} | user=${row.userId} | type=${row.type} | status=${row.status} | amount=${row.amount} | ${row.description}`);
+        }
+      } else {
+        console.log('No correction-like negative completed transactions found in backend state.');
+      }
       console.log('No duplicate system correction debits found with time-gap heuristic.');
       return;
     }
