@@ -185,7 +185,56 @@ function buildUserMaps(users) {
   return { byId, byUserId };
 }
 
-function computeFundWallet(userId, transactions, payments, pinPurchaseRequests) {
+function resolveUserByRef(ref, userMaps) {
+  const raw = String(ref || '').trim();
+  if (!raw) return null;
+  return userMaps.byId.get(raw) || userMaps.byUserId.get(raw) || null;
+}
+
+function transactionRefMatchesUserRef(ref, user, userMaps) {
+  if (!user) return false;
+  const raw = String(ref || '').trim();
+  if (!raw) return false;
+  if (raw === String(user.id)) return true;
+  if (raw === String(user.userId || '')) return true;
+
+  const resolved = resolveUserByRef(raw, userMaps);
+  if (!resolved) return false;
+  return String(resolved.id) === String(user.id);
+}
+
+function hasMatchingSenderDebitForCreditTx(creditTx, allTransactions, userMaps) {
+  if (creditTx.type !== 'p2p_transfer' || creditTx.status !== 'completed' || !(Number(creditTx.amount || 0) > 0)) {
+    return false;
+  }
+
+  const recipient = resolveUserByRef(creditTx.userId, userMaps);
+  const sender = resolveUserByRef(creditTx.fromUserId, userMaps);
+  if (!recipient || !sender) return false;
+
+  if (String(recipient.id) === String(sender.id)) {
+    return true;
+  }
+
+  const amount = Math.abs(Number(creditTx.amount || 0));
+  const creditTime = getTxTime(creditTx);
+
+  return allTransactions.some((candidate) => {
+    if (candidate.type !== 'p2p_transfer' || candidate.status !== 'completed' || !(Number(candidate.amount || 0) < 0)) return false;
+    if (!transactionRefMatchesUserRef(candidate.userId, sender, userMaps)) return false;
+    if (Math.abs(Math.abs(Number(candidate.amount || 0)) - amount) > ROUND_EPSILON) return false;
+
+    const targetsRecipient = transactionRefMatchesUserRef(candidate.toUserId, recipient, userMaps)
+      || transactionRefMatchesUserRef(candidate.toUserId, userMaps.byUserId.get(String(recipient.userId || '')), userMaps);
+    if (!targetsRecipient) return false;
+
+    if (creditTx.sourceTransferTxId && candidate.id === creditTx.sourceTransferTxId) return true;
+
+    return Math.abs(getTxTime(candidate) - creditTime) <= MATCH_WINDOW_MS;
+  });
+}
+
+function computeFundWallet(userId, transactions, payments, pinPurchaseRequests, userMaps) {
   const txs = transactions
     .filter((tx) => tx.userId === userId)
     .sort((a, b) => getTxTime(a) - getTxTime(b));
@@ -221,6 +270,9 @@ function computeFundWallet(userId, transactions, payments, pinPurchaseRequests) 
     }
 
     if (tx.type === 'p2p_transfer' && tx.status === 'completed') {
+      if (Number(tx.amount || 0) > 0 && !hasMatchingSenderDebitForCreditTx(tx, transactions, userMaps)) {
+        continue;
+      }
       balance += Number(tx.amount || 0);
       relevantCount += 1;
       continue;
@@ -419,7 +471,11 @@ function computeIncomeLedger(userId, transactions) {
         if (txAmount >= 0) {
           incomeWallet += txAmount;
         } else {
-          const transferOutflow = Math.min(Math.abs(txAmount), Math.max(0, incomeWallet));
+          const isUserInitiatedIncomeToFundTransfer = txDesc.includes('to your fund wallet')
+            || txDesc.includes('to fund wallet of');
+          const transferOutflow = isUserInitiatedIncomeToFundTransfer
+            ? Math.abs(txAmount)
+            : Math.min(Math.abs(txAmount), Math.max(0, incomeWallet));
           incomeWallet -= transferOutflow;
           totalGiven += Math.abs(txAmount);
         }
@@ -557,7 +613,7 @@ async function main() {
     const wallet = walletByUserId.get(String(user.id));
     if (!wallet) continue;
 
-    const expectedFund = computeFundWallet(user.id, transactions, payments, pinPurchaseRequests);
+    const expectedFund = computeFundWallet(user.id, transactions, payments, pinPurchaseRequests, { byId: userById, byUserId });
     const expectedIncome = computeIncomeLedger(user.id, transactions);
     const expectedLocked = computeLockedIncome(user.id, transactions);
 

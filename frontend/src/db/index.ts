@@ -2143,10 +2143,41 @@ class Database {
     creditTotal: number;
     debitTotal: number;
   } {
+    const allTransactions = this.getTransactions();
     const txs = this.getTransactions()
       .filter((t) => userIds.has(t.userId))
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
     const MATCH_WINDOW_MS = 15 * 60 * 1000;
+
+    const hasMatchingSenderDebitForCredit = (creditTx: Transaction): boolean => {
+      if (creditTx.type !== 'p2p_transfer' || creditTx.status !== 'completed' || !(Number(creditTx.amount || 0) > 0)) {
+        return false;
+      }
+
+      const recipient = this.resolveUserByRef(creditTx.userId);
+      const sender = creditTx.fromUserId ? this.resolveUserByRef(creditTx.fromUserId) : undefined;
+      if (!recipient || !sender) return false;
+
+      // Self-transfer credits are valid even when source is an income/royalty transfer event.
+      if (recipient.id === sender.id) return true;
+
+      const amount = Math.abs(Number(creditTx.amount || 0));
+      const creditTime = this.getTransactionTime(creditTx);
+
+      return allTransactions.some((candidate) => {
+        if (candidate.type !== 'p2p_transfer' || candidate.status !== 'completed' || !(candidate.amount < 0)) return false;
+        if (!this.transactionRefMatchesUser(candidate.userId, sender)) return false;
+        if (Math.abs(Math.abs(Number(candidate.amount || 0)) - amount) > 0.009) return false;
+
+        const candidateTargetsRecipient = this.transactionRefMatchesUser(candidate.toUserId, recipient)
+          || this.transactionRefMatchesUser(candidate.toUserId, this.getUserByUserId(recipient.userId));
+        if (!candidateTargetsRecipient) return false;
+
+        if (creditTx.sourceTransferTxId && candidate.id === creditTx.sourceTransferTxId) return true;
+
+        return Math.abs(this.getTransactionTime(candidate) - creditTime) <= MATCH_WINDOW_MS;
+      });
+    };
 
     let balance = 0;
     let relevantCount = 0;
@@ -2187,6 +2218,9 @@ class Database {
       }
 
       if (tx.type === 'p2p_transfer' && tx.status === 'completed') {
+        if (tx.amount > 0 && !hasMatchingSenderDebitForCredit(tx)) {
+          continue;
+        }
         balance += tx.amount;
         if (tx.amount >= 0) {
           creditTotal += tx.amount;
@@ -3877,7 +3911,11 @@ class Database {
           if (tx.amount >= 0) {
             incomeWallet += tx.amount;
           } else {
-            const transferOutflow = Math.min(Math.abs(tx.amount), Math.max(0, incomeWallet));
+            const isUserInitiatedIncomeToFundTransfer = txDesc.includes('to your fund wallet')
+              || txDesc.includes('to fund wallet of');
+            const transferOutflow = isUserInitiatedIncomeToFundTransfer
+              ? Math.abs(tx.amount)
+              : Math.min(Math.abs(tx.amount), Math.max(0, incomeWallet));
             incomeWallet -= transferOutflow;
             totalGiven += Math.abs(tx.amount);
           }
