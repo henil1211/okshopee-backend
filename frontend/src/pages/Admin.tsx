@@ -4908,6 +4908,15 @@ export default function Admin() {
               </Button>
               <Button
                 variant="outline"
+                onClick={handleResyncWalletLedgerAll}
+                disabled={isResyncingWalletLedgerAll}
+                className="border-lime-400/30 text-lime-200 hover:bg-lime-500/10"
+              >
+                {isResyncingWalletLedgerAll ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wallet className="w-4 h-4 mr-2" />}
+                <span className="hidden sm:inline">Resync Wallet (All)</span>
+              </Button>
+              <Button
+                variant="outline"
                 onClick={exportData}
                 className="border-white/20 text-white hover:bg-white/10"
               >
