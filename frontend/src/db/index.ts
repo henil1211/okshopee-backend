@@ -50,6 +50,7 @@ const DB_KEYS = {
 };
 
 const HELP_FLOW_DEBUG_KEY = 'mlm_help_flow_debug';
+const DUPLICATE_CONTRIBUTION_BLOCK_KEY = 'mlm_duplicate_contribution_blocks';
 const APP_STORAGE_VERSION = '2026-04-14-1';
 const APP_STORAGE_VERSION_KEY = 'mlm_app_storage_version';
 
@@ -64,6 +65,7 @@ function resetBrowserStateOnBuildChange(): void {
       localStorage.removeItem(key);
     }
     localStorage.removeItem(HELP_FLOW_DEBUG_KEY);
+    localStorage.removeItem(DUPLICATE_CONTRIBUTION_BLOCK_KEY);
     localStorage.setItem(APP_STORAGE_VERSION_KEY, APP_STORAGE_VERSION);
   } catch {
     // Best-effort cleanup only.
@@ -254,6 +256,7 @@ interface UserHelpTracker {
   userId: string;
   levels: Record<string, LevelHelpTrackerState>;
   lockedQueue: LockedGiveHelpItem[];
+  processedContributionKeys?: Record<string, string>;
 }
 
 interface PendingMatrixContribution {
@@ -355,6 +358,52 @@ export interface HelpFlowDebugEntry {
   toUserPublicId?: string;
   outcome: 'sent' | 'safety_pool';
   reason: string;
+}
+
+export interface DuplicateContributionBlockEntry {
+  id: string;
+  createdAt: string;
+  contributionKey: string;
+  fromUserId?: string;
+  fromUserName?: string;
+  fromUserPublicId?: string;
+  toUserId: string;
+  toUserName?: string;
+  toUserPublicId?: string;
+  level: number;
+  side: 'left' | 'right';
+  via: 'activation' | 'pending';
+  reason: 'duplicate_contribution_key';
+}
+
+export interface HistoricalAutoRecoveryDetail {
+  id: string;
+  kind: 'referral_income_mismatch' | 'duplicate_give_help_mismatch';
+  referenceId: string;
+  userId: string;
+  userName: string;
+  reason: string;
+  beforeDue: number;
+  recoveredNow: number;
+  afterDue: number;
+  status: 'active' | 'cleared' | 'no_change';
+  note: string;
+  createdAt: string;
+}
+
+export interface FundTransferIntegrityMismatchRow {
+  id: string;
+  kind: 'missing_sender_debit' | 'missing_recipient_credit' | 'duplicate_recipient_credit';
+  senderUserId: string;
+  senderName: string;
+  recipientUserId: string;
+  recipientName: string;
+  amount: number;
+  createdAt: string;
+  debitTxId?: string;
+  creditTxId?: string;
+  matchedTxId?: string;
+  note: string;
 }
 
 export type RemoteSyncState = 'synced' | 'syncing' | 'pending' | 'offline';
@@ -1390,7 +1439,10 @@ class Database {
   }
 
   static getUserByUserId(userId: string): User | undefined {
-    const matches = this.getUsers().filter(u => u.userId === userId);
+    const cleanUserId = String(userId || '').trim();
+    if (!cleanUserId) return undefined;
+
+    const matches = this.getUsers().filter((u) => String(u.userId || '').trim() === cleanUserId);
     if (matches.length <= 1) return matches[0];
 
     const txCountByUserId = new Map<string, number>();
@@ -1488,15 +1540,45 @@ class Database {
 
     return txs.find((tx) => {
       if (tx.type !== 'direct_income' || tx.status !== 'completed') return false;
-      if (!this.transactionRefMatchesUser(tx.userId, sponsor)) return false;
+      const likelySource = this.resolveLikelyReferralSourceForDirectIncome(tx, sponsor);
+      if (!this.directIncomeTxBelongsToSponsor(tx, sponsor, likelySource)) return false;
 
       if (tx.fromUserId && this.transactionRefMatchesUser(tx.fromUserId, referral)) {
         return true;
       }
 
-      const likelySource = this.resolveLikelyReferralSourceForDirectIncome(tx, sponsor);
       return !!likelySource && likelySource.userId === referral.userId;
     });
+  }
+
+  private static resolveLikelySponsorForDirectIncome(tx: Transaction): User | undefined {
+    if (tx.type !== 'direct_income') return undefined;
+
+    const sponsorFromTxUser = this.resolveUserByRef(tx.userId);
+    if (sponsorFromTxUser) {
+      return this.getUserByUserId(sponsorFromTxUser.userId) || sponsorFromTxUser;
+    }
+
+    const likelySource = this.resolveLikelyReferralSourceForDirectIncome(tx);
+    if (!likelySource?.sponsorId) return undefined;
+
+    return this.getUserByUserId(likelySource.sponsorId);
+  }
+
+  private static directIncomeTxBelongsToSponsor(
+    tx: Transaction,
+    sponsor: User | undefined,
+    likelySource?: User
+  ): boolean {
+    if (!sponsor) return false;
+    if (tx.type !== 'direct_income' || tx.status !== 'completed') return false;
+
+    if (this.transactionRefMatchesUser(tx.userId, sponsor)) {
+      return true;
+    }
+
+    const resolvedSource = likelySource || this.resolveLikelyReferralSourceForDirectIncome(tx, sponsor);
+    return !!resolvedSource && String(resolvedSource.sponsorId || '').trim() === sponsor.userId;
   }
 
   private static hasLogicalReceiveHelpCredit(params: {
@@ -1573,13 +1655,15 @@ class Database {
         return false;
       }
 
+      const resolvedSource = tx.fromUserId ? this.resolveUserByRef(tx.fromUserId) : undefined;
+      const likelySource = this.resolveLikelyReferralSourceForDirectIncome(tx, sponsorUser);
+      const sourceForIdentity = resolvedSource || likelySource;
+
       if (sponsorUser) {
-        if (!this.transactionRefMatchesUser(tx.userId, sponsorUser)) return false;
+        if (!this.directIncomeTxBelongsToSponsor(tx, sponsorUser, sourceForIdentity)) return false;
       } else if (tx.userId !== params.sponsorInternalId) {
         return false;
       }
-
-      const resolvedSource = tx.fromUserId ? this.resolveUserByRef(tx.fromUserId) : undefined;
       const parsed = this.parseReferralIncomeDescription(tx.description);
 
       if (params.referredInternalId && tx.fromUserId === params.referredInternalId) {
@@ -1589,10 +1673,10 @@ class Database {
         if (resolvedSource?.userId === normalizedUserId) return true;
         if (parsed?.userId === normalizedUserId) return true;
       }
-      if (normalizedEmail && resolvedSource && String(resolvedSource.email || '').trim().toLowerCase() === normalizedEmail) {
+      if (normalizedEmail && sourceForIdentity && String(sourceForIdentity.email || '').trim().toLowerCase() === normalizedEmail) {
         return true;
       }
-      if (normalizedPhone && resolvedSource && this.normalizeIdentityPhone(resolvedSource.phone) === normalizedPhone) {
+      if (normalizedPhone && sourceForIdentity && this.normalizeIdentityPhone(sourceForIdentity.phone) === normalizedPhone) {
         return true;
       }
 
@@ -1602,7 +1686,7 @@ class Database {
         : true;
 
       if (normalizedName && withinWindow && !hasStrongIdentityParams) {
-        if (resolvedSource && this.normalizeIdentityText(resolvedSource.fullName) === normalizedName) return true;
+        if (sourceForIdentity && this.normalizeIdentityText(sourceForIdentity.fullName) === normalizedName) return true;
         if (parsed && this.normalizeIdentityText(parsed.fullName) === normalizedName) return true;
       }
 
@@ -2062,6 +2146,7 @@ class Database {
     const txs = this.getTransactions()
       .filter((t) => userIds.has(t.userId))
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const MATCH_WINDOW_MS = 15 * 60 * 1000;
 
     let balance = 0;
     let relevantCount = 0;
@@ -2118,6 +2203,26 @@ class Database {
         && tx.amount < 0
         && desc.includes('to your fund wallet')
       ) {
+        // If a matching fund-wallet credit does not exist, treat this as a self transfer into fund wallet.
+        const amount = Math.abs(tx.amount);
+        const hasExistingCredit = txs.some((creditTx) =>
+          creditTx.userId === tx.userId
+          && creditTx.type === 'p2p_transfer'
+          && creditTx.status === 'completed'
+          && Math.abs((creditTx.displayAmount ?? creditTx.amount) || 0) === amount
+          && (
+            creditTx.sourceTransferTxId === tx.id
+            || (
+              String(creditTx.description || '').toLowerCase().includes('income wallet transfer')
+              && Math.abs(this.getTransactionTime(creditTx) - this.getTransactionTime(tx)) <= MATCH_WINDOW_MS
+            )
+          )
+        );
+        if (!hasExistingCredit) {
+          balance += amount;
+          creditTotal += amount;
+          relevantCount += 1;
+        }
         continue;
       }
 
@@ -2144,6 +2249,53 @@ class Database {
         relevantCount += 1;
         continue;
       }
+    }
+
+    // If completed deposits exist in payment history without matching deposit transactions, count them.
+    for (const payment of this.getPayments()) {
+      if (!userIds.has(payment.userId)) continue;
+      if (payment.status !== 'completed') continue;
+
+      const paymentAmount = Number(payment.amount || 0);
+      if (!(paymentAmount > 0)) continue;
+
+      const paymentTime = new Date(payment.verifiedAt || payment.createdAt || 0).getTime();
+      const hasDepositTx = txs.some((tx) =>
+        tx.userId === payment.userId
+        && tx.type === 'deposit'
+        && tx.status === 'completed'
+        && Number(tx.amount || 0) === paymentAmount
+        && Math.abs(this.getTransactionTime(tx) - paymentTime) <= MATCH_WINDOW_MS
+      );
+      if (hasDepositTx) continue;
+
+      balance += paymentAmount;
+      creditTotal += paymentAmount;
+      relevantCount += 1;
+    }
+
+    // If completed paid-from-wallet PIN requests exist without matching pin_purchase debits, count them.
+    for (const request of this.getPinPurchaseRequests()) {
+      if (!userIds.has(request.userId)) continue;
+      if (request.status !== 'completed' || !request.paidFromWallet) continue;
+
+      const requestAmount = Math.abs(Number(request.amount || 0));
+      if (!(requestAmount > 0)) continue;
+
+      const requestTime = new Date(request.processedAt || request.createdAt || 0).getTime();
+      const hasPinPurchaseTx = txs.some((tx) =>
+        tx.userId === request.userId
+        && tx.type === 'pin_purchase'
+        && tx.status === 'completed'
+        && Math.abs(Number(tx.amount || 0)) === requestAmount
+        && Number(tx.amount || 0) < 0
+        && Math.abs(this.getTransactionTime(tx) - requestTime) <= MATCH_WINDOW_MS
+      );
+      if (hasPinPurchaseTx) continue;
+
+      balance -= requestAmount;
+      debitTotal += requestAmount;
+      relevantCount += 1;
     }
 
     return {
@@ -2670,7 +2822,13 @@ class Database {
     }
 
     const recoveryReason = this.buildReferralMismatchRecoveryReason(mismatch);
-    const recoveryProgress = this.getRecoveryProgressForReason(canonicalUser.id, recoveryReason, targetDue);
+    const specificRecoveryProgress = this.getRecoveryProgressForReason(canonicalUser.id, recoveryReason, targetDue);
+    const legacyRecoveryProgress = this.getRecoveryProgressForReason(canonicalUser.id, 'duplicate referral income credits', targetDue);
+    const specificCoverage = (specificRecoveryProgress.currentRecoveryDue || 0) + (specificRecoveryProgress.recoveredSoFar || 0);
+    const legacyCoverage = (legacyRecoveryProgress.currentRecoveryDue || 0) + (legacyRecoveryProgress.recoveredSoFar || 0);
+    const recoveryProgress = legacyCoverage > specificCoverage
+      ? legacyRecoveryProgress
+      : specificRecoveryProgress;
     if (recoveryProgress.currentRecoveryDue > 0.009) {
       return {
         success: true,
@@ -2793,7 +2951,7 @@ class Database {
     }>();
 
     for (const tx of completedDirectIncomeTxs) {
-      const sponsor = this.resolveUserByRef(tx.userId);
+      const sponsor = this.resolveLikelySponsorForDirectIncome(tx);
       if (!sponsor) continue;
 
       const parsed = this.parseReferralIncomeDescription(tx.description);
@@ -2842,12 +3000,27 @@ class Database {
         const totalCreditedAmount = sorted.reduce((sum, entry) => sum + Math.abs(Number(entry.tx.amount || 0)), 0);
         const extraCreditedAmount = extraEntries.reduce((sum, entry) => sum + Math.abs(Number(entry.tx.amount || 0)), 0);
         const sponsorUser = this.getUserByUserId(group.sponsorUserId);
-        const recoveryProgress = this.getRecoveryProgressForReason(
+        const specificRecoveryReason = this.buildReferralMismatchRecoveryReason({
+          referredName: group.referredName,
+          likelyCorrectUserId: group.likelyCorrectUserId
+        });
+        const specificRecoveryProgress = this.getRecoveryProgressForReason(
+          sponsorUser?.id || group.sponsorUserId,
+          specificRecoveryReason,
+          extraCreditedAmount,
+          transactions
+        );
+        const legacyRecoveryProgress = this.getRecoveryProgressForReason(
           sponsorUser?.id || group.sponsorUserId,
           'duplicate referral income credits',
           extraCreditedAmount,
           transactions
         );
+        const specificCoverage = (specificRecoveryProgress.currentRecoveryDue || 0) + (specificRecoveryProgress.recoveredSoFar || 0);
+        const legacyCoverage = (legacyRecoveryProgress.currentRecoveryDue || 0) + (legacyRecoveryProgress.recoveredSoFar || 0);
+        const recoveryProgress = legacyCoverage > specificCoverage
+          ? legacyRecoveryProgress
+          : specificRecoveryProgress;
 
         return {
           sponsorUserId: group.sponsorUserId,
@@ -3133,6 +3306,135 @@ class Database {
       recoveryProgress.remainingRecoveryAmount,
       recoveryReason
     );
+  }
+
+  static scanFundTransferIntegrityMismatches(): FundTransferIntegrityMismatchRow[] {
+    const WINDOW_MS = 15 * 60 * 1000;
+    const transactions = this.getTransactions().filter((tx) => (
+      tx.type === 'p2p_transfer'
+      && tx.status === 'completed'
+      && Math.abs(Number(tx.amount || 0)) > 0.009
+    ));
+
+    const debits: Array<{
+      tx: Transaction;
+      sender: User;
+      recipient: User;
+      amount: number;
+      time: number;
+    }> = [];
+    const credits: Array<{
+      tx: Transaction;
+      sender: User;
+      recipient: User;
+      amount: number;
+      time: number;
+    }> = [];
+
+    for (const tx of transactions) {
+      const amount = Math.abs(Number(tx.amount || 0));
+      if (!(amount > 0.009)) continue;
+
+      if (Number(tx.amount || 0) < 0) {
+        const sender = this.resolveUserByRef(tx.userId);
+        const recipient = this.resolveUserByRef(tx.toUserId || '');
+        if (!sender || !recipient) continue;
+        if (sender.userId === recipient.userId) continue;
+        debits.push({
+          tx,
+          sender,
+          recipient,
+          amount,
+          time: this.getTransactionTime(tx)
+        });
+      } else {
+        const recipient = this.resolveUserByRef(tx.userId);
+        const sender = this.resolveUserByRef(tx.fromUserId || '');
+        if (!sender || !recipient) continue;
+        if (sender.userId === recipient.userId) continue;
+        credits.push({
+          tx,
+          sender,
+          recipient,
+          amount,
+          time: this.getTransactionTime(tx)
+        });
+      }
+    }
+
+    const mismatches: FundTransferIntegrityMismatchRow[] = [];
+    const usedCreditIndices = new Set<number>();
+
+    for (const debit of debits) {
+      const candidateIndices = credits
+        .map((credit, index) => ({ credit, index }))
+        .filter(({ credit, index }) => {
+          if (usedCreditIndices.has(index)) return false;
+          if (credit.sender.userId !== debit.sender.userId) return false;
+          if (credit.recipient.userId !== debit.recipient.userId) return false;
+          if (Math.abs(credit.amount - debit.amount) > 0.009) return false;
+          return Math.abs(credit.time - debit.time) <= WINDOW_MS;
+        })
+        .sort((a, b) => Math.abs(a.credit.time - debit.time) - Math.abs(b.credit.time - debit.time));
+
+      if (candidateIndices.length === 0) {
+        mismatches.push({
+          id: `mismatch_missing_recipient_credit_${debit.tx.id}`,
+          kind: 'missing_recipient_credit',
+          senderUserId: debit.sender.userId,
+          senderName: debit.sender.fullName,
+          recipientUserId: debit.recipient.userId,
+          recipientName: debit.recipient.fullName,
+          amount: debit.amount,
+          createdAt: debit.tx.completedAt || debit.tx.createdAt || new Date().toISOString(),
+          debitTxId: debit.tx.id,
+          note: 'Sender was debited but matching recipient credit was not found.'
+        });
+        continue;
+      }
+
+      const primary = candidateIndices[0];
+      usedCreditIndices.add(primary.index);
+
+      if (candidateIndices.length > 1) {
+        for (const duplicate of candidateIndices.slice(1)) {
+          usedCreditIndices.add(duplicate.index);
+          mismatches.push({
+            id: `mismatch_duplicate_credit_${duplicate.credit.tx.id}`,
+            kind: 'duplicate_recipient_credit',
+            senderUserId: debit.sender.userId,
+            senderName: debit.sender.fullName,
+            recipientUserId: debit.recipient.userId,
+            recipientName: debit.recipient.fullName,
+            amount: duplicate.credit.amount,
+            createdAt: duplicate.credit.tx.completedAt || duplicate.credit.tx.createdAt || new Date().toISOString(),
+            debitTxId: debit.tx.id,
+            creditTxId: duplicate.credit.tx.id,
+            matchedTxId: primary.credit.tx.id,
+            note: 'Multiple recipient credits matched one sender debit.'
+          });
+        }
+      }
+    }
+
+    for (let index = 0; index < credits.length; index += 1) {
+      if (usedCreditIndices.has(index)) continue;
+      const credit = credits[index];
+      mismatches.push({
+        id: `mismatch_missing_sender_debit_${credit.tx.id}`,
+        kind: 'missing_sender_debit',
+        senderUserId: credit.sender.userId,
+        senderName: credit.sender.fullName,
+        recipientUserId: credit.recipient.userId,
+        recipientName: credit.recipient.fullName,
+        amount: credit.amount,
+        createdAt: credit.tx.completedAt || credit.tx.createdAt || new Date().toISOString(),
+        creditTxId: credit.tx.id,
+        note: 'Recipient was credited but matching sender debit was not found.'
+      });
+    }
+
+    return mismatches.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
   static rerouteSafetyPooledLockedGiveHelpToUpline(userRef: string): {
@@ -3749,20 +4051,41 @@ class Database {
     affectedUsers: number;
   } {
     const transactions = this.getTransactions();
-    const users = this.getUsers();
-    const usersById = new Map(users.map((u) => [u.id, u]));
+    const scopedRecipient = userId ? this.resolveUserByRef(userId) : undefined;
     const affectedUserIds = new Set<string>();
     const logs = this.getGhostReceiveHelpRepairLogs();
     let repaired = 0;
     let scanned = 0;
+    const auditEntries: Array<{
+      recipientId: string;
+      recipientUserId: string;
+      recipientName: string;
+      amount: number;
+      level: number;
+      sourceLabel: string;
+      originalTxId: string;
+      reason: string;
+    }> = [];
+
+    const parseSourceLabelFromDescription = (description: string): string => {
+      const fromMatch = String(description || '').match(/from\s+(.+?)\s*\((\d{7})\)/i);
+      if (fromMatch) {
+        return `${fromMatch[1].trim()} (${fromMatch[2]})`;
+      }
+      const anyId = String(description || '').match(/\b(\d{7})\b/);
+      if (anyId) {
+        return `Unknown (${anyId[1]})`;
+      }
+      return 'Unknown (N/A)';
+    };
 
     for (const tx of transactions) {
-      if (userId && tx.userId !== userId) continue;
+      if (scopedRecipient && !this.transactionRefMatchesUser(tx.userId, scopedRecipient)) continue;
       if (tx.type !== 'receive_help') continue;
       if (!(tx.amount > 0)) continue;
       scanned += 1;
-      const sender = tx.fromUserId ? usersById.get(tx.fromUserId) : undefined;
-      const recipient = usersById.get(tx.userId);
+      const sender = tx.fromUserId ? this.resolveUserByRef(tx.fromUserId) : undefined;
+      const recipient = this.resolveUserByRef(tx.userId);
       const txLevel = this.resolveTransactionLevel(tx) || Number(tx.level) || 0;
       const senderMissing = !sender;
       const senderOutOfTree = !senderMissing
@@ -3784,14 +4107,30 @@ class Database {
           createdAt: new Date().toISOString(),
           txId: tx.id,
           userId: tx.userId,
-          userPublicId: usersById.get(tx.userId)?.userId || '',
+          userPublicId: recipient?.userId || '',
           amount: originalAmount,
           reason: senderMissing
             ? 'Missing or invalid sender'
             : `Sender-recipient matrix mismatch at level ${txLevel}`,
           originalDescription: originalDesc
         });
-        affectedUserIds.add(tx.userId);
+        if (recipient?.id) {
+          affectedUserIds.add(recipient.id);
+          auditEntries.push({
+            recipientId: recipient.id,
+            recipientUserId: recipient.userId,
+            recipientName: recipient.fullName,
+            amount: Math.abs(Number(originalAmount || 0)),
+            level: txLevel,
+            sourceLabel: sender
+              ? `${sender.fullName} (${sender.userId})`
+              : parseSourceLabelFromDescription(originalDesc),
+            originalTxId: tx.id,
+            reason: senderMissing
+              ? 'Missing sender record'
+              : `Sender-recipient matrix mismatch at level ${txLevel}`
+          });
+        }
         repaired += 1;
       }
     }
@@ -3799,6 +4138,20 @@ class Database {
     if (repaired > 0) {
       this.saveTransactions(transactions);
       this.saveGhostReceiveHelpRepairLogs(logs);
+
+      for (const audit of auditEntries) {
+        this.createTransaction({
+          id: generateEventId('tx', 'ghost_receive_reversal_audit'),
+          userId: audit.recipientId,
+          type: 'admin_debit',
+          amount: 0,
+          status: 'completed',
+          description: `System reversal audit: reversed invalid receive-help credit of $${audit.amount.toFixed(2)} at level ${audit.level} for ${audit.recipientName} (${audit.recipientUserId}). Source: ${audit.sourceLabel}. Reason: ${audit.reason}. Original Tx: ${audit.originalTxId}`,
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          adminReason: 'ghost_receive_help_reversal_audit'
+        });
+      }
 
       for (const userId of affectedUserIds) {
         this.repairLockedIncomeTrackerFromTransactions(userId);
@@ -4198,6 +4551,219 @@ class Database {
     }
 
     return { repaired, examples };
+  }
+
+  static repairMissingP2PTransferDebits(userRef?: string): {
+    repaired: number;
+    examples: string[];
+  } {
+    const targetUser = userRef
+      ? (this.getUserById(userRef) || this.getUserByUserId(userRef))
+      : null;
+
+    if (userRef && !targetUser) {
+      throw new Error('User not found');
+    }
+
+    const targetUserIds = targetUser ? new Set(this.getRelatedInternalUserIdsForUserRef(targetUser.id)) : null;
+    const transactions = this.getTransactions();
+    const MATCH_WINDOW_MS = 15 * 60 * 1000;
+    const createdTransactions: Transaction[] = [];
+    const touchedSenderIds = new Set<string>();
+    const examples: string[] = [];
+
+    const credits = transactions
+      .filter((tx) => tx.type === 'p2p_transfer' && tx.status === 'completed' && tx.amount > 0)
+      .sort((a, b) => this.getTransactionTime(a) - this.getTransactionTime(b));
+
+    for (const creditTx of credits) {
+      const recipient = this.resolveUserByRef(creditTx.userId);
+      const sender = creditTx.fromUserId ? this.resolveUserByRef(creditTx.fromUserId) : undefined;
+      if (!recipient || !sender) continue;
+
+      // Ignore self credits (e.g., income->fund / royalty->fund self moves).
+      if (recipient.id === sender.id) continue;
+
+      if (targetUserIds && !targetUserIds.has(recipient.id) && !targetUserIds.has(sender.id)) {
+        continue;
+      }
+
+      const amount = Math.abs(Number(creditTx.amount || 0));
+      if (!(amount > 0)) continue;
+
+      const creditTime = this.getTransactionTime(creditTx);
+      const hasSenderDebit = transactions.some((candidate) => {
+        if (candidate.type !== 'p2p_transfer' || candidate.status !== 'completed' || !(candidate.amount < 0)) return false;
+        if (!this.transactionRefMatchesUser(candidate.userId, sender)) return false;
+        if (Math.abs(Math.abs(Number(candidate.amount || 0)) - amount) > 0.009) return false;
+
+        const candidateTargetsRecipient = this.transactionRefMatchesUser(candidate.toUserId, recipient)
+          || this.transactionRefMatchesUser(candidate.toUserId, this.getUserByUserId(recipient.userId));
+        if (!candidateTargetsRecipient) return false;
+
+        if (creditTx.sourceTransferTxId && candidate.id === creditTx.sourceTransferTxId) return true;
+
+        return Math.abs(this.getTransactionTime(candidate) - creditTime) <= MATCH_WINDOW_MS;
+      });
+
+      if (hasSenderDebit) continue;
+
+      createdTransactions.push(this.normalizeTransactionRecord({
+        id: generateEventId('tx', 'repair_missing_p2p_debit'),
+        userId: sender.id,
+        type: 'p2p_transfer',
+        amount: -amount,
+        toUserId: recipient.id,
+        fromUserId: sender.id,
+        status: 'completed',
+        description: `Recovered missing fund wallet transfer debit to ${recipient.fullName} (${recipient.userId})`,
+        createdAt: creditTx.completedAt || creditTx.createdAt || new Date().toISOString(),
+        completedAt: creditTx.completedAt || creditTx.createdAt || new Date().toISOString()
+      } as Transaction));
+      touchedSenderIds.add(sender.id);
+
+      if (examples.length < 10) {
+        examples.push(`${sender.userId}: recovered missing transfer debit of $${amount.toFixed(2)} to ${recipient.userId}`);
+      }
+    }
+
+    if (createdTransactions.length === 0) {
+      return { repaired: 0, examples };
+    }
+
+    this.saveTransactions([...transactions, ...createdTransactions]);
+    for (const senderId of touchedSenderIds) {
+      this.repairFundWalletConsistency(senderId);
+    }
+
+    return { repaired: createdTransactions.length, examples };
+  }
+
+  static reconcileAllFinancialLedgers(userRef?: string): {
+    depositsRecovered: number;
+    pinPurchasesRecovered: number;
+    p2pDebitsRecovered: number;
+    selfFundCreditsRepaired: number;
+    brokenSelfTransfersRemoved: number;
+    fundWalletsRepaired: number;
+    incomeWalletsRepaired: number;
+    royaltyWalletsRepaired: number;
+    examples: string[];
+  } {
+    const targetUser = userRef
+      ? (this.getUserById(userRef) || this.getUserByUserId(userRef))
+      : null;
+
+    if (userRef && !targetUser) {
+      throw new Error('User not found');
+    }
+
+    const scopeRef = targetUser?.id;
+    const paymentAndPin = this.recoverMissingPaymentAndPinTransactions(scopeRef);
+    const p2p = this.repairMissingP2PTransferDebits(scopeRef);
+    const selfFund = this.repairMissingSelfFundCredits(scopeRef);
+    const brokenSelf = this.removeBrokenSelfIncomeToFundTransfer(scopeRef);
+
+    const fund = targetUser
+      ? this.repairFundWalletConsistency(targetUser.id)
+      : this.repairFundWalletConsistency();
+    const income = targetUser
+      ? this.repairIncomeWalletConsistency(targetUser.id)
+      : this.repairIncomeWalletConsistency();
+    const royalty = targetUser
+      ? this.repairRoyaltyWalletConsistency(targetUser.id)
+      : this.repairRoyaltyWalletConsistency();
+
+    return {
+      depositsRecovered: paymentAndPin.depositsCreated,
+      pinPurchasesRecovered: paymentAndPin.pinPurchasesCreated,
+      p2pDebitsRecovered: p2p.repaired,
+      selfFundCreditsRepaired: selfFund.repaired,
+      brokenSelfTransfersRemoved: brokenSelf.removed,
+      fundWalletsRepaired: fund.repaired,
+      incomeWalletsRepaired: income.repaired,
+      royaltyWalletsRepaired: royalty.repaired,
+      examples: [
+        ...paymentAndPin.examples,
+        ...p2p.examples,
+        ...selfFund.examples,
+        ...brokenSelf.examples
+      ].slice(0, 20)
+    };
+  }
+
+  static resyncWalletLedgersFromHistory(userRef?: string): {
+    usersScoped: number;
+    usersTrackersUpdated: number;
+    depositsRecovered: number;
+    pinPurchasesRecovered: number;
+    fundWalletsRepaired: number;
+    incomeWalletsRepaired: number;
+    royaltyWalletsRepaired: number;
+    lockedIncomeWalletsSynced: number;
+  } {
+    const targetUser = userRef
+      ? (this.getUserById(userRef) || this.getUserByUserId(userRef))
+      : null;
+
+    if (userRef && !targetUser) {
+      throw new Error('User not found');
+    }
+
+    const scopedUsers = targetUser ? [targetUser] : this.getUsers();
+    const scopeRef = targetUser?.id;
+
+    const recovered = this.recoverMissingPaymentAndPinTransactions(scopeRef);
+
+    let usersTrackersUpdated = 0;
+    for (const user of scopedUsers) {
+      const tracker = this.repairLockedIncomeTrackerFromTransactions(user.id);
+      if (tracker.updated) {
+        usersTrackersUpdated += 1;
+      }
+    }
+
+    const fund = targetUser
+      ? this.repairFundWalletConsistency(targetUser.id)
+      : this.repairFundWalletConsistency();
+    const income = targetUser
+      ? this.repairIncomeWalletConsistency(targetUser.id)
+      : this.repairIncomeWalletConsistency();
+    const royalty = targetUser
+      ? this.repairRoyaltyWalletConsistency(targetUser.id)
+      : this.repairRoyaltyWalletConsistency();
+    const locked = targetUser
+      ? this.syncLockedIncomeWallet(targetUser.id)
+      : this.syncLockedIncomeWallet();
+
+    // Keep giveHelpLocked aligned with tracker after wallet rebuild.
+    for (const user of scopedUsers) {
+      const tracker = this.getUserHelpTracker(user.id);
+      const giveHelpLocked = Object.values(tracker.levels).reduce(
+        (sum, state) => sum + (state.lockedAmount || 0),
+        0
+      );
+      const wallet = this.getWallet(user.id);
+      if (!wallet) continue;
+
+      const nextGiveHelpLocked = Math.max(0, Math.round(giveHelpLocked * 100) / 100);
+      if (Math.abs((wallet.giveHelpLocked || 0) - nextGiveHelpLocked) > 0.0001) {
+        this.updateWallet(user.id, {
+          giveHelpLocked: nextGiveHelpLocked
+        });
+      }
+    }
+
+    return {
+      usersScoped: scopedUsers.length,
+      usersTrackersUpdated,
+      depositsRecovered: recovered.depositsCreated,
+      pinPurchasesRecovered: recovered.pinPurchasesCreated,
+      fundWalletsRepaired: fund.repaired,
+      incomeWalletsRepaired: income.repaired,
+      royaltyWalletsRepaired: royalty.repaired,
+      lockedIncomeWalletsSynced: locked.synced
+    };
   }
 
   static recoverMissingPaymentAndPinTransactions(userRef?: string): {
@@ -5336,6 +5902,10 @@ class Database {
     referralIncomeRecovered: number;
     levelOneHelpRecovered: number;
     missingIncomingReceiveHelpRecovered: number;
+    referralMismatchRecoveriesActivated: number;
+    duplicateGiveMismatchRecoveriesActivated: number;
+    recoveredNowAmount: number;
+    recoveryDetails: HistoricalAutoRecoveryDetail[];
   } {
     const canonicalUsers = new Map<string, User>();
     for (const user of this.getUsers()) {
@@ -5353,6 +5923,11 @@ class Database {
     let levelOneHelpRecovered = 0;
     let missingIncomingReceiveHelpRecovered = 0;
 
+    let referralMismatchRecoveriesActivated = 0;
+    let duplicateGiveMismatchRecoveriesActivated = 0;
+    let recoveredNowAmount = 0;
+    const recoveryDetails: HistoricalAutoRecoveryDetail[] = [];
+
     for (const user of canonicalUsers.values()) {
       const referralAndHelp = this.recoverMissingReferralAndLevelOneHelp(user.id);
       const incomingHelp = this.repairMissingIncomingReceiveHelp(user.id);
@@ -5369,6 +5944,89 @@ class Database {
       missingIncomingReceiveHelpRecovered += incomingHelp.created;
     }
 
+    for (const mismatch of this.scanReferralIncomeMismatches()) {
+      if ((mismatch.extraCreditedAmount || 0) <= 0.009) continue;
+      const targetUser = this.getUserByUserId(mismatch.sponsorUserId);
+      if (!targetUser) continue;
+      const reason = this.buildReferralMismatchRecoveryReason(mismatch);
+      const activation = this.startFundRecoveryForReferralIncomeMismatch(
+        mismatch.sponsorUserId,
+        mismatch.likelyCorrectUserId
+      );
+      const beforeDue = Math.max(0, Number(activation.recoveryDue || 0));
+      let recoveredNow = Math.max(0, Number(activation.recoveredNow || 0));
+      let afterDue = beforeDue;
+      let note = activation.message;
+      if (activation.success && (((activation.recoveryDue || 0) > 0.009) || ((activation.recoveredNow || 0) > 0.0001))) {
+        referralMismatchRecoveriesActivated += 1;
+      }
+
+      if (beforeDue > 0.009) {
+        const applyNow = this.applyActiveFundRecoveryNow(mismatch.sponsorUserId);
+        note = `${note} ${applyNow.message}`.trim();
+        if (applyNow.success) {
+          recoveredNow += Math.max(0, Number(applyNow.recoveredNow || 0));
+          afterDue = Math.max(0, Number(applyNow.recoveryDue || 0));
+        }
+      }
+
+      recoveredNowAmount += recoveredNow;
+      recoveryDetails.push({
+        id: generateEventId('repair', 'referral_recovery_detail'),
+        kind: 'referral_income_mismatch',
+        referenceId: `${mismatch.sponsorUserId}__${mismatch.likelyCorrectUserId || 'unknown'}`,
+        userId: targetUser.userId,
+        userName: targetUser.fullName,
+        reason,
+        beforeDue: Math.round(beforeDue * 100) / 100,
+        recoveredNow: Math.round(recoveredNow * 100) / 100,
+        afterDue: Math.round(afterDue * 100) / 100,
+        status: afterDue > 0.009 ? 'active' : (recoveredNow > 0.0001 ? 'cleared' : 'no_change'),
+        note,
+        createdAt: new Date().toISOString()
+      });
+    }
+
+    for (const mismatch of this.scanDuplicateLockedGiveHelpMismatches()) {
+      if ((mismatch.extraCreditedAmount || 0) <= 0.009) continue;
+      const targetUser = this.getUserByUserId(mismatch.recipientUserId);
+      if (!targetUser) continue;
+      const reason = `duplicate give-help credits of ${mismatch.senderName} (${mismatch.senderUserId})`;
+      const activation = this.startFundRecoveryForDuplicateLockedGiveHelpMismatch(mismatch.mismatchKey);
+      const beforeDue = Math.max(0, Number(activation.recoveryDue || 0));
+      let recoveredNow = Math.max(0, Number(activation.recoveredNow || 0));
+      let afterDue = beforeDue;
+      let note = activation.message;
+      if (activation.success && (((activation.recoveryDue || 0) > 0.009) || ((activation.recoveredNow || 0) > 0.0001))) {
+        duplicateGiveMismatchRecoveriesActivated += 1;
+      }
+
+      if (beforeDue > 0.009) {
+        const applyNow = this.applyActiveFundRecoveryNow(mismatch.recipientUserId);
+        note = `${note} ${applyNow.message}`.trim();
+        if (applyNow.success) {
+          recoveredNow += Math.max(0, Number(applyNow.recoveredNow || 0));
+          afterDue = Math.max(0, Number(applyNow.recoveryDue || 0));
+        }
+      }
+
+      recoveredNowAmount += recoveredNow;
+      recoveryDetails.push({
+        id: generateEventId('repair', 'duplicate_give_recovery_detail'),
+        kind: 'duplicate_give_help_mismatch',
+        referenceId: mismatch.mismatchKey,
+        userId: targetUser.userId,
+        userName: targetUser.fullName,
+        reason,
+        beforeDue: Math.round(beforeDue * 100) / 100,
+        recoveredNow: Math.round(recoveredNow * 100) / 100,
+        afterDue: Math.round(afterDue * 100) / 100,
+        status: afterDue > 0.009 ? 'active' : (recoveredNow > 0.0001 ? 'cleared' : 'no_change'),
+        note,
+        createdAt: new Date().toISOString()
+      });
+    }
+
     this.repairIncomeWalletConsistency();
     this.syncLockedIncomeWallet();
 
@@ -5379,7 +6037,11 @@ class Database {
       invalidRestoredReceiveHelpReversed: reverseInvalid.reversed,
       referralIncomeRecovered,
       levelOneHelpRecovered,
-      missingIncomingReceiveHelpRecovered
+      missingIncomingReceiveHelpRecovered,
+      referralMismatchRecoveriesActivated,
+      duplicateGiveMismatchRecoveriesActivated,
+      recoveredNowAmount: Math.round(recoveredNowAmount * 100) / 100,
+      recoveryDetails
     };
   }
 
@@ -5558,29 +6220,264 @@ class Database {
     };
   }
 
+  static relinkRecoveredUserPinUsage(userId: string, pinCodeHint?: string): {
+    userId: string;
+    scannedUsedPins: number;
+    orphanCandidates: number;
+    relinked: number;
+  } {
+    const cleanUserId = String(userId || '').replace(/\D/g, '').slice(0, 7);
+    if (cleanUserId.length !== 7) {
+      throw new Error('Enter a valid 7-digit User ID');
+    }
+
+    const targetUser = this.getUserByUserId(cleanUserId);
+    if (!targetUser) {
+      throw new Error('Target user not found');
+    }
+
+    const pinCode = String(pinCodeHint || '').trim().toUpperCase();
+    const userInternalIds = new Set(this.getUsers().map((member) => member.id));
+    const pinUsedTxs = this.getTransactions().filter((tx) => (
+      tx.type === 'pin_used'
+      && tx.status === 'completed'
+      && tx.userId === targetUser.id
+    ));
+    const eligiblePinIds = new Set(
+      pinUsedTxs.map((tx) => String(tx.pinId || '').trim()).filter(Boolean)
+    );
+    const eligiblePinCodes = new Set(
+      pinUsedTxs.map((tx) => String(tx.pinCode || '').trim().toUpperCase()).filter(Boolean)
+    );
+    if (pinCode) {
+      eligiblePinCodes.add(pinCode);
+    }
+
+    let scannedUsedPins = 0;
+    let orphanCandidates = 0;
+    let relinked = 0;
+    const now = new Date().toISOString();
+    const pins = this.getPins();
+
+    const nextPins = pins.map((pin) => {
+      if (pin.status !== 'used') {
+        return pin;
+      }
+      scannedUsedPins += 1;
+
+      const normalizedPinCode = String(pin.pinCode || '').trim().toUpperCase();
+      if (pinCode && normalizedPinCode !== pinCode) {
+        return pin;
+      }
+
+      const usedById = String(pin.usedById || '').trim();
+      const registrationUserId = String(pin.registrationUserId || '').trim();
+      const orphanUsedBy = !!usedById && !userInternalIds.has(usedById);
+      const orphanRegistration = !!registrationUserId && !userInternalIds.has(registrationUserId);
+      if (!orphanUsedBy && !orphanRegistration) {
+        return pin;
+      }
+
+      orphanCandidates += 1;
+      const hasEligiblePinHistory = eligiblePinIds.has(pin.id) || (normalizedPinCode && eligiblePinCodes.has(normalizedPinCode));
+      if (!hasEligiblePinHistory) {
+        return pin;
+      }
+
+      if (pin.usedById === targetUser.id && pin.registrationUserId === targetUser.id) {
+        return pin;
+      }
+
+      relinked += 1;
+      return {
+        ...pin,
+        usedById: targetUser.id,
+        registrationUserId: targetUser.id,
+        usedAt: pin.usedAt || now,
+        status: 'used' as Pin['status']
+      };
+    });
+
+    if (relinked > 0) {
+      this.savePins(nextPins);
+    }
+
+    return {
+      userId: targetUser.userId,
+      scannedUsedPins,
+      orphanCandidates,
+      relinked
+    };
+  }
+
+  static assignUsedPinToUser(params: {
+    pinCode: string;
+    targetUserId: string;
+  }): {
+    pinCode: string;
+    targetUserId: string;
+    updated: boolean;
+    createdPinUsedHistory: boolean;
+  } {
+    const normalizedPinCode = String(params.pinCode || '').trim().toUpperCase();
+    if (!normalizedPinCode) {
+      throw new Error('PIN code is required');
+    }
+
+    const cleanTargetUserId = String(params.targetUserId || '').replace(/\D/g, '').slice(0, 7);
+    if (cleanTargetUserId.length !== 7) {
+      throw new Error('Enter a valid 7-digit User ID');
+    }
+
+    const targetUser = this.getUserByUserId(cleanTargetUserId);
+    if (!targetUser) {
+      throw new Error('Target user not found');
+    }
+
+    const pins = this.getPins();
+    const pinIndex = pins.findIndex((pin) => String(pin.pinCode || '').trim().toUpperCase() === normalizedPinCode);
+    if (pinIndex === -1) {
+      throw new Error('PIN not found');
+    }
+
+    const pin = pins[pinIndex];
+    if (pin.status !== 'used') {
+      throw new Error('Only used PIN can be assigned with this action');
+    }
+
+    const existingUsedById = String(pin.usedById || '').trim();
+    const existingUser = existingUsedById ? this.getUserById(existingUsedById) : undefined;
+    if (existingUser && existingUser.id !== targetUser.id) {
+      throw new Error(`PIN is already linked to ${existingUser.userId}. Clear that mapping first.`);
+    }
+
+    const now = new Date().toISOString();
+    let updated = false;
+    if (pin.usedById !== targetUser.id || pin.registrationUserId !== targetUser.id || !pin.usedAt) {
+      pins[pinIndex] = {
+        ...pin,
+        status: 'used' as Pin['status'],
+        usedById: targetUser.id,
+        registrationUserId: targetUser.id,
+        usedAt: pin.usedAt || now
+      };
+      this.savePins(pins);
+      updated = true;
+    }
+
+    const alreadyHasPinUsedHistory = this.getTransactions().some((tx) => (
+      tx.type === 'pin_used'
+      && tx.status === 'completed'
+      && tx.userId === targetUser.id
+      && (
+        String(tx.pinId || '').trim() === pin.id
+        || String(tx.pinCode || '').trim().toUpperCase() === normalizedPinCode
+      )
+    ));
+
+    let createdPinUsedHistory = false;
+    if (!alreadyHasPinUsedHistory) {
+      this.createTransaction({
+        id: generateEventId('tx', 'pin_used_manual_link'),
+        userId: targetUser.id,
+        type: 'pin_used',
+        amount: Number(pin.amount || 11),
+        pinCode: normalizedPinCode,
+        pinId: pin.id,
+        status: 'completed',
+        description: `PIN usage manually linked by admin for ${targetUser.fullName} (${targetUser.userId})`,
+        createdAt: now,
+        completedAt: now
+      });
+      createdPinUsedHistory = true;
+    }
+
+    return {
+      pinCode: normalizedPinCode,
+      targetUserId: targetUser.userId,
+      updated,
+      createdPinUsedHistory
+    };
+  }
+
+  static ensureRegistrationConsistency(params: {
+    userId: string;
+    fullName?: string;
+    email?: string;
+    phone?: string;
+    country?: string;
+    sponsorId?: string | null;
+    loginPassword?: string;
+    transactionPassword?: string;
+    pinCode?: string;
+  }): {
+    user: User;
+    recoveredUser: boolean;
+    relinkedPins: number;
+    sponsorDirectCountSynced: boolean;
+  } {
+    const cleanUserId = String(params.userId || '').replace(/\D/g, '').slice(0, 7);
+    if (cleanUserId.length !== 7) {
+      throw new Error('Invalid registration user ID');
+    }
+
+    let recoveredUser = false;
+    let user = this.getUserByUserId(cleanUserId);
+    if (!user) {
+      const matrixNode = this.getMatrixNode(cleanUserId);
+      if (!matrixNode) {
+        throw new Error('Registration is incomplete: user and matrix node are both missing');
+      }
+
+      const recovered = this.recoverMissingUserFromMatrix({
+        userId: cleanUserId,
+        fullName: params.fullName,
+        email: params.email,
+        phone: params.phone,
+        country: params.country,
+        sponsorId: params.sponsorId,
+        loginPassword: params.loginPassword,
+        transactionPassword: params.transactionPassword,
+        restoreSponsorIncome: false
+      });
+      recoveredUser = recovered.created;
+      user = this.getUserByUserId(cleanUserId) || recovered.user;
+    }
+
+    const relink = this.relinkRecoveredUserPinUsage(cleanUserId, params.pinCode);
+
+    let sponsorDirectCountSynced = false;
+    if (user.sponsorId) {
+      const sponsor = this.getUserByUserId(user.sponsorId);
+      if (sponsor) {
+        const actualDirectCount = this.getUsers().filter((member) => member.sponsorId === sponsor.userId).length;
+        if ((sponsor.directCount || 0) !== actualDirectCount) {
+          this.updateUser(sponsor.id, { directCount: actualDirectCount });
+          sponsorDirectCountSynced = true;
+        }
+      }
+    }
+
+    return {
+      user,
+      recoveredUser,
+      relinkedPins: relink.relinked,
+      sponsorDirectCountSynced
+    };
+  }
+
   static syncLockedIncomeWallet(userId?: string): {
     scanned: number;
     synced: number;
   } {
     const wallets = this.getWallets();
     const targetIds = userId ? new Set([userId]) : new Set(wallets.map((w) => w.userId));
-    const trackerMap = new Map(this.getHelpTrackers().map((t) => [t.userId, t]));
     let synced = 0;
 
     for (const wallet of wallets) {
       if (!targetIds.has(wallet.userId)) continue;
-      const tracker = trackerMap.get(wallet.userId);
-      const trackerLockedIncomeTotal = tracker
-        ? Object.values(tracker.levels).reduce(
-          (sum, state) => sum + (state.lockedReceiveAmount || 0) + (state.lockedAmount || 0),
-          0
-        )
-        : 0;
       const txLockedIncomeTotal = this.computeLockedIncomeFromTransactions(wallet.userId);
-      const lockedIncomeTotal = Math.max(
-        0,
-        Math.round(Math.max(trackerLockedIncomeTotal, txLockedIncomeTotal) * 100) / 100
-      );
+      const lockedIncomeTotal = Math.max(0, Math.round(txLockedIncomeTotal * 100) / 100);
 
       if (Math.abs((wallet.lockedIncomeWallet || 0) - lockedIncomeTotal) > 0.0001) {
         wallet.lockedIncomeWallet = lockedIncomeTotal;
@@ -5728,7 +6625,8 @@ class Database {
     const created: UserHelpTracker = {
       userId,
       levels: {},
-      lockedQueue: []
+      lockedQueue: [],
+      processedContributionKeys: {}
     };
     trackers.push(created);
     this.saveHelpTrackers(trackers);
@@ -5744,6 +6642,35 @@ class Database {
       trackers[index] = tracker;
     }
     this.saveHelpTrackers(trackers);
+  }
+
+  private static hasProcessedContributionKey(tracker: UserHelpTracker, key: string): boolean {
+    if (!key) return false;
+    return !!tracker.processedContributionKeys?.[key];
+  }
+
+  private static markProcessedContributionKey(tracker: UserHelpTracker, key: string): void {
+    if (!key) return;
+    const now = new Date().toISOString();
+    const updated: Record<string, string> = {
+      ...(tracker.processedContributionKeys || {}),
+      [key]: now
+    };
+
+    const entries = Object.entries(updated);
+    const MAX_KEYS = 1500;
+    const KEEP_KEYS = 1200;
+    if (entries.length > MAX_KEYS) {
+      entries.sort((a, b) => {
+        const aTime = new Date(a[1] || 0).getTime();
+        const bTime = new Date(b[1] || 0).getTime();
+        return bTime - aTime;
+      });
+      tracker.processedContributionKeys = Object.fromEntries(entries.slice(0, KEEP_KEYS));
+      return;
+    }
+
+    tracker.processedContributionKeys = updated;
   }
 
   static getPendingMatrixContributions(): PendingMatrixContribution[] {
@@ -6300,6 +7227,32 @@ class Database {
     entries.push(entry);
     const trimmed = entries.length > 500 ? entries.slice(entries.length - 500) : entries;
     this.setCached(HELP_FLOW_DEBUG_KEY, trimmed);
+  }
+
+  static getDuplicateContributionBlockEntries(limit = 200): DuplicateContributionBlockEntry[] {
+    const entries = this.getCached<DuplicateContributionBlockEntry[]>(DUPLICATE_CONTRIBUTION_BLOCK_KEY, [])
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return entries.slice(0, Math.max(0, limit));
+  }
+
+  static clearDuplicateContributionBlockEntries(): void {
+    this.setCached(DUPLICATE_CONTRIBUTION_BLOCK_KEY, []);
+  }
+
+  private static addDuplicateContributionBlockEntry(entry: DuplicateContributionBlockEntry): void {
+    const entries = this.getCached<DuplicateContributionBlockEntry[]>(DUPLICATE_CONTRIBUTION_BLOCK_KEY, []);
+    const lastSimilar = entries.length > 0 ? entries[entries.length - 1] : null;
+    if (
+      lastSimilar
+      && lastSimilar.contributionKey === entry.contributionKey
+      && Math.abs(new Date(entry.createdAt).getTime() - new Date(lastSimilar.createdAt).getTime()) <= 2000
+    ) {
+      return;
+    }
+
+    entries.push(entry);
+    const trimmed = entries.length > 500 ? entries.slice(entries.length - 500) : entries;
+    this.setCached(DUPLICATE_CONTRIBUTION_BLOCK_KEY, trimmed);
   }
 
   static getCumulativeDirectRequired(level: number): number {
@@ -7642,6 +8595,38 @@ class Database {
     const prevLeft = state.leftEvents;
     const prevRight = state.rightEvents;
     const prevMatched = state.matchedEvents;
+    const contributionKey = fromUserId
+      ? `matrix|${fromUserId}|${userId}|${level}|${side}|${options.skipFromWalletDebit ? 1 : 0}`
+      : '';
+
+    if (contributionKey && this.hasProcessedContributionKey(tracker, contributionKey)) {
+      const sender = fromUserId ? this.getUserById(fromUserId) : undefined;
+      const fallbackRecipient = recipient || this.getUserById(userId);
+      this.addDuplicateContributionBlockEntry({
+        id: generateEventId('dup', 'matrix_contribution_block'),
+        createdAt: new Date().toISOString(),
+        contributionKey,
+        fromUserId,
+        fromUserName: sender?.fullName,
+        fromUserPublicId: sender?.userId,
+        toUserId: userId,
+        toUserName: fallbackRecipient?.fullName,
+        toUserPublicId: fallbackRecipient?.userId,
+        level,
+        side,
+        via: options.skipFromWalletDebit ? 'activation' : 'pending',
+        reason: 'duplicate_contribution_key'
+      });
+      return true;
+    }
+
+    const markContributionProcessed = () => {
+      if (!contributionKey) return;
+      const latestTracker = this.getUserHelpTracker(userId);
+      if (this.hasProcessedContributionKey(latestTracker, contributionKey)) return;
+      this.markProcessedContributionKey(latestTracker, contributionKey);
+      this.saveUserHelpTracker(latestTracker);
+    };
 
     if (side === 'left') {
       state.leftEvents += 1;
@@ -7712,6 +8697,7 @@ class Database {
       }
 
       if (diverted) {
+        markContributionProcessed();
         return true;
       }
 
@@ -7732,6 +8718,7 @@ class Database {
       this.saveUserHelpTracker(tracker);
       return false;
     }
+    markContributionProcessed();
     return true;
   }
 
@@ -9879,6 +10866,97 @@ class Database {
     this.setCached(DB_KEYS.TRANSACTIONS, normalized);
   }
 
+  static adminEditTransaction(
+    txId: string,
+    payload: {
+      amount: number;
+      status: Transaction['status'];
+      description: string;
+      reason: string;
+      editedByAdminUserId?: string;
+    }
+  ): { success: boolean; message: string; transaction?: Transaction } {
+    const id = String(txId || '').trim();
+    if (!id) return { success: false, message: 'Transaction ID is required' };
+
+    const nextAmount = Math.round(Number(payload.amount || 0) * 100) / 100;
+    if (!Number.isFinite(nextAmount)) {
+      return { success: false, message: 'Enter a valid transaction amount' };
+    }
+
+    const nextStatus = payload.status;
+    const allowedStatuses: Transaction['status'][] = ['pending', 'completed', 'failed', 'cancelled', 'reversed'];
+    if (!allowedStatuses.includes(nextStatus)) {
+      return { success: false, message: 'Select a valid transaction status' };
+    }
+
+    const nextDescription = String(payload.description || '').trim();
+    if (!nextDescription) {
+      return { success: false, message: 'Description is required' };
+    }
+
+    const editReason = String(payload.reason || '').trim();
+    if (!editReason) {
+      return { success: false, message: 'Edit reason is required' };
+    }
+
+    const transactions = this.getTransactions();
+    const index = transactions.findIndex((tx) => tx.id === id);
+    if (index === -1) {
+      return { success: false, message: 'Transaction not found' };
+    }
+
+    const existing = transactions[index];
+    const now = new Date().toISOString();
+    const updated: Transaction = {
+      ...existing,
+      displayAmount: nextAmount,
+      status: nextStatus,
+      description: nextDescription,
+      adminReason: editReason,
+      processedByAdminUserId: payload.editedByAdminUserId || existing.processedByAdminUserId,
+      completedAt: nextStatus === 'completed'
+        ? (existing.completedAt || now)
+        : existing.completedAt
+    };
+
+    transactions[index] = updated;
+    this.saveTransactions(transactions);
+
+    return {
+      success: true,
+      message: 'Transaction updated successfully (display only)',
+      transaction: updated
+    };
+  }
+
+  static adminDeleteTransaction(
+    txId: string,
+    _payload?: {
+      reason?: string;
+      deletedByAdminUserId?: string;
+    }
+  ): { success: boolean; message: string } {
+    const id = String(txId || '').trim();
+    if (!id) {
+      return { success: false, message: 'Transaction ID is required' };
+    }
+
+    const transactions = this.getTransactions();
+    const index = transactions.findIndex((tx) => tx.id === id);
+    if (index === -1) {
+      return { success: false, message: 'Transaction not found' };
+    }
+
+    transactions.splice(index, 1);
+    this.saveTransactions(transactions);
+
+    return {
+      success: true,
+      message: 'Transaction deleted successfully'
+    };
+  }
+
   private static findDuplicateSensitiveTransaction(
     candidate: Transaction,
     transactions: Transaction[]
@@ -9889,19 +10967,22 @@ class Database {
     const candidateAmount = Math.abs(Number((candidate.displayAmount ?? candidate.amount) || 0));
 
     if (candidate.type === 'direct_income' && candidate.status === 'completed' && candidateAmount > 0) {
-      const sponsor = this.resolveUserByRef(candidate.userId);
-      const referral = candidate.fromUserId ? this.resolveUserByRef(candidate.fromUserId) : undefined;
+      const sponsor = this.resolveLikelySponsorForDirectIncome(candidate);
+      const referral = this.resolveLikelyReferralSourceForDirectIncome(candidate, sponsor);
       if (sponsor && referral) {
         return this.findExistingReferralIncomeCreditTx(sponsor, referral, transactions);
       }
 
       const candidateDescription = this.getCanonicalDirectIncomeDescription(candidate);
-      return transactions.find((tx) =>
-        tx.type === 'direct_income'
-        && tx.status === 'completed'
-        && tx.userId === candidate.userId
-        && this.getCanonicalDirectIncomeDescription(tx) === candidateDescription
-      );
+      return transactions.find((tx) => {
+        if (tx.type !== 'direct_income' || tx.status !== 'completed') return false;
+        if (sponsor) {
+          if (!this.directIncomeTxBelongsToSponsor(tx, sponsor)) return false;
+        } else if (tx.userId !== candidate.userId) {
+          return false;
+        }
+        return this.getCanonicalDirectIncomeDescription(tx) === candidateDescription;
+      });
     }
 
     if (
@@ -10007,6 +11088,19 @@ class Database {
     if (this._bulkRebuildMode) return transaction;
     const transactions = this.getTransactions();
     const normalized = this.normalizeTransactionRecord(transaction);
+
+    if (
+      normalized.type === 'receive_help'
+      && normalized.status === 'completed'
+      && Number(normalized.amount || 0) > 0
+    ) {
+      const recipient = this.resolveUserByRef(normalized.userId);
+      const sender = normalized.fromUserId ? this.resolveUserByRef(normalized.fromUserId) : undefined;
+      if (!recipient || !sender) {
+        return normalized;
+      }
+    }
+
     const existing = this.findDuplicateSensitiveTransaction(normalized, transactions);
     if (existing) {
       return existing;
@@ -11520,7 +12614,8 @@ class Database {
           levels: Object.fromEntries(
             Object.entries(tracker.levels || {}).map(([level, state]) => [level, { ...state }])
           ),
-          lockedQueue: [...(tracker.lockedQueue || [])]
+          lockedQueue: [...(tracker.lockedQueue || [])],
+          processedContributionKeys: { ...(tracker.processedContributionKeys || {}) }
         });
         continue;
       }
@@ -11538,7 +12633,11 @@ class Database {
       mergedTrackers.set(mappedUserId, {
         userId: mappedUserId,
         levels: nextLevels,
-        lockedQueue: Array.from(queueById.values())
+        lockedQueue: Array.from(queueById.values()),
+        processedContributionKeys: {
+          ...(existing.processedContributionKeys || {}),
+          ...(tracker.processedContributionKeys || {})
+        }
       });
     }
     this.saveHelpTrackers(Array.from(mergedTrackers.values()));

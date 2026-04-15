@@ -32,8 +32,29 @@ import {
   uploadOptimizedFileToBackend
 } from '@/utils/helpers';
 import { toast } from 'sonner';
-import Database, { DB_KEYS, helpDistributionTable } from '@/db';
-import type { Payment, PaymentMethod, PaymentMethodType, Pin, Transaction, SupportTicket, SupportTicketAttachment, SupportTicketStatus, MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal, AdminAnnouncement, MatrixNode } from '@/types';
+import Database, {
+  DB_KEYS,
+  helpDistributionTable,
+  type DuplicateContributionBlockEntry,
+  type HistoricalAutoRecoveryDetail
+} from '@/db';
+import type {
+  Payment,
+  PaymentMethod,
+  PaymentMethodType,
+  Pin,
+  Transaction,
+  TransactionStatus,
+  SupportTicket,
+  SupportTicketAttachment,
+  SupportTicketStatus,
+  MarketplaceCategory,
+  MarketplaceRetailer,
+  MarketplaceBanner,
+  MarketplaceDeal,
+  AdminAnnouncement,
+  MatrixNode
+} from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
@@ -114,6 +135,15 @@ interface WithdrawalGapScanRow {
   email: string;
   otpCreatedAt: string;
   issue: string;
+}
+
+interface MissingMatrixUserAuditRow {
+  userId: string;
+  username: string;
+  parentId: string | null;
+  parentExistsInUsers: boolean;
+  position: 'left' | 'right' | null;
+  isActive: boolean;
 }
 
 interface ReferralIncomeMismatchRow {
@@ -586,9 +616,9 @@ export default function Admin() {
   const {
     stats, settings, allUsers, allTransactions, safetyPoolAmount, allPins, allPinRequests, pendingPinRequests,
     loadStats, loadSettings, loadAllUsers, loadAllTransactions, loadAllPins, loadAllPinRequests, loadPendingPinRequests,
-    updateSettings, addFundsToUser, reverseRoyaltyFromUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
+    updateSettings, addFundsToUser, debitFundsFromUser, generatePins, approvePinPurchase, rejectPinPurchase, reopenPinPurchase,
     suspendPin, unsuspendPin, blockUser, unblockUser, reactivateAutoDeactivatedUser, bulkCreateUsersWithoutPin, createServerBackup,
-    deleteAllIdsFromSystem, getLevelWiseReport,
+    scanMissingMatrixUsersAudit, deleteAllIdsFromSystem, getLevelWiseReport,
     marketplaceCategories, marketplaceRetailers, marketplaceBanners, marketplaceDeals,
     marketplaceInvoices, marketplaceRedemptions,
     loadMarketplaceData
@@ -612,10 +642,18 @@ export default function Admin() {
   const [bulkNoPinProgress, setBulkNoPinProgress] = useState<BulkCreateProgress | null>(null);
   const [selectedUser, setSelectedUser] = useState<string | null>(null);
   const [fundAmount, setFundAmount] = useState('');
+  const [fundActionMode, setFundActionMode] = useState<'credit' | 'debit'>('credit');
   const [fundWalletType, setFundWalletType] = useState<'deposit' | 'income' | 'royalty'>('deposit');
   const [fundMessage, setFundMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [fundLoadingAction, setFundLoadingAction] = useState<'add' | 'reverse' | null>(null);
+  const [fundLoadingAction, setFundLoadingAction] = useState<'add' | 'debit' | 'reverse' | null>(null);
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+  const [txEditAmount, setTxEditAmount] = useState('');
+  const [txEditStatus, setTxEditStatus] = useState<TransactionStatus>('completed');
+  const [txEditDescription, setTxEditDescription] = useState('');
+  const [txEditReason, setTxEditReason] = useState('');
+  const [isSavingTxEdit, setIsSavingTxEdit] = useState(false);
+  const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null);
   const [orphanedPinCount, setOrphanedPinCount] = useState(0);
   const orphanedPinsNotifiedRef = useRef(false);
   const legacyUploadMigrationRanRef = useRef(false);
@@ -654,6 +692,7 @@ export default function Admin() {
     restoreSponsorIncome: true
   });
   const [isRecoveringUser, setIsRecoveringUser] = useState(false);
+  const [isRelinkingRecoveredPins, setIsRelinkingRecoveredPins] = useState(false);
 
   // PIN Management
   const [pinQuantity, setPinQuantity] = useState(1);
@@ -664,6 +703,7 @@ export default function Admin() {
   const [pinSuspendReason, setPinSuspendReason] = useState('Admin action');
   const [pinRequestStatusFilter, setPinRequestStatusFilter] = useState<'all' | 'pending' | 'completed' | 'cancelled'>('all');
   const [isPinRefreshing, setIsPinRefreshing] = useState(false);
+  const [assigningUsedPinCode, setAssigningUsedPinCode] = useState<string | null>(null);
   const [pinListLimit, setPinListLimit] = useState(0);
   const [pinSearchInput, setPinSearchInput] = useState('');
   const [pinSearchQuery, setPinSearchQuery] = useState('');
@@ -681,6 +721,7 @@ export default function Admin() {
   const [levelReport, setLevelReport] = useState<any[]>([]);
   const [reportTab, setReportTab] = useState('member-report');
   const [activeMainTab, setActiveMainTab] = useState('users');
+  const [reportRefreshTick, setReportRefreshTick] = useState(0);
   const [reportsDataLoaded, setReportsDataLoaded] = useState(false);
   const [supportDataLoaded, setSupportDataLoaded] = useState(false);
   const [announcementData, setAnnouncementData] = useState({
@@ -716,6 +757,7 @@ export default function Admin() {
   const [isRepairingSelfFundCredits, setIsRepairingSelfFundCredits] = useState(false);
   const [isRecoveringPaymentAndPinHistory, setIsRecoveringPaymentAndPinHistory] = useState(false);
   const [isResyncingWalletLedger, setIsResyncingWalletLedger] = useState(false);
+  const [isResyncingWalletLedgerAll, setIsResyncingWalletLedgerAll] = useState(false);
   const [isApplyingActiveFundRecovery, setIsApplyingActiveFundRecovery] = useState(false);
   const [isRebuildingLockedIncomeTracker, setIsRebuildingLockedIncomeTracker] = useState(false);
   const [isRebuildingLockedIncomeAll, setIsRebuildingLockedIncomeAll] = useState(false);
@@ -1066,6 +1108,8 @@ export default function Admin() {
   const [helpFlowView, setHelpFlowView] = useState<'sent' | 'received'>('sent');
   const [helpFlowDebugTick, setHelpFlowDebugTick] = useState(0);
   const [ghostRepairLogTick, setGhostRepairLogTick] = useState(0);
+  const [historicalAutoRecoveryDetails, setHistoricalAutoRecoveryDetails] = useState<HistoricalAutoRecoveryDetail[]>([]);
+  const [historicalAutoRecoveryRunAt, setHistoricalAutoRecoveryRunAt] = useState<string | null>(null);
 
   const [memberFilters, setMemberFilters] = useState({
     dateFrom: '',
@@ -1179,6 +1223,13 @@ export default function Admin() {
   const [editingSupportMessageId, setEditingSupportMessageId] = useState('');
   const [editingSupportMessageText, setEditingSupportMessageText] = useState('');
   const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+  const [isScanningMissingMatrixUsers, setIsScanningMissingMatrixUsers] = useState(false);
+  const [missingMatrixUsersReport, setMissingMatrixUsersReport] = useState<{
+    generatedAt: string;
+    missingCount: number;
+    limit: number;
+    items: MissingMatrixUserAuditRow[];
+  } | null>(null);
   const [isRepairingPins, setIsRepairingPins] = useState(false);
   const [showDeleteAllIdsDialog, setShowDeleteAllIdsDialog] = useState(false);
   const [deleteAllIdsPhrase, setDeleteAllIdsPhrase] = useState('');
@@ -1194,6 +1245,10 @@ export default function Admin() {
     : [];
 
   const isReportsTabActive = activeMainTab === 'reports';
+  const duplicateContributionBlockEntries: DuplicateContributionBlockEntry[] = useMemo(
+    () => (isReportsTabActive ? Database.getDuplicateContributionBlockEntries(200) : []),
+    [isReportsTabActive, reportRefreshTick]
+  );
   const isSupportTabActive = activeMainTab === 'support';
   const isPaymentsTabActive = activeMainTab === 'payments';
 
@@ -1368,13 +1423,15 @@ export default function Admin() {
   }, [isAuthenticated, user, runLegacyUploadMigration]);
 
   useEffect(() => {
-    if (!isReportsTabActive || reportsDataLoaded) return;
+    if (!isReportsTabActive) return;
     const timer = window.setTimeout(() => {
+      loadAllUsers();
       loadAllTransactions();
+      setReportRefreshTick((tick) => tick + 1);
       setReportsDataLoaded(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [isReportsTabActive, reportsDataLoaded, loadAllTransactions]);
+  }, [isReportsTabActive, loadAllUsers, loadAllTransactions]);
 
   useEffect(() => {
     if (!isSupportTabActive) return;
@@ -1411,7 +1468,7 @@ export default function Admin() {
     setOrphanedPinCount(count);
     if (count > 0 && !orphanedPinsNotifiedRef.current) {
       orphanedPinsNotifiedRef.current = true;
-      toast.warning(`Found ${count} used PIN(s) with missing user records. Run "Repair Orphaned PIN Usage".`);
+      toast.warning(`Found ${count} used PIN(s) with missing user records. Recover missing user first, then relink PIN usage.`);
     }
   }, [allPins, allUsers, user]);
 
@@ -2172,13 +2229,20 @@ export default function Admin() {
     }
 
     setIsLoading(true);
-    setFundLoadingAction('add');
-    const result = await addFundsToUser(
-      selectedUser,
-      parsedAmount,
-      fundWalletType,
-      fundMessage
-    );
+    setFundLoadingAction(fundActionMode === 'credit' ? 'add' : 'debit');
+    const result = fundActionMode === 'credit'
+      ? await addFundsToUser(
+        selectedUser,
+        parsedAmount,
+        fundWalletType,
+        fundMessage
+      )
+      : await debitFundsFromUser(
+        selectedUser,
+        parsedAmount,
+        fundWalletType,
+        fundMessage
+      );
     setIsLoading(false);
     setFundLoadingAction(null);
 
@@ -2186,9 +2250,13 @@ export default function Admin() {
       toast.success(result.message);
       setFundAmount('');
       setFundMessage('');
+      setFundActionMode('credit');
       setFundWalletType('deposit');
       setSelectedUser(null);
       loadAllUsers();
+      loadAllTransactions();
+      loadStats();
+      setReportRefreshTick((tick) => tick + 1);
       if (searchedUser?.userId === selectedUser) {
         searchUserById(selectedUser);
       }
@@ -2197,56 +2265,130 @@ export default function Admin() {
     }
   };
 
-  const fundWalletTitle = fundWalletType === 'royalty'
-    ? 'Manage Royalty Wallet'
-    : `Send ${fundWalletType === 'deposit' ? 'Deposit' : 'Income'} Wallet`;
+  const fundWalletTitle = fundActionMode === 'credit'
+    ? (fundWalletType === 'royalty' ? 'Manage Royalty Wallet' : `Send ${fundWalletType === 'deposit' ? 'Deposit' : 'Income'} Wallet`)
+    : `Debit ${fundWalletType === 'deposit' ? 'Deposit' : fundWalletType === 'income' ? 'Income' : 'Royalty'} Wallet`;
   const fundWalletActionLabel = fundWalletType === 'royalty'
     ? 'royalty'
     : `${fundWalletType === 'deposit' ? 'deposit' : 'income'} wallet`;
-  const fundPrimaryButtonLabel = fundWalletType === 'royalty'
-    ? 'Send Royalty'
-    : fundWalletType === 'deposit'
-      ? 'Send Deposit'
-      : 'Send Income';
+  const fundPrimaryButtonLabel = fundActionMode === 'credit'
+    ? (fundWalletType === 'royalty'
+      ? 'Send Royalty'
+      : fundWalletType === 'deposit'
+        ? 'Send Deposit'
+        : 'Send Income')
+    : (fundWalletType === 'royalty'
+      ? 'Debit Royalty'
+      : fundWalletType === 'deposit'
+        ? 'Debit Deposit'
+        : 'Debit Income');
 
-  const handleReverseRoyalty = async () => {
-    if (!selectedUser || !fundAmount) return;
+  const openTransactionEdit = (tx: Transaction) => {
+    setEditingTransaction(tx);
+    const visibleAmount = Number.isFinite(tx.displayAmount)
+      ? Number(tx.displayAmount)
+      : Number(tx.amount || 0);
+    setTxEditAmount(String(Math.abs(visibleAmount)));
+    setTxEditStatus(tx.status || 'completed');
+    setTxEditDescription(tx.description || '');
+    setTxEditReason('');
+  };
 
-    const parsedAmount = parseFloat(fundAmount);
-    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+  const closeTransactionEdit = () => {
+    setEditingTransaction(null);
+    setTxEditAmount('');
+    setTxEditStatus('completed');
+    setTxEditDescription('');
+    setTxEditReason('');
+    setIsSavingTxEdit(false);
+  };
+
+  const handleSaveTransactionEdit = async () => {
+    if (!editingTransaction || !user?.isAdmin) return;
+
+    const parsedAmount = Math.round(Number(txEditAmount || 0) * 100) / 100;
+    if (!Number.isFinite(parsedAmount)) {
       toast.error('Enter a valid amount');
       return;
     }
 
-    const reason = fundMessage.trim();
-    if (!reason) {
-      toast.error('Enter reversal reason');
+    const nextDescription = txEditDescription.trim();
+    if (!nextDescription) {
+      toast.error('Description is required');
       return;
     }
 
-    const confirmed = window.confirm(
-      `Take back $${parsedAmount.toFixed(2)} royalty from user ${selectedUser}?`
-    );
+    const nextReason = txEditReason.trim();
+    if (!nextReason) {
+      toast.error('Edit reason is required');
+      return;
+    }
+
+    setIsSavingTxEdit(true);
+    try {
+      const result = await Database.commitCriticalAction(() => Database.adminEditTransaction(
+        editingTransaction.id,
+        {
+          amount: parsedAmount,
+          status: txEditStatus,
+          description: nextDescription,
+          reason: nextReason,
+          editedByAdminUserId: user.userId
+        }
+      ), { timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 1500 });
+
+      if (!result.success) {
+        toast.error(result.message || 'Failed to update transaction');
+        return;
+      }
+
+      toast.success('Transaction updated');
+      loadAllUsers();
+      loadAllTransactions();
+      loadStats();
+      setReportRefreshTick((tick) => tick + 1);
+      if (searchedUser?.userId) {
+        searchUserById(searchedUser.userId);
+      }
+      closeTransactionEdit();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update transaction');
+    } finally {
+      setIsSavingTxEdit(false);
+    }
+  };
+
+  const handleDeleteTransaction = async (tx: Transaction) => {
+    if (!user?.isAdmin) return;
+
+    const confirmed = window.confirm('Delete this transaction log? This cannot be undone.');
     if (!confirmed) return;
 
-    setIsLoading(true);
-    setFundLoadingAction('reverse');
-    const result = await reverseRoyaltyFromUser(selectedUser, parsedAmount, reason);
-    setIsLoading(false);
-    setFundLoadingAction(null);
+    setDeletingTransactionId(tx.id);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.adminDeleteTransaction(tx.id, { deletedByAdminUserId: user.userId }),
+        { timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
 
-    if (result.success) {
-      toast.success(result.message);
-      setFundAmount('');
-      setFundMessage('');
-      setFundWalletType('deposit');
-      setSelectedUser(null);
-      loadAllUsers();
-      if (searchedUser?.userId === selectedUser) {
-        searchUserById(selectedUser);
+      if (!result.success) {
+        toast.error(result.message || 'Failed to delete transaction');
+        return;
       }
-    } else {
-      toast.error(result.message);
+
+      toast.success('Transaction deleted');
+      loadAllTransactions();
+      setReportRefreshTick((tick) => tick + 1);
+      if (searchedUser?.userId) {
+        searchUserById(searchedUser.userId);
+      }
+      if (editingTransaction?.id === tx.id) {
+        closeTransactionEdit();
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to delete transaction');
+    } finally {
+      setDeletingTransactionId(null);
     }
   };
 
@@ -2367,36 +2509,76 @@ export default function Admin() {
     setIsRecoveringUser(true);
     try {
       await Database.ensureFreshData();
-      const result = Database.recoverMissingUserFromMatrix({
-        userId: missingUserRecovery.userId,
-        fullName: missingUserRecovery.fullName,
-        email: missingUserRecovery.email,
-        phone: missingUserRecovery.phone,
-        country: missingUserRecovery.country,
-        sponsorId: missingUserRecovery.sponsorId || null,
-        loginPassword: missingUserRecovery.loginPassword,
-        transactionPassword: missingUserRecovery.transactionPassword,
-        restoreSponsorIncome: missingUserRecovery.restoreSponsorIncome
-      });
+      const { recoveryResult, relinkResult } = await Database.commitCriticalAction(
+        () => {
+          const recovery = Database.recoverMissingUserFromMatrix({
+            userId: missingUserRecovery.userId,
+            fullName: missingUserRecovery.fullName,
+            email: missingUserRecovery.email,
+            phone: missingUserRecovery.phone,
+            country: missingUserRecovery.country,
+            sponsorId: missingUserRecovery.sponsorId || null,
+            loginPassword: missingUserRecovery.loginPassword,
+            transactionPassword: missingUserRecovery.transactionPassword,
+            restoreSponsorIncome: missingUserRecovery.restoreSponsorIncome
+          });
+          const relink = Database.relinkRecoveredUserPinUsage(recovery.user.userId);
+          return { recoveryResult: recovery, relinkResult: relink };
+        },
+        {
+          full: true,
+          timeoutMs: 120000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      );
       loadAllUsers();
+      loadAllPins();
       loadAllTransactions();
       loadStats();
       setUserSearchId(missingUserRecovery.userId);
       searchUserById(missingUserRecovery.userId);
-      toast.success(`Recovered user ${result.user.fullName} (${result.user.userId}).`);
-      if (result.sponsorIncomeRestored) {
+      toast.success(`Recovered user ${recoveryResult.user.fullName} (${recoveryResult.user.userId}).`);
+      if (relinkResult.relinked > 0) {
+        toast.success(`Relinked ${relinkResult.relinked} orphan PIN usage entr${relinkResult.relinked > 1 ? 'ies' : 'y'} to recovered user.`);
+      }
+      if (recoveryResult.sponsorIncomeRestored) {
         toast.success('Restored missing referral income.');
       }
-      if (result.generatedLoginPassword) {
-        toast.success(`Temporary login password: ${result.generatedLoginPassword}`);
+      if (recoveryResult.generatedLoginPassword) {
+        toast.success(`Temporary login password: ${recoveryResult.generatedLoginPassword}`);
       }
-      if (result.generatedTransactionPassword) {
-        toast.success(`Temporary transaction password: ${result.generatedTransactionPassword}`);
+      if (recoveryResult.generatedTransactionPassword) {
+        toast.success(`Temporary transaction password: ${recoveryResult.generatedTransactionPassword}`);
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to recover user');
     } finally {
       setIsRecoveringUser(false);
+    }
+  };
+
+  const handleRelinkRecoveredUserPins = async () => {
+    if (!searchedUser) return;
+    setIsRelinkingRecoveredPins(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.relinkRecoveredUserPinUsage(searchedUser.userId),
+        { timeoutMs: 60000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
+      if (result.relinked > 0) {
+        toast.success(`Relinked ${result.relinked} orphan PIN usage entr${result.relinked > 1 ? 'ies' : 'y'} for this user.`);
+      } else {
+        toast.success('No orphan PIN usage links were found for this user.');
+      }
+      loadAllPins();
+      loadAllTransactions();
+      loadStats();
+      searchUserById();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to relink orphan PIN usage for this user');
+    } finally {
+      setIsRelinkingRecoveredPins(false);
     }
   };
 
@@ -2679,28 +2861,40 @@ export default function Admin() {
     if (!searchedUser) return;
     setIsResyncingWalletLedger(true);
     try {
-      const result = await Database.commitCriticalAction(() => {
-        const tracker = Database.repairLockedIncomeTrackerFromTransactions(searchedUser.id);
-        const income = Database.repairIncomeWalletConsistency(searchedUser.id);
-        const locked = Database.syncLockedIncomeWallet(searchedUser.id);
-        return { tracker, income, locked };
-      }, { timeoutMs: 90000, maxAttempts: 3, retryDelayMs: 1500 });
+      const result = await Database.commitCriticalAction(
+        () => Database.resyncWalletLedgersFromHistory(searchedUser.id),
+        { timeoutMs: 120000, maxAttempts: 3, retryDelayMs: 1500 }
+      );
 
-      if (!result.tracker.updated && result.income.repaired === 0 && result.locked.synced === 0) {
+      if (
+        result.depositsRecovered === 0
+        && result.pinPurchasesRecovered === 0
+        && result.fundWalletsRepaired === 0
+        && result.incomeWalletsRepaired === 0
+        && result.royaltyWalletsRepaired === 0
+        && result.lockedIncomeWalletsSynced === 0
+      ) {
         toast.success('Wallet ledger is already in sync for this user.');
       } else {
         const parts: string[] = [];
-        if (result.tracker.updated) {
-          parts.push(`tracker fixed across ${result.tracker.levels} level${result.tracker.levels !== 1 ? 's' : ''}`);
+        if (result.depositsRecovered > 0) {
+          parts.push(`${result.depositsRecovered} missing deposit log${result.depositsRecovered > 1 ? 's' : ''}`);
         }
-        if (result.income.repaired > 0) {
-          parts.push('income / total earnings recalculated');
+        if (result.pinPurchasesRecovered > 0) {
+          parts.push(`${result.pinPurchasesRecovered} missing PIN purchase log${result.pinPurchasesRecovered > 1 ? 's' : ''}`);
         }
-        if (result.locked.synced > 0) {
-          parts.push('locked receive help synced');
+        if (result.fundWalletsRepaired > 0) {
+          parts.push('fund wallet recalculated');
+        }
+        if (result.incomeWalletsRepaired > 0) {
+          parts.push('income wallet recalculated');
+        }
+        if (result.lockedIncomeWalletsSynced > 0) {
+          parts.push('locked income synced');
         }
         toast.success(`Resynced wallet ledger: ${parts.join(', ')}.`);
       }
+      loadAllUsers();
       loadAllTransactions();
       loadStats();
       searchUserById();
@@ -2708,6 +2902,37 @@ export default function Admin() {
       toast.error(error instanceof Error ? error.message : 'Failed to resync wallet ledger');
     } finally {
       setIsResyncingWalletLedger(false);
+    }
+  };
+
+  const handleResyncWalletLedgerAll = async () => {
+    setIsResyncingWalletLedgerAll(true);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.resyncWalletLedgersFromHistory(),
+        { timeoutMs: 180000, maxAttempts: 3, retryDelayMs: 2000 }
+      );
+
+      const summary = [
+        `${result.usersScoped} user(s) scanned`,
+        `${result.fundWalletsRepaired} fund wallet repaired`,
+        `${result.incomeWalletsRepaired} income wallet repaired`,
+        `${result.lockedIncomeWalletsSynced} locked income synced`,
+        `${result.pinPurchasesRecovered} PIN history recovered`
+      ];
+
+      toast.success(`All-users wallet resync complete: ${summary.join(', ')}.`);
+      loadAllUsers();
+      loadAllTransactions();
+      loadStats();
+      setReportRefreshTick((tick) => tick + 1);
+      if (searchedUser?.userId) {
+        searchUserById(searchedUser.userId);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to resync wallet ledger for all users');
+    } finally {
+      setIsResyncingWalletLedgerAll(false);
     }
   };
 
@@ -3132,6 +3357,44 @@ export default function Admin() {
     }
   };
 
+  const handleAssignUsedPinToUser = async (pinCode: string) => {
+    if (!user?.isAdmin) return;
+    const input = window.prompt(`Assign used PIN ${pinCode} to which 7-digit User ID?`);
+    if (input === null) return;
+
+    const targetUserId = String(input || '').replace(/\D/g, '').slice(0, 7);
+    if (targetUserId.length !== 7) {
+      toast.error('Enter a valid 7-digit User ID');
+      return;
+    }
+
+    setAssigningUsedPinCode(pinCode);
+    try {
+      const result = await Database.commitCriticalAction(
+        () => Database.assignUsedPinToUser({ pinCode, targetUserId }),
+        {
+          full: true,
+          timeoutMs: 120000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      );
+
+      loadAllPins();
+      loadAllTransactions();
+      loadStats();
+
+      toast.success(`PIN ${result.pinCode} linked to User ID ${result.targetUserId}.`);
+      if (result.createdPinUsedHistory) {
+        toast.success('Added missing PIN usage history entry.');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to assign used PIN');
+    } finally {
+      setAssigningUsedPinCode(null);
+    }
+  };
+
   const handleRepairOrphanedPins = async () => {
     if (!user?.isAdmin) return;
     setIsRepairingPins(true);
@@ -3315,6 +3578,25 @@ export default function Admin() {
       toast.success(path ? `${result.message} at ${path}` : result.message);
     } else {
       toast.error(result.message);
+    }
+  };
+
+  const handleScanMissingMatrixUsers = async () => {
+    setIsScanningMissingMatrixUsers(true);
+    try {
+      const result = await scanMissingMatrixUsersAudit(200);
+      if (!result.success || !result.report) {
+        toast.error(result.message);
+        return;
+      }
+      setMissingMatrixUsersReport(result.report);
+      if (result.report.missingCount > 0) {
+        toast.warning(result.message);
+      } else {
+        toast.success(result.message);
+      }
+    } finally {
+      setIsScanningMissingMatrixUsers(false);
     }
   };
 
@@ -4231,7 +4513,7 @@ export default function Admin() {
   const unsupportedDirectPinBuyRows = useMemo(() => {
     if (!isReportsTabActive || reportTab !== 'pin-fund-mismatch') return [];
     return Database.scanUsersForUnsupportedDirectFundPinBuys();
-  }, [isReportsTabActive, reportTab, allTransactions, allUsers]);
+  }, [isReportsTabActive, reportTab, allTransactions, allUsers, reportRefreshTick]);
 
   const unsupportedDirectPinBuyOnlyRows = useMemo(
     () => unsupportedDirectPinBuyRows.filter((row) => (row.unsupportedDirectPinBuyAmount || 0) > 0.009),
@@ -4246,12 +4528,12 @@ export default function Admin() {
   const referralIncomeMismatchRows = useMemo<ReferralIncomeMismatchRow[]>(() => {
     if (!isReportsTabActive || reportTab !== 'referral-income-mismatch') return [];
     return Database.scanReferralIncomeMismatches();
-  }, [isReportsTabActive, reportTab, allTransactions, allUsers]);
+  }, [isReportsTabActive, reportTab, allTransactions, allUsers, reportRefreshTick]);
 
   const duplicateLockedGiveHelpMismatchRows = useMemo<DuplicateLockedGiveHelpMismatchRow[]>(() => {
     if (!isReportsTabActive || reportTab !== 'duplicate-give-mismatch') return [];
     return Database.scanDuplicateLockedGiveHelpMismatches();
-  }, [isReportsTabActive, reportTab, allTransactions, allUsers]);
+  }, [isReportsTabActive, reportTab, allTransactions, allUsers, reportRefreshTick]);
 
   const filteredPinRequests = useMemo(() => {
     if (pinRequestStatusFilter === 'all') return allPinRequests;
@@ -4510,8 +4792,10 @@ export default function Admin() {
       } else {
         toast.error(result.message);
       }
+      loadAllUsers();
       loadAllTransactions();
       loadStats();
+      setReportRefreshTick((tick) => tick + 1);
       if (searchedUser?.userId === targetUserId) {
         searchUserById(targetUserId);
       }
@@ -4535,8 +4819,10 @@ export default function Admin() {
       } else {
         toast.error(result.message);
       }
+      loadAllUsers();
       loadAllTransactions();
       loadStats();
+      setReportRefreshTick((tick) => tick + 1);
       if (searchedUser?.userId === targetUserId) {
         searchUserById(targetUserId);
       }
@@ -4560,8 +4846,10 @@ export default function Admin() {
       } else {
         toast.error(result.message);
       }
+      loadAllUsers();
       loadAllTransactions();
       loadStats();
+      setReportRefreshTick((tick) => tick + 1);
       if (refreshUserId && searchedUser?.userId === refreshUserId) {
         searchUserById(refreshUserId);
       }
@@ -4609,6 +4897,15 @@ export default function Admin() {
               >
                 {isCreatingBackup ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
                 <span className="hidden sm:inline">Create Backup</span>
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleScanMissingMatrixUsers}
+                disabled={isScanningMissingMatrixUsers}
+                className="border-amber-400/30 text-amber-200 hover:bg-amber-500/10"
+              >
+                {isScanningMissingMatrixUsers ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Search className="w-4 h-4 mr-2" />}
+                <span className="hidden sm:inline">Scan Missing IDs</span>
               </Button>
               <Button
                 variant="outline"
@@ -4810,6 +5107,79 @@ export default function Admin() {
             </CardContent>
           </Card>
         </div>
+
+        {missingMatrixUsersReport && (
+          <Card className="glass border-white/10 mb-6 sm:mb-8">
+            <CardHeader>
+              <CardTitle className="text-white flex items-center justify-between gap-3">
+                <span className="flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+                  Missing Matrix User Scan
+                </span>
+                <Badge className={missingMatrixUsersReport.missingCount > 0 ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'}>
+                  {missingMatrixUsersReport.missingCount} Missing
+                </Badge>
+              </CardTitle>
+              <p className="text-sm text-white/60">
+                Generated at {formatDate(missingMatrixUsersReport.generatedAt)}. Showing up to {missingMatrixUsersReport.limit} entries.
+              </p>
+            </CardHeader>
+            <CardContent>
+              {missingMatrixUsersReport.items.length === 0 ? (
+                <p className="text-sm text-emerald-300">No missing matrix users found.</p>
+              ) : (
+                <div className="overflow-x-auto admin-table-scroll">
+                  <table className="w-full admin-table">
+                    <thead>
+                      <tr className="border-b border-white/10">
+                        <th className="text-left py-3 px-4 text-white/60 font-medium">User ID</th>
+                        <th className="text-left py-3 px-4 text-white/60 font-medium">Name</th>
+                        <th className="text-left py-3 px-4 text-white/60 font-medium">Parent</th>
+                        <th className="text-left py-3 px-4 text-white/60 font-medium">Position</th>
+                        <th className="text-left py-3 px-4 text-white/60 font-medium">Status</th>
+                        <th className="text-left py-3 px-4 text-white/60 font-medium">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {missingMatrixUsersReport.items.map((row) => (
+                        <tr key={row.userId} className="border-b border-white/5 hover:bg-white/5">
+                          <td className="py-3 px-4 text-white font-mono">{row.userId}</td>
+                          <td className="py-3 px-4 text-white/80">{row.username || '-'}</td>
+                          <td className="py-3 px-4 text-white/60">
+                            {row.parentId || '-'}
+                            {row.parentId && !row.parentExistsInUsers && (
+                              <span className="ml-2 text-xs text-rose-300">(parent missing)</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-white/60">{row.position || '-'}</td>
+                          <td className="py-3 px-4">
+                            <Badge className={row.isActive ? 'bg-emerald-500/20 text-emerald-300' : 'bg-white/10 text-white/60'}>
+                              {row.isActive ? 'active' : 'inactive'}
+                            </Badge>
+                          </td>
+                          <td className="py-3 px-4">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                              onClick={() => {
+                                setActiveMainTab('user-details');
+                                setUserSearchId(row.userId);
+                                searchUserById(row.userId);
+                              }}
+                            >
+                              Recover
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
 
         {/* Main Content Tabs */}
@@ -5744,8 +6114,8 @@ export default function Admin() {
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <p className="text-sm text-white/60">
-                    If a PIN shows as used but the user record is missing (sync failed), recover the PIN back to the owner and
-                    remove orphan admin-fee entries.
+                    Use this only after recovering missing users and relinking their PIN usage. This fallback returns truly orphaned used PINs
+                    back to unused and removes orphan admin-fee entries.
                   </p>
                   <Button
                     onClick={handleRepairOrphanedPins}
@@ -5902,7 +6272,9 @@ export default function Admin() {
                                 </Badge>
                               </td>
                               <td className="py-3 px-4 text-white/60">{owner?.userId || '-'}</td>
-                              <td className="py-3 px-4 text-white/60">{usedBy?.userId || '-'}</td>
+                              <td className="py-3 px-4 text-white/60">
+                                {usedBy?.userId || (pin.status === 'used' && pin.usedById ? 'Missing user link' : '-')}
+                              </td>
                               <td className="py-3 px-4 text-white/60">{formatDate(pin.createdAt)}</td>
                               <td className="py-3 px-4">
                                 {pin.status === 'unused' && (
@@ -5937,6 +6309,24 @@ export default function Admin() {
                                     }}
                                   >
                                     Unsuspend
+                                  </Button>
+                                )}
+                                {pin.status === 'used' && !usedBy && (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10"
+                                    onClick={() => {
+                                      void handleAssignUsedPinToUser(pin.pinCode);
+                                    }}
+                                    disabled={assigningUsedPinCode === pin.pinCode}
+                                  >
+                                    {assigningUsedPinCode === pin.pinCode ? (
+                                      <RefreshCw className="w-4 h-4 mr-1 animate-spin" />
+                                    ) : (
+                                      <UserCheck className="w-4 h-4 mr-1" />
+                                    )}
+                                    Assign Used By
                                   </Button>
                                 )}
                               </td>
@@ -7317,6 +7707,15 @@ export default function Admin() {
                         </Button>
                         <Button
                           variant="outline"
+                          onClick={handleRelinkRecoveredUserPins}
+                          disabled={isRelinkingRecoveredPins}
+                          className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10 w-full"
+                        >
+                          {isRelinkingRecoveredPins ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wrench className="w-4 h-4 mr-2" />}
+                          {isRelinkingRecoveredPins ? 'Relinking Orphan PIN Usage...' : 'Relink Orphan PIN Usage'}
+                        </Button>
+                        <Button
+                          variant="outline"
                           onClick={handleProcessLockedGiveHelp}
                           disabled={isProcessingLockedGiveHelp}
                           className="border-sky-400/40 text-sky-300 hover:bg-sky-400/10 w-full"
@@ -7350,6 +7749,15 @@ export default function Admin() {
                         >
                           {isResyncingWalletLedger ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wallet className="w-4 h-4 mr-2" />}
                           {isResyncingWalletLedger ? 'Resyncing Wallet Ledger...' : 'Resync Wallet Ledger'}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleResyncWalletLedgerAll}
+                          disabled={isResyncingWalletLedgerAll}
+                          className="border-lime-400/40 text-lime-300 hover:bg-lime-400/10 w-full"
+                        >
+                          {isResyncingWalletLedgerAll ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : <Wallet className="w-4 h-4 mr-2" />}
+                          {isResyncingWalletLedgerAll ? 'Resyncing Ledger (All Users)...' : 'Resync Wallet Ledger (All Users)'}
                         </Button>
                         <Button
                           variant="outline"
@@ -7751,8 +8159,10 @@ export default function Admin() {
                             <tr className="border-b border-white/10">
                               <th className="text-left py-2 px-4 text-white/60 font-medium">Type</th>
                               <th className="text-left py-2 px-4 text-white/60 font-medium">Amount</th>
+                              <th className="text-left py-2 px-4 text-white/60 font-medium">Status</th>
                               <th className="text-left py-2 px-4 text-white/60 font-medium">Description</th>
                               <th className="text-left py-2 px-4 text-white/60 font-medium">Date</th>
+                              <th className="text-left py-2 px-4 text-white/60 font-medium">Action</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -7763,11 +8173,60 @@ export default function Admin() {
                                     {getTransactionTypeLabel(tx.type, tx.description)}
                                   </Badge>
                                 </td>
-                                <td className={`py-2 px-4 font-medium ${tx.amount > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                  {tx.amount > 0 ? '+' : ''}{formatCurrency(tx.amount)}
+                                <td className={`py-2 px-4 font-medium ${(
+                                  Number(tx.amount || 0) < 0
+                                  || tx.type === 'withdrawal'
+                                  || tx.type === 'give_help'
+                                  || tx.type === 'safety_pool'
+                                  || tx.type === 'system_fee'
+                                  || tx.type === 'activation'
+                                  || tx.type === 'pin_used'
+                                  || tx.type === 'admin_debit'
+                                ) ? 'text-red-400' : 'text-emerald-400'}`}>
+                                  {(
+                                    Number(tx.amount || 0) < 0
+                                    || tx.type === 'withdrawal'
+                                    || tx.type === 'give_help'
+                                    || tx.type === 'safety_pool'
+                                    || tx.type === 'system_fee'
+                                    || tx.type === 'activation'
+                                    || tx.type === 'pin_used'
+                                    || tx.type === 'admin_debit'
+                                  ) ? '-' : '+'}
+                                  {formatCurrency(Math.abs(Number.isFinite(tx.displayAmount) ? Number(tx.displayAmount) : Number(tx.amount || 0)))}
+                                </td>
+                                <td className="py-2 px-4">
+                                  <Badge className="bg-white/10 text-white/80 border-white/20">
+                                    {tx.status}
+                                  </Badge>
                                 </td>
                                 <td className="py-2 px-4 text-white/60 text-sm">{getVisibleTransactionDescription(tx.description)}</td>
                                 <td className="py-2 px-4 text-white/60 text-sm">{formatDate(tx.createdAt)}</td>
+                                <td className="py-2 px-4">
+                                  <div className="flex items-center gap-2">
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="border-white/20 text-white hover:bg-white/10"
+                                      onClick={() => openTransactionEdit(tx as Transaction)}
+                                    >
+                                      <Pencil className="w-3.5 h-3.5 mr-1" />
+                                      Edit
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="border-red-500/40 text-red-300 hover:bg-red-500/10"
+                                      onClick={() => { void handleDeleteTransaction(tx as Transaction); }}
+                                      disabled={deletingTransactionId === tx.id}
+                                    >
+                                      {deletingTransactionId === tx.id
+                                        ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                        : <Trash2 className="w-3.5 h-3.5 mr-1" />}
+                                      Delete
+                                    </Button>
+                                  </div>
+                                </td>
                               </tr>
                             ))}
                           </tbody>
@@ -8167,30 +8626,43 @@ export default function Admin() {
                     className="border-emerald-400/40 text-emerald-300 hover:bg-emerald-400/10"
                     onClick={() => {
                       const result = Database.repairHistoricalReferralAndHelpMismatches();
+                      const detailRows = [...(result.recoveryDetails || [])]
+                        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+                      setHistoricalAutoRecoveryDetails(detailRows);
+                      setHistoricalAutoRecoveryRunAt(new Date().toISOString());
+
                       const changedCount =
                         result.ghostReceiveHelpReversed
                         + result.invalidRestoredReceiveHelpReversed
                         + result.referralIncomeRecovered
                         + result.levelOneHelpRecovered
-                        + result.missingIncomingReceiveHelpRecovered;
+                        + result.missingIncomingReceiveHelpRecovered
+                        + result.referralMismatchRecoveriesActivated
+                        + result.duplicateGiveMismatchRecoveriesActivated;
 
                       if (changedCount <= 0) {
                         toast.success('Historical repair found no mismatches to correct.');
                         return;
                       }
 
+                      const recoveredNow = Number(result.recoveredNowAmount || 0);
+                      const recoveredSuffix = recoveredNow > 0.0001
+                        ? ` Immediate recovery applied: $${recoveredNow.toFixed(2)}.`
+                        : '';
                       toast.success(
-                        `Historical repair complete: ${changedCount} corrections across ${result.usersTouched} user(s).`
+                        `Historical repair complete: ${changedCount} corrections across ${result.usersTouched} user(s).${recoveredSuffix}`
                       );
+                      loadAllUsers();
                       loadAllTransactions();
                       loadStats();
+                      setReportRefreshTick((tick) => tick + 1);
                       setGhostRepairLogTick((tick) => tick + 1);
                     }}
                   >
                     Repair Historical Referral/Help
                   </Button>
                   <p className="text-xs text-white/40">
-                    Removes receive-help entries missing a valid sender and recalculates affected wallets/locks.
+                    Reverses invalid receive-help entries (without deleting old rows), recalculates wallets/locks, and starts recovery for duplicate referral/help credits.
                   </p>
                 </div>
                 {!reportsDataLoaded && (
@@ -8198,6 +8670,133 @@ export default function Admin() {
                     Loading transaction data for reports...
                   </div>
                 )}
+                <div className="mb-6 rounded-lg border border-white/10 bg-[#141c2a] p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-white font-semibold">Historical Auto-Recovery Run Details</h4>
+                    <span className="text-xs text-white/40">
+                      {historicalAutoRecoveryDetails.length} record(s)
+                      {historicalAutoRecoveryRunAt ? ` • Last run: ${formatDate(historicalAutoRecoveryRunAt)}` : ''}
+                    </span>
+                  </div>
+                  {historicalAutoRecoveryDetails.length === 0 ? (
+                    <p className="text-sm text-white/50">Run Repair Historical Referral/Help to generate this report.</p>
+                  ) : (
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
+                            <th className="text-left py-2 px-3 text-white/60">Recovery Type</th>
+                            <th className="text-left py-2 px-3 text-white/60">Reference</th>
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">User Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Reason</th>
+                            <th className="text-left py-2 px-3 text-white/60">Before Due</th>
+                            <th className="text-left py-2 px-3 text-white/60">Recovered Now</th>
+                            <th className="text-left py-2 px-3 text-white/60">After Due</th>
+                            <th className="text-left py-2 px-3 text-white/60">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {historicalAutoRecoveryDetails.slice(0, 300).map((row) => (
+                            <tr key={row.id} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(row.createdAt)}</td>
+                              <td className="py-2 px-3 text-white/70">
+                                {row.kind === 'referral_income_mismatch' ? 'Referral Duplicate' : 'Duplicate Give-Help'}
+                              </td>
+                              <td className="py-2 px-3 text-white/50 font-mono text-xs" title={row.referenceId}>{row.referenceId}</td>
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{row.userId}</td>
+                              <td className="py-2 px-3 text-white">{row.userName}</td>
+                              <td className="py-2 px-3 text-white/60 max-w-[360px] truncate" title={row.reason}>{row.reason}</td>
+                              <td className="py-2 px-3 text-amber-300">{formatCurrency(row.beforeDue)}</td>
+                              <td className="py-2 px-3 text-emerald-400">{formatCurrency(row.recoveredNow)}</td>
+                              <td className="py-2 px-3 text-cyan-300">{formatCurrency(row.afterDue)}</td>
+                              <td className="py-2 px-3 text-white/70">{row.status}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {historicalAutoRecoveryDetails.length > 300 && (
+                        <p className="text-xs text-white/40 mt-2">Showing latest 300 recovery rows.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="mb-6 rounded-lg border border-white/10 bg-[#141c2a] p-4">
+                  <div className="flex items-center justify-between mb-3 gap-2">
+                    <h4 className="text-white font-semibold">Blocked Duplicate Contribution Attempts</h4>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-white/40">{duplicateContributionBlockEntries.length} record(s)</span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-white/20 text-white/70"
+                        onClick={() => setReportRefreshTick((tick) => tick + 1)}
+                      >
+                        <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                        Refresh
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-white/20 text-white/70"
+                        onClick={() => {
+                          Database.clearDuplicateContributionBlockEntries();
+                          setReportRefreshTick((tick) => tick + 1);
+                          toast.success('Duplicate diagnostics log cleared');
+                        }}
+                      >
+                        Clear
+                      </Button>
+                    </div>
+                  </div>
+                  {duplicateContributionBlockEntries.length === 0 ? (
+                    <p className="text-sm text-white/50">No blocked duplicate contribution attempts recorded yet.</p>
+                  ) : (
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60 min-w-[170px]">Date & Time</th>
+                            <th className="text-left py-2 px-3 text-white/60">From</th>
+                            <th className="text-left py-2 px-3 text-white/60">To</th>
+                            <th className="text-left py-2 px-3 text-white/60">Level</th>
+                            <th className="text-left py-2 px-3 text-white/60">Side</th>
+                            <th className="text-left py-2 px-3 text-white/60">Flow</th>
+                            <th className="text-left py-2 px-3 text-white/60">Reason</th>
+                            <th className="text-left py-2 px-3 text-white/60">Contribution Key</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {duplicateContributionBlockEntries.map((entry) => (
+                            <tr key={entry.id} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-white/60 whitespace-nowrap">{formatDate(entry.createdAt)}</td>
+                              <td className="py-2 px-3 text-white/80">
+                                {entry.fromUserName || 'Unknown'}
+                                {entry.fromUserPublicId ? ` (${entry.fromUserPublicId})` : ''}
+                              </td>
+                              <td className="py-2 px-3 text-white/80">
+                                {entry.toUserName || 'Unknown'}
+                                {entry.toUserPublicId ? ` (${entry.toUserPublicId})` : ''}
+                              </td>
+                              <td className="py-2 px-3 text-[#118bdd]">L{entry.level}</td>
+                              <td className="py-2 px-3 text-white/70 uppercase">{entry.side}</td>
+                              <td className="py-2 px-3">
+                                <Badge className={entry.via === 'activation' ? 'bg-cyan-500/20 text-cyan-300' : 'bg-amber-500/20 text-amber-300'}>
+                                  {entry.via}
+                                </Badge>
+                              </td>
+                              <td className="py-2 px-3 text-red-300">{entry.reason.replace(/_/g, ' ')}</td>
+                              <td className="py-2 px-3 text-white/50 font-mono text-xs" title={entry.contributionKey}>
+                                {entry.contributionKey}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
                 <div className="mb-6 rounded-lg border border-white/10 bg-[#141c2a] p-4">
                   <div className="flex items-center justify-between mb-3">
                     <h4 className="text-white font-semibold">Ghost Receive-Help Repair Log</h4>
@@ -9207,6 +9806,7 @@ export default function Admin() {
                       {duplicateLockedGiveHelpMismatchRows.length === 0 && <p className="text-center text-white/50 py-6">No duplicate locked give-help mismatch cases found.</p>}
                     </div>
                   </TabsContent>
+
                 </Tabs>
               </CardContent>
             </Card>
@@ -10127,6 +10727,89 @@ export default function Admin() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={!!editingTransaction}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeTransactionEdit();
+          }
+        }}
+      >
+        <DialogContent className="glass border-white/10 bg-[#111827] max-w-xl w-[calc(100vw-2rem)] sm:w-full">
+          <DialogHeader>
+            <DialogTitle className="text-white">Edit Transaction</DialogTitle>
+            <DialogDescription className="text-white/65">
+              Update amount, status, and description. Reason is required for audit.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label className="text-white/80">Amount</Label>
+                <Input
+                  type="number"
+                  value={txEditAmount}
+                  onChange={(e) => setTxEditAmount(e.target.value)}
+                  className="bg-[#1f2937] border-white/10 text-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-white/80">Status</Label>
+                <select
+                  value={txEditStatus}
+                  onChange={(e) => setTxEditStatus(e.target.value as TransactionStatus)}
+                  className="w-full px-4 py-2 bg-[#1f2937] border border-white/10 rounded-lg text-white"
+                >
+                  <option value="pending">pending</option>
+                  <option value="completed">completed</option>
+                  <option value="failed">failed</option>
+                  <option value="cancelled">cancelled</option>
+                  <option value="reversed">reversed</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-white/80">Description / Log</Label>
+              <Textarea
+                value={txEditDescription}
+                onChange={(e) => setTxEditDescription(e.target.value)}
+                className="bg-[#1f2937] border-white/10 text-white min-h-[110px]"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-white/80">Edit Reason (Audit)</Label>
+              <Textarea
+                value={txEditReason}
+                onChange={(e) => setTxEditReason(e.target.value)}
+                placeholder="Why this transaction is being edited"
+                className="bg-[#1f2937] border-white/10 text-white min-h-[90px]"
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <Button
+                variant="outline"
+                onClick={closeTransactionEdit}
+                className="flex-1 border-white/20 text-white hover:bg-white/10"
+                disabled={isSavingTxEdit}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSaveTransactionEdit}
+                className="flex-1 bg-[#118bdd] hover:bg-[#0f79be] text-white"
+                disabled={isSavingTxEdit}
+              >
+                {isSavingTxEdit ? <RefreshCw className="w-4 h-4 mr-2 animate-spin" /> : null}
+                Save Changes
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Add Funds Dialog */}
       {
         selectedUser && (
@@ -10136,6 +10819,7 @@ export default function Admin() {
                 setSelectedUser(null);
                 setFundAmount('');
                 setFundMessage('');
+                setFundActionMode('credit');
                 setFundWalletType('deposit');
                 setFundLoadingAction(null);
               }}
@@ -10148,6 +10832,17 @@ export default function Admin() {
                 <CardTitle className="text-white">{fundWalletTitle}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label className="text-white/80">Wallet Action</Label>
+                  <select
+                    value={fundActionMode}
+                    onChange={(e) => setFundActionMode(e.target.value as 'credit' | 'debit')}
+                    className="w-full px-4 py-2 bg-[#1f2937] border border-white/10 rounded-lg text-white"
+                  >
+                    <option value="credit">Credit User Wallet (from safety pool)</option>
+                    <option value="debit">Debit User Wallet (to safety pool)</option>
+                  </select>
+                </div>
                 <div className="space-y-2">
                   <Label className="text-white/80">Wallet Type</Label>
                   <select
@@ -10175,9 +10870,11 @@ export default function Admin() {
                     <p className="text-xs text-white/60">Current Safety Pool Balance</p>
                     <p className="text-lg font-bold text-amber-300">{formatCurrency(safetyPoolAmount)}</p>
                     <p className="text-[11px] text-white/50 mt-1">
-                      {fundWalletType === 'royalty'
-                        ? 'Sending royalty deducts from safety pool. Taking it back adds the same amount back to safety pool with an audit entry.'
-                        : `Sending to ${fundWalletActionLabel} also deducts the same amount from safety pool and stores your note in the user transaction history and admin audit log.`}
+                      {fundActionMode === 'credit'
+                        ? (fundWalletType === 'royalty'
+                          ? 'Sending royalty deducts from safety pool and creates an audited user transaction.'
+                          : `Sending to ${fundWalletActionLabel} also deducts the same amount from safety pool and stores your note in the user transaction history and admin audit log.`)
+                        : `Debiting from ${fundWalletActionLabel} adds the same amount back to safety pool and stores your note in the user transaction history and admin audit log.`}
                     </p>
                   </div>
                   <div className="space-y-2">
@@ -10197,6 +10894,7 @@ export default function Admin() {
                       setSelectedUser(null);
                       setFundAmount('');
                       setFundMessage('');
+                      setFundActionMode('credit');
                       setFundWalletType('deposit');
                       setFundLoadingAction(null);
                     }}
@@ -10204,32 +10902,15 @@ export default function Admin() {
                   >
                     Cancel
                   </Button>
-                  {fundWalletType === 'royalty' ? (
-                    <>
-                      <Button
-                        onClick={handleReverseRoyalty}
-                        disabled={isLoading}
-                        className="flex-1 bg-red-600 text-white hover:bg-red-500"
-                      >
-                        {isLoading && fundLoadingAction === 'reverse' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Take Back Royalty'}
-                      </Button>
-                      <Button
-                        onClick={handleAddFunds}
-                        disabled={isLoading}
-                        className="flex-1 btn-primary"
-                      >
-                        {isLoading && fundLoadingAction === 'add' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send Royalty'}
-                      </Button>
-                    </>
-                  ) : (
-                    <Button
-                      onClick={handleAddFunds}
-                      disabled={isLoading}
-                      className="flex-1 btn-primary"
-                    >
-                      {isLoading && fundLoadingAction === 'add' ? <RefreshCw className="w-4 h-4 animate-spin" /> : fundPrimaryButtonLabel}
-                    </Button>
-                  )}
+                  <Button
+                    onClick={handleAddFunds}
+                    disabled={isLoading}
+                    className={`flex-1 ${fundActionMode === 'debit' ? 'bg-red-600 text-white hover:bg-red-500' : 'btn-primary'}`}
+                  >
+                    {isLoading && (fundLoadingAction === 'add' || fundLoadingAction === 'debit')
+                      ? <RefreshCw className="w-4 h-4 animate-spin" />
+                      : fundPrimaryButtonLabel}
+                  </Button>
                 </div>
               </CardContent>
             </Card>
