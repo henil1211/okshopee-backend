@@ -62,6 +62,18 @@ const SMTP_TLS_REJECT_UNAUTHORIZED =
 const SMTP_USER = process.env.SMTP_USER || '';
 const SMTP_PASS = process.env.SMTP_PASS || '';
 const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER || '';
+const LEDGER_MISMATCH_ALERT_ENABLED = process.env.LEDGER_MISMATCH_ALERT_ENABLED !== 'false';
+const LEDGER_MISMATCH_ALERT_TO = normalizeEmailRecipients(process.env.LEDGER_MISMATCH_ALERT_TO || process.env.ALERT_EMAIL_TO || '');
+const LEDGER_MISMATCH_ALERT_INTERVAL_MINUTES_RAW = Number(process.env.LEDGER_MISMATCH_ALERT_INTERVAL_MINUTES || 15);
+const LEDGER_MISMATCH_ALERT_INTERVAL_MINUTES = Number.isFinite(LEDGER_MISMATCH_ALERT_INTERVAL_MINUTES_RAW)
+  && LEDGER_MISMATCH_ALERT_INTERVAL_MINUTES_RAW >= 1
+  ? Math.floor(LEDGER_MISMATCH_ALERT_INTERVAL_MINUTES_RAW)
+  : 15;
+const LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW = Number(process.env.LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES || 60);
+const LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES = Number.isFinite(LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW)
+  && LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW >= 1
+  ? Math.floor(LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW)
+  : 60;
 const STATE_BACKUP_DIR = path.join(__dirname, 'data', 'backups');
 const UPLOADS_BASE_DIR = path.join(__dirname, 'data', 'uploads');
 const ALLOWED_UPLOAD_SCOPES = new Set([
@@ -78,6 +90,9 @@ const ALLOWED_UPLOAD_SCOPES = new Set([
   'announcements'
 ]);
 let smtpTransporter;
+let ledgerMismatchAlertLastSignature = '';
+let ledgerMismatchAlertLastAt = 0;
+let ledgerMismatchAuditRunning = false;
 
 // All known state keys (same as before — frontend sends/receives these)
 const DB_KEYS = [
@@ -989,6 +1004,305 @@ async function buildMissingMatrixUsersAudit(limit = 200) {
   };
 }
 
+function auditRound2(value) {
+  return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function auditGetTxTime(tx) {
+  const ts = new Date(tx?.completedAt || tx?.createdAt || 0).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function auditParseWithdrawalFee(description) {
+  if (!description) return 0;
+  const match = String(description).match(/Fee:\s*\$([0-9]+(?:\.[0-9]+)?)/i);
+  if (!match) return 0;
+  const fee = Number(match[1]);
+  return Number.isFinite(fee) ? fee : 0;
+}
+
+function auditResolveTransactionLevel(tx) {
+  const numericLevel = Number(tx?.level);
+  if (Number.isFinite(numericLevel) && numericLevel >= 1 && numericLevel <= 20) {
+    return numericLevel;
+  }
+  const desc = String(tx?.description || '');
+  const match = desc.match(/\blevel\s+(\d+)\b/i);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 20) return null;
+  return parsed;
+}
+
+function auditIsLockedFirstTwoReceiveDescription(description, level) {
+  const desc = String(description || '').toLowerCase();
+  const prefix = typeof level === 'number'
+    ? `locked first-two help at level ${level}`
+    : 'locked first-two help at level';
+  return desc.includes(prefix);
+}
+
+function auditIsLockedQualifiedReceiveDescription(description, level) {
+  const desc = String(description || '').toLowerCase();
+  const prefix = typeof level === 'number'
+    ? `locked receive help at level ${level}`
+    : 'locked receive help at level';
+  return desc.includes(prefix);
+}
+
+function auditGetUnsettledLockedReceiveEffectiveAmount(tx, allTransactions) {
+  if (tx?.type !== 'receive_help' || tx?.status !== 'completed') return 0;
+  if (
+    !auditIsLockedFirstTwoReceiveDescription(tx.description)
+    && !auditIsLockedQualifiedReceiveDescription(tx.description)
+  ) {
+    return 0;
+  }
+
+  const directAmount = Number(tx.amount || 0);
+  if (directAmount > 0) {
+    return Math.abs(directAmount);
+  }
+
+  const displayAmount = Number(tx.displayAmount || 0);
+  if (!(displayAmount > 0)) return 0;
+
+  const level = auditResolveTransactionLevel(tx);
+  if (!level) return 0;
+
+  const txTime = auditGetTxTime(tx);
+  const expectedGiveLevel = Math.min(20, level + 1);
+  const settledByGiveHelp = allTransactions.some((candidate) =>
+    candidate.userId === tx.userId
+    && candidate.type === 'give_help'
+    && candidate.status === 'completed'
+    && Number(candidate.amount || 0) < 0
+    && String(candidate.description || '').toLowerCase().includes('from locked income')
+    && auditResolveTransactionLevel(candidate) === expectedGiveLevel
+    && Math.abs(auditGetTxTime(candidate) - txTime) <= 10 * 60 * 1000
+  );
+
+  return settledByGiveHelp ? 0 : Math.abs(displayAmount);
+}
+
+function computeIncomeLedgerFromTransactionsForAudit(userId, transactions) {
+  const txs = transactions
+    .filter((tx) => tx.userId === userId)
+    .sort((a, b) => auditGetTxTime(a) - auditGetTxTime(b));
+
+  let incomeWallet = 0;
+
+  for (const tx of txs) {
+    const txDesc = String(tx.description || '').toLowerCase();
+    const txType = String(tx.type || '');
+    const txAmount = Number(tx.amount || 0);
+
+    switch (txType) {
+      case 'direct_income':
+      case 'level_income':
+        incomeWallet += txAmount;
+        break;
+      case 'royalty_transfer':
+        if (txAmount > 0 && txDesc.includes('income wallet')) {
+          incomeWallet += txAmount;
+        }
+        break;
+      case 'receive_help': {
+        const isLockedReceive = auditIsLockedQualifiedReceiveDescription(txDesc)
+          || auditIsLockedFirstTwoReceiveDescription(txDesc)
+          || auditGetUnsettledLockedReceiveEffectiveAmount(tx, txs) > 0;
+        if (!isLockedReceive) {
+          incomeWallet += txAmount;
+        }
+        break;
+      }
+      case 'give_help':
+        if (!txDesc.includes('from locked income') && !txDesc.includes('from matrix contribution')) {
+          if (txAmount >= 0) {
+            incomeWallet += txAmount;
+          } else {
+            const incomeOutflow = Math.min(Math.abs(txAmount), Math.max(0, incomeWallet));
+            incomeWallet -= incomeOutflow;
+          }
+        }
+        break;
+      case 'safety_pool':
+        if (txAmount >= 0) {
+          incomeWallet += txAmount;
+        } else {
+          const safetyOutflow = Math.min(Math.abs(txAmount), Math.max(0, incomeWallet));
+          incomeWallet -= safetyOutflow;
+        }
+        break;
+      case 'withdrawal': {
+        const fee = auditParseWithdrawalFee(tx.description || '');
+        const withdrawalOutflow = txAmount < 0 ? Math.abs(txAmount) : Math.abs(txAmount) + fee;
+        const appliedOutflow = Math.min(withdrawalOutflow, Math.max(0, incomeWallet));
+        incomeWallet -= appliedOutflow;
+        break;
+      }
+      case 'income_transfer':
+        if (txAmount >= 0) {
+          incomeWallet += txAmount;
+        } else {
+          const isUserInitiatedIncomeToFundTransfer = txDesc.includes('to your fund wallet')
+            || txDesc.includes('to fund wallet of');
+          const transferOutflow = isUserInitiatedIncomeToFundTransfer
+            ? Math.abs(txAmount)
+            : Math.min(Math.abs(txAmount), Math.max(0, incomeWallet));
+          incomeWallet -= transferOutflow;
+        }
+        break;
+      case 'admin_credit':
+        if (txDesc.includes('income wallet')) {
+          incomeWallet += txAmount;
+        }
+        break;
+      case 'admin_debit':
+        if (txDesc.includes('income wallet')) {
+          const debitOutflow = Math.min(Math.abs(txAmount), Math.max(0, incomeWallet));
+          incomeWallet -= debitOutflow;
+        }
+        break;
+      case 'fund_recovery':
+        if (txDesc.includes('income wallet')) {
+          const recoveryOutflow = Math.min(Math.abs(txAmount), Math.max(0, incomeWallet));
+          incomeWallet -= recoveryOutflow;
+        }
+        break;
+      case 'system_fee':
+        if (txDesc.includes('income wallet')) {
+          const feeOutflow = Math.min(Math.abs(txAmount), Math.max(0, incomeWallet));
+          incomeWallet -= feeOutflow;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  return Math.max(0, auditRound2(incomeWallet));
+}
+
+async function buildIncomeTransferSenderMismatchAudit() {
+  const generatedAt = new Date().toISOString();
+  const snapshot = await readStateFromDB(['mlm_users', 'mlm_wallets', 'mlm_transactions']);
+  const users = Array.isArray(safeParseJSON(snapshot.state.mlm_users)) ? safeParseJSON(snapshot.state.mlm_users) : [];
+  const wallets = Array.isArray(safeParseJSON(snapshot.state.mlm_wallets)) ? safeParseJSON(snapshot.state.mlm_wallets) : [];
+  const transactions = Array.isArray(safeParseJSON(snapshot.state.mlm_transactions)) ? safeParseJSON(snapshot.state.mlm_transactions) : [];
+
+  const userById = new Map(users.map((user) => [String(user.id || ''), user]));
+  const senderDebitCountByUser = new Map();
+
+  for (const tx of transactions) {
+    if (tx?.type !== 'income_transfer' || tx?.status !== 'completed' || !(Number(tx?.amount || 0) < 0)) continue;
+    const desc = String(tx?.description || '').toLowerCase();
+    if (!desc.includes('to your fund wallet') && !desc.includes('to fund wallet of')) continue;
+    const key = String(tx.userId || '');
+    if (!key) continue;
+    senderDebitCountByUser.set(key, (senderDebitCountByUser.get(key) || 0) + 1);
+  }
+
+  const mismatches = [];
+  let totalIncomeDelta = 0;
+
+  for (const wallet of wallets) {
+    const walletUserId = String(wallet?.userId || '');
+    if (!walletUserId) continue;
+    const senderDebitCount = Number(senderDebitCountByUser.get(walletUserId) || 0);
+    if (senderDebitCount <= 0) continue;
+
+    const expectedIncomeWallet = computeIncomeLedgerFromTransactionsForAudit(walletUserId, transactions);
+    const currentIncomeWallet = Number(wallet.incomeWallet || 0);
+    const delta = auditRound2(expectedIncomeWallet - currentIncomeWallet);
+    if (Math.abs(delta) <= 0.009) continue;
+
+    const user = userById.get(walletUserId);
+    totalIncomeDelta = auditRound2(totalIncomeDelta + delta);
+
+    mismatches.push({
+      internalUserId: walletUserId,
+      userId: String(user?.userId || walletUserId),
+      name: String(user?.fullName || user?.username || 'Unknown'),
+      senderDebitCount,
+      currentIncomeWallet: auditRound2(currentIncomeWallet),
+      expectedIncomeWallet,
+      incomeDelta: delta
+    });
+  }
+
+  mismatches.sort((a, b) => Math.abs(b.incomeDelta) - Math.abs(a.incomeDelta));
+
+  return {
+    generatedAt,
+    scannedUsers: wallets.length,
+    senderUsersWithTransfers: senderDebitCountByUser.size,
+    transferSenderIncomeMismatches: mismatches.length,
+    totalIncomeDelta,
+    topMismatches: mismatches.slice(0, 50)
+  };
+}
+
+async function runLedgerMismatchAlertCheck() {
+  if (!LEDGER_MISMATCH_ALERT_ENABLED) return;
+  if (ledgerMismatchAuditRunning) return;
+
+  ledgerMismatchAuditRunning = true;
+  try {
+    const report = await buildIncomeTransferSenderMismatchAudit();
+    if (report.transferSenderIncomeMismatches <= 0) return;
+
+    const signature = report.topMismatches
+      .slice(0, 20)
+      .map((row) => `${row.userId}:${row.incomeDelta.toFixed(2)}`)
+      .join('|');
+    const now = Date.now();
+    const cooldownMs = LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES * 60 * 1000;
+    const withinCooldown = signature === ledgerMismatchAlertLastSignature && (now - ledgerMismatchAlertLastAt) < cooldownMs;
+    if (withinCooldown) return;
+
+    ledgerMismatchAlertLastSignature = signature;
+    ledgerMismatchAlertLastAt = now;
+
+    const preview = report.topMismatches.slice(0, 10)
+      .map((row) => `${row.userId} ${row.name}: current=${row.currentIncomeWallet.toFixed(2)} expected=${row.expectedIncomeWallet.toFixed(2)} delta=${row.incomeDelta.toFixed(2)} transfers=${row.senderDebitCount}`)
+      .join('\n');
+
+    const subject = `[ReferNex Alert] Sender debit mismatch detected (${report.transferSenderIncomeMismatches} users)`;
+    const textBody = [
+      `Database: ${MYSQL_DATABASE}`,
+      `Generated: ${report.generatedAt}`,
+      `Sender users with income-transfer debits: ${report.senderUsersWithTransfers}`,
+      `Mismatches: ${report.transferSenderIncomeMismatches}`,
+      `Total income delta: ${report.totalIncomeDelta.toFixed(2)}`,
+      '',
+      'Top mismatches:',
+      preview
+    ].join('\n');
+
+    console.error(`[ledger-alert] ${subject}`);
+    console.error(`[ledger-alert] ${preview}`);
+
+    if (!LEDGER_MISMATCH_ALERT_TO) return;
+    const smtpErrors = getSmtpConfigErrors();
+    if (smtpErrors.length > 0) {
+      console.warn(`[ledger-alert] SMTP not configured for email alert: ${smtpErrors.join(', ')}`);
+      return;
+    }
+
+    await getSmtpTransporter().sendMail({
+      from: SMTP_FROM,
+      to: LEDGER_MISMATCH_ALERT_TO,
+      subject,
+      text: textBody
+    });
+  } catch (error) {
+    console.warn(`[ledger-alert] failed: ${getErrorMessage(error, 'Unknown error')}`);
+  } finally {
+    ledgerMismatchAuditRunning = false;
+  }
+}
+
 // ─── Backups (file-based, reads from state_store) ────────────────────
 
 function createBackupDirName(prefix = 'state-backup') {
@@ -1385,6 +1699,16 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/audit/income-transfer-sender-mismatches') {
+    try {
+      const report = await buildIncomeTransferSenderMismatchAudit();
+      sendJson(res, 200, { ok: true, report });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to build sender mismatch report' });
+    }
+    return;
+  }
+
   // List backups
   if (req.method === 'GET' && url.pathname === '/api/backups') {
     try {
@@ -1571,6 +1895,23 @@ async function start() {
     setInterval(() => {
       void getStateSnapshotCached({ forceFresh: true }).catch(() => {});
     }, 5 * 60 * 1000);
+
+    if (LEDGER_MISMATCH_ALERT_ENABLED) {
+      console.log(
+        `Ledger mismatch alert: enabled interval=${LEDGER_MISMATCH_ALERT_INTERVAL_MINUTES}m cooldown=${LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES}m recipients=${LEDGER_MISMATCH_ALERT_TO || 'console-only'}`
+      );
+
+      // First run shortly after startup, then run periodically.
+      setTimeout(() => {
+        void runLedgerMismatchAlertCheck();
+      }, 20 * 1000);
+
+      setInterval(() => {
+        void runLedgerMismatchAlertCheck();
+      }, LEDGER_MISMATCH_ALERT_INTERVAL_MINUTES * 60 * 1000);
+    } else {
+      console.log('Ledger mismatch alert: disabled');
+    }
   });
 }
 
