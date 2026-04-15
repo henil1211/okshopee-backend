@@ -2526,7 +2526,6 @@ export default function Admin() {
           return { recoveryResult: recovery, relinkResult: relink };
         },
         {
-          full: true,
           timeoutMs: 120000,
           maxAttempts: 3,
           retryDelayMs: 1500

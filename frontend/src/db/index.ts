@@ -10459,81 +10459,81 @@ class Database {
       let anyFailed = false;
 
       try {
-        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+        const targetKeys = useFullSnapshot
+          ? Array.from(this.REMOTE_SYNC_KEYS)
+          : Array.from(this.remoteSyncDirtyKeys);
 
-        try {
-          const targetKeys = useFullSnapshot
-            ? Array.from(this.REMOTE_SYNC_KEYS)
-            : Array.from(this.remoteSyncDirtyKeys);
+        const heavyKeys = [
+          'mlm_transactions',
+          'mlm_help_trackers',
+          'mlm_matrix',
+          'mlm_users',
+          'mlm_payments',
+          'mlm_wallets',
+          DB_KEYS.SUPPORT_TICKETS,
+          DB_KEYS.MARKETPLACE_INVOICES,
+          DB_KEYS.MARKETPLACE_REDEMPTIONS
+        ];
+        const batches: string[][] = [];
 
-          const heavyKeys = [
-            'mlm_transactions',
-            'mlm_help_trackers',
-            'mlm_matrix',
-            'mlm_users',
-            'mlm_payments',
-            'mlm_wallets',
-            DB_KEYS.SUPPORT_TICKETS,
-            DB_KEYS.MARKETPLACE_INVOICES,
-            DB_KEYS.MARKETPLACE_REDEMPTIONS
-          ];
-          const batches: string[][] = [];
+        const others = targetKeys.filter(k => !heavyKeys.includes(k));
+        if (others.length > 0) batches.push(others);
 
-          const others = targetKeys.filter(k => !heavyKeys.includes(k));
-          if (others.length > 0) batches.push(others);
+        heavyKeys.forEach(hk => {
+          if (targetKeys.includes(hk)) batches.push([hk]);
+        });
 
-          heavyKeys.forEach(hk => {
-            if (targetKeys.includes(hk)) batches.push([hk]);
-          });
+        for (const batch of batches) {
+          if (batch.length === 0) continue;
+          const batchState: Record<string, string> = {};
+          for (const key of batch) {
+            const val = this.getStorageItem(key);
+            const isObj = key === 'mlm_safety_pool' || key === 'mlm_settings';
+            batchState[key] = typeof val === 'string' ? val : (isObj ? '{}' : '[]');
+          }
 
-          for (const batch of batches) {
-            if (batch.length === 0) continue;
-            const batchState: Record<string, string> = {};
-            for (const key of batch) {
-              const val = this.getStorageItem(key);
-              const isObj = key === 'mlm_safety_pool' || key === 'mlm_settings';
-              batchState[key] = typeof val === 'string' ? val : (isObj ? '{}' : '[]');
-            }
+          const payload = {
+            state: batchState,
+            baseUpdatedAt: finalUpdatedAt
+          };
 
-            const payload = {
-              state: batchState,
-              baseUpdatedAt: finalUpdatedAt
-            };
+          const endpointUrl = this.getRemoteSyncWriteEndpoint(options);
+          const separator = endpointUrl.includes('?') ? '&' : '?';
+          const finalEndpoint = `${endpointUrl}${separator}chunk=1`;
 
-            const endpointUrl = this.getRemoteSyncWriteEndpoint(options);
-            const separator = endpointUrl.includes('?') ? '&' : '?';
-            const finalEndpoint = `${endpointUrl}${separator}chunk=1`;
+          console.log(`[DB Sync Debug] Chunk ${batch.join(',')} -> ${finalEndpoint}`);
+          console.log(`[DB Sync Debug] Using baseUpdatedAt: ${finalUpdatedAt}`);
 
-            console.log(`[DB Sync Debug] Chunk ${batch.join(',')} -> ${finalEndpoint}`);
-            console.log(`[DB Sync Debug] Using baseUpdatedAt: ${finalUpdatedAt}`);
-
-            const response = await fetch(finalEndpoint, {
+          const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+          let response: Response;
+          try {
+            response = await fetch(finalEndpoint, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload),
               signal: controller?.signal
             });
-
-            if (!response.ok) {
-              const errText = await response.text().catch(() => '');
-              console.error(`[DB Sync Error] HTTP ${response.status} from backend. Body: ${errText}`);
-
-              if (response.status === 409 && attempt < maxAttempts) {
-                console.warn('[DB Sync] Forced sync rejected due to stale snapshot. Re-hydrating from backend and retrying.');
-                anyFailed = true;
-                break;
-              }
-              throw new Error(`Remote sync failed with HTTP ${response.status}`);
-            }
-
-            const respPayload = await response.json() as { updatedAt?: unknown };
-            if (typeof respPayload?.updatedAt === 'string') {
-              finalUpdatedAt = respPayload.updatedAt;
-            }
+          } finally {
+            clearTimeout(timeout);
           }
-        } finally {
-          clearTimeout(timeout);
+
+          if (!response.ok) {
+            const errText = await response.text().catch(() => '');
+            console.error(`[DB Sync Error] HTTP ${response.status} from backend. Body: ${errText}`);
+
+            if (response.status === 409 && attempt < maxAttempts) {
+              console.warn('[DB Sync] Forced sync rejected due to stale snapshot. Re-hydrating from backend and retrying.');
+              anyFailed = true;
+              break;
+            }
+            throw new Error(`Remote sync failed with HTTP ${response.status}`);
+          }
+
+          const respPayload = await response.json() as { updatedAt?: unknown };
+          if (typeof respPayload?.updatedAt === 'string') {
+            finalUpdatedAt = respPayload.updatedAt;
+          }
         }
 
         if (anyFailed) {
@@ -10598,53 +10598,53 @@ class Database {
       let anyFailed = false;
 
       try {
-        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+        for (const key of targetKeys) {
+          const val = this.getStorageItem(key);
+          const isObj = key === 'mlm_safety_pool' || key === 'mlm_settings';
+          const payload = {
+            state: {
+              [key]: typeof val === 'string' ? val : (isObj ? '{}' : '[]')
+            },
+            baseUpdatedAt: finalUpdatedAt
+          };
 
-        try {
-          for (const key of targetKeys) {
-            const val = this.getStorageItem(key);
-            const isObj = key === 'mlm_safety_pool' || key === 'mlm_settings';
-            const payload = {
-              state: {
-                [key]: typeof val === 'string' ? val : (isObj ? '{}' : '[]')
-              },
-              baseUpdatedAt: finalUpdatedAt
-            };
+          const endpointUrl = this.getRemoteSyncWriteEndpoint(options);
+          const separator = endpointUrl.includes('?') ? '&' : '?';
+          const finalEndpoint = `${endpointUrl}${separator}chunk=1`;
 
-            const endpointUrl = this.getRemoteSyncWriteEndpoint(options);
-            const separator = endpointUrl.includes('?') ? '&' : '?';
-            const finalEndpoint = `${endpointUrl}${separator}chunk=1`;
+          console.log(`[DB Sync Debug] Key ${key} -> ${finalEndpoint}`);
+          console.log(`[DB Sync Debug] Using baseUpdatedAt: ${finalUpdatedAt}`);
 
-            console.log(`[DB Sync Debug] Key ${key} -> ${finalEndpoint}`);
-            console.log(`[DB Sync Debug] Using baseUpdatedAt: ${finalUpdatedAt}`);
-
-            const response = await fetch(finalEndpoint, {
+          const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          const timeout = setTimeout(() => controller?.abort(), timeoutMs);
+          let response: Response;
+          try {
+            response = await fetch(finalEndpoint, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payload),
               signal: controller?.signal
             });
-
-            if (!response.ok) {
-              const errText = await response.text().catch(() => '');
-              console.error(`[DB Sync Error] HTTP ${response.status} from backend for ${key}. Body: ${errText}`);
-
-              if (response.status === 409 && attempt < maxAttempts) {
-                console.warn(`[DB Sync] Key ${key} rejected due to stale snapshot. Re-hydrating from backend and retrying.`);
-                anyFailed = true;
-                break;
-              }
-              throw new Error(`Remote sync failed with HTTP ${response.status}`);
-            }
-
-            const respPayload = await response.json() as { updatedAt?: unknown };
-            if (typeof respPayload?.updatedAt === 'string') {
-              finalUpdatedAt = respPayload.updatedAt;
-            }
+          } finally {
+            clearTimeout(timeout);
           }
-        } finally {
-          clearTimeout(timeout);
+
+          if (!response.ok) {
+            const errText = await response.text().catch(() => '');
+            console.error(`[DB Sync Error] HTTP ${response.status} from backend for ${key}. Body: ${errText}`);
+
+            if (response.status === 409 && attempt < maxAttempts) {
+              console.warn(`[DB Sync] Key ${key} rejected due to stale snapshot. Re-hydrating from backend and retrying.`);
+              anyFailed = true;
+              break;
+            }
+            throw new Error(`Remote sync failed with HTTP ${response.status}`);
+          }
+
+          const respPayload = await response.json() as { updatedAt?: unknown };
+          if (typeof respPayload?.updatedAt === 'string') {
+            finalUpdatedAt = respPayload.updatedAt;
+          }
         }
 
         if (anyFailed) {
