@@ -743,16 +743,19 @@ async function authenticateUser(userId, password) {
     return { ok: false, status: 400, error: 'User ID must be exactly 7 digits' };
   }
 
+  let usersData = null;
+
   // Try in-memory cache first
   let user = null;
   if (stateSnapshotCache?.snapshot?.state?.mlm_users) {
     try {
-      const usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
+      usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
       if (Array.isArray(usersData)) {
         user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
       }
     } catch {
       user = null;
+      usersData = null;
     }
   }
 
@@ -761,7 +764,7 @@ async function authenticateUser(userId, password) {
     const usersRaw = await readStateKeyValue('mlm_users');
     if (!usersRaw) return { ok: false, status: 404, error: 'User ID not found' };
     try {
-      const usersData = JSON.parse(usersRaw);
+      usersData = JSON.parse(usersRaw);
       if (Array.isArray(usersData)) {
         user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
       }
@@ -785,6 +788,60 @@ async function authenticateUser(userId, password) {
         ok: false, status: 403,
         error: `Account temporarily blocked until ${blockedUntil.toLocaleString()}${user.blockedReason ? `: ${user.blockedReason}` : ''}`
       };
+    }
+  }
+
+  // Auto-deactivate on login if direct-referral deadline has passed.
+  if (!user.isAdmin && user.isActive && user.activatedAt) {
+    const requiredDirects = 2;
+    const directCount = Number.isFinite(Number(user.directCount)) ? Number(user.directCount) : 0;
+    if (directCount < requiredDirects) {
+      let deadlineDays = 30;
+      let settings = null;
+
+      if (stateSnapshotCache?.snapshot?.state?.mlm_settings) {
+        const parsedSettings = safeParseJSON(stateSnapshotCache.snapshot.state.mlm_settings);
+        if (parsedSettings && typeof parsedSettings === 'object') {
+          settings = parsedSettings;
+        }
+      }
+
+      if (!settings) {
+        const settingsRaw = await readStateKeyValue('mlm_settings');
+        if (settingsRaw) {
+          const parsedSettings = safeParseJSON(settingsRaw);
+          if (parsedSettings && typeof parsedSettings === 'object') {
+            settings = parsedSettings;
+          }
+        }
+      }
+
+      const configuredDays = Number(settings?.directReferralDeadlineDays);
+      if (Number.isFinite(configuredDays) && configuredDays > 0) {
+        deadlineDays = configuredDays;
+      }
+
+      const baseDateRaw = user.reactivatedAt || user.activatedAt;
+      const baseDate = baseDateRaw ? new Date(baseDateRaw) : null;
+      if (baseDate && !Number.isNaN(baseDate.getTime())) {
+        const deadlineEnd = new Date(baseDate.getTime() + deadlineDays * 24 * 60 * 60 * 1000);
+        if (Date.now() >= deadlineEnd.getTime()) {
+          const updatedUser = {
+            ...user,
+            isActive: false,
+            deactivationReason: 'direct_referral_deadline'
+          };
+          user = updatedUser;
+
+          if (Array.isArray(usersData)) {
+            const index = usersData.findIndex((item) => item && (item.id === updatedUser.id || item.userId === updatedUser.userId));
+            if (index >= 0) {
+              usersData[index] = updatedUser;
+              await writeStateToDB({ mlm_users: JSON.stringify(usersData) }, false);
+            }
+          }
+        }
+      }
     }
   }
 
