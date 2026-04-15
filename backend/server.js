@@ -942,6 +942,53 @@ async function buildAdminAuditReport() {
   };
 }
 
+async function buildMissingMatrixUsersAudit(limit = 200) {
+  const generatedAt = new Date().toISOString();
+  const snapshot = await readStateFromDB(['mlm_users', 'mlm_matrix']);
+  const users = safeParseJSON(snapshot.state.mlm_users) || [];
+  const matrix = safeParseJSON(snapshot.state.mlm_matrix) || [];
+
+  const userPublicIdSet = new Set(
+    users
+      .map((user) => (typeof user?.userId === 'string' ? user.userId.trim() : ''))
+      .filter(Boolean)
+  );
+
+  const parsedLimit = Math.max(1, Math.min(500, Number(limit) || 200));
+  const items = [];
+
+  for (const node of matrix) {
+    const publicUserId = typeof node?.userId === 'string' ? node.userId.trim() : '';
+    if (!publicUserId) continue;
+    if (userPublicIdSet.has(publicUserId)) continue;
+
+    const parentId = typeof node?.parentId === 'string' ? node.parentId.trim() : null;
+    const normalizedPosition = Number(node?.position) === 0
+      ? 'left'
+      : Number(node?.position) === 1
+        ? 'right'
+        : null;
+
+    items.push({
+      userId: publicUserId,
+      username: typeof node?.username === 'string' ? node.username : '',
+      parentId,
+      parentExistsInUsers: !!(parentId && userPublicIdSet.has(parentId)),
+      position: normalizedPosition,
+      isActive: !!node?.isActive
+    });
+
+    if (items.length >= parsedLimit) break;
+  }
+
+  return {
+    generatedAt,
+    missingCount: items.length,
+    limit: parsedLimit,
+    items
+  };
+}
+
 // ─── Backups (file-based, reads from state_store) ────────────────────
 
 function createBackupDirName(prefix = 'state-backup') {
@@ -1215,9 +1262,25 @@ const server = createServer(async (req, res) => {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
       const incomingState = sanitizeIncomingState(parsed?.state);
+      const incomingBaseUpdatedAt = typeof parsed?.baseUpdatedAt === 'string' ? parsed.baseUpdatedAt : null;
       const incomingUsersCount = getStateArrayLength(incomingState, 'mlm_users');
       const forceWrite = url.searchParams.get('force') === '1';
       const isChunked = url.searchParams.get('chunk') === '1';
+
+      const currentSnapshot = await getStateSnapshotCached();
+      const currentUpdatedAt = typeof currentSnapshot?.updatedAt === 'string' ? currentSnapshot.updatedAt : null;
+      // Always enforce baseUpdatedAt matching to prevent stale clients from overwriting newer state.
+      // The force query flag is reserved for intentional destructive snapshots only.
+      if (currentUpdatedAt && incomingBaseUpdatedAt !== currentUpdatedAt) {
+        sendJson(res, 409, {
+          ok: false,
+          error: 'State is stale. Refresh from server and retry.',
+          code: 'STATE_STALE',
+          expectedUpdatedAt: currentUpdatedAt,
+          receivedBaseUpdatedAt: incomingBaseUpdatedAt
+        });
+        return;
+      }
 
       if (!forceWrite && !isChunked && Object.prototype.hasOwnProperty.call(incomingState, 'mlm_users') && incomingUsersCount === 0) {
         // Check if server already has users — protect against accidental wipe
@@ -1307,6 +1370,17 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, { ok: true, report });
     } catch (error) {
       sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to build admin audit report' });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/audit/missing-matrix-users') {
+    try {
+      const limitParam = Number(url.searchParams.get('limit') || 200);
+      const report = await buildMissingMatrixUsersAudit(limitParam);
+      sendJson(res, 200, { ok: true, report });
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: error instanceof Error ? error.message : 'Failed to build missing matrix users report' });
     }
     return;
   }
