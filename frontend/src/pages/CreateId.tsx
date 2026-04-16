@@ -62,6 +62,7 @@ export default function CreateId() {
   const selectedPinRef = useRef('');
   const displayUserIdRef = useRef<string | null>(displayUser?.id ?? null);
   const successBannerRef = useRef<HTMLDivElement | null>(null);
+  const submitInFlightRef = useRef(false);
 
   const isEmailValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
@@ -302,6 +303,9 @@ export default function CreateId() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitInFlightRef.current || isLoading) {
+      return;
+    }
     setError('');
     setSuccessUserId('');
 
@@ -324,46 +328,55 @@ export default function CreateId() {
         return;
       }
     }
-    setIsLoading(true);
 
-    const result = await register({
-      fullName: formData.fullName,
-      email: formData.email,
-      password: formData.password,
-      transactionPassword: formData.transactionPassword,
-      phone: normalizePhoneNumber(formData.phone),
-      country: formData.country,
-      sponsorId: formData.sponsorId,
-      pinCode: formData.pinCode
-    });
-
-    setIsLoading(false);
-    if (!result.success) {
-      setError(result.message);
+    if (submitInFlightRef.current || isLoading) {
       return;
     }
+    submitInFlightRef.current = true;
+    setIsLoading(true);
 
-    setSuccessUserId(result.userId || '');
-    if (displayUser) {
-      loadPins(displayUser.id);
+    try {
+      const result = await register({
+        fullName: formData.fullName,
+        email: formData.email,
+        password: formData.password,
+        transactionPassword: formData.transactionPassword,
+        phone: normalizePhoneNumber(formData.phone),
+        country: formData.country,
+        sponsorId: formData.sponsorId,
+        pinCode: formData.pinCode
+      });
+
+      if (!result.success) {
+        setError(result.message);
+        return;
+      }
+
+      setSuccessUserId(result.userId || '');
+      if (displayUser) {
+        loadPins(displayUser.id);
+      }
+
+      setFormData({
+        fullName: '',
+        email: '',
+        phone: '',
+        country: '',
+        sponsorId: displayUser?.userId || '',
+        pinCode: '',
+        password: '',
+        confirmPassword: '',
+        transactionPassword: '',
+        confirmTransactionPassword: '',
+        agreeTerms: false
+      });
+      setSponsorName(displayUser?.fullName || '');
+      setIsSponsorEditing(false);
+      resetOtpFlow();
+    } finally {
+      setIsLoading(false);
+      submitInFlightRef.current = false;
     }
-
-    setFormData({
-      fullName: '',
-      email: '',
-      phone: '',
-      country: '',
-      sponsorId: displayUser?.userId || '',
-      pinCode: '',
-      password: '',
-      confirmPassword: '',
-      transactionPassword: '',
-      confirmTransactionPassword: '',
-      agreeTerms: false
-    });
-    setSponsorName(displayUser?.fullName || '');
-    setIsSponsorEditing(false);
-    resetOtpFlow();
   };
 
   if (!displayUser) return null;

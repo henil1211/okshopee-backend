@@ -66,6 +66,7 @@ export default function Register() {
   const pinCodeRef = useRef('');
   const pinRefreshInFlight = useRef<Promise<void> | null>(null);
   const lastPinRefresh = useRef<{ code: string; at: number } | null>(null);
+  const submitInFlightRef = useRef(false);
 
   const isEmailValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
@@ -311,6 +312,9 @@ export default function Register() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitInFlightRef.current || isLoading) {
+      return;
+    }
     setError('');
 
     const validationError = validateStep3();
@@ -330,6 +334,10 @@ export default function Register() {
       }
     }
 
+    if (submitInFlightRef.current || isLoading) {
+      return;
+    }
+    submitInFlightRef.current = true;
     setIsLoading(true);
 
     try {
@@ -357,6 +365,7 @@ export default function Register() {
       setError(message);
     } finally {
       setIsLoading(false);
+      submitInFlightRef.current = false;
     }
   };
 

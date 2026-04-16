@@ -239,11 +239,6 @@ export default function Transactions() {
         {tx.walletAddress && (
           <p className="text-xs text-white/45 break-all">Wallet: {tx.walletAddress}</p>
         )}
-        {tx.adminReason && (
-          <p className={`text-xs ${tx.status === 'failed' ? 'text-red-300/90' : 'text-white/65'}`}>
-            Reason: {tx.adminReason}
-          </p>
-        )}
         {tx.adminReceipt && (
           <div className="pt-1">
             {tx.adminReceipt.startsWith('data:image') ? (

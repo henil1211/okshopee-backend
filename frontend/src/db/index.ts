@@ -3664,33 +3664,9 @@ class Database {
     return Math.max(1, Math.floor(numericLevel) - 1);
   }
 
-  private static computeLockedIncomeFromTransactions(userId: string): number {
-    const txs = this.getTransactions()
-      .filter((t) => t.userId === userId)
-      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-
-    let locked = 0;
-    for (const tx of txs) {
-      const desc = (tx.description || '').toLowerCase();
-      const effectiveLockedReceiveAmount = this.getUnsettledLockedReceiveEffectiveAmount(tx, txs);
-      if (effectiveLockedReceiveAmount > 0) {
-        locked += effectiveLockedReceiveAmount;
-        continue;
-      }
-      if (tx.type === 'receive_help' && tx.amount > 0 && this.isReleasedLockedReceiveDescription(desc)) {
-        locked -= tx.amount;
-        continue;
-      }
-      if (tx.type === 'give_help' && desc.includes('from locked income')) {
-        locked -= Math.abs(tx.amount);
-      }
-    }
-
-    return Math.max(0, Math.round(locked * 100) / 100);
-  }
-
-  static repairLockedIncomeTrackerFromTransactions(userId: string): { updated: boolean; levels: number } {
-    const tracker = this.getUserHelpTracker(userId);
+  private static buildLockedIncomeLevelMapFromTransactions(
+    userId: string
+  ): Map<number, { firstTwo: number; qualification: number }> {
     const txLevelMap = new Map<number, { firstTwo: number; qualification: number }>();
 
     const ensureTxLevel = (level: number) => {
@@ -3771,6 +3747,22 @@ class Database {
         consumeTxDerivedLockedAcrossLevels(sourceLevel, Math.abs(tx.amount), allowCrossLevel);
       }
     }
+
+    return txLevelMap;
+  }
+
+  private static computeLockedIncomeFromTransactions(userId: string): number {
+    const txLevelMap = this.buildLockedIncomeLevelMapFromTransactions(userId);
+    let locked = 0;
+    for (const values of txLevelMap.values()) {
+      locked += Math.max(0, values.firstTwo) + Math.max(0, values.qualification);
+    }
+    return Math.max(0, Math.round(locked * 100) / 100);
+  }
+
+  static repairLockedIncomeTrackerFromTransactions(userId: string): { updated: boolean; levels: number } {
+    const tracker = this.getUserHelpTracker(userId);
+    const txLevelMap = this.buildLockedIncomeLevelMapFromTransactions(userId);
 
     let updated = false;
     let levels = 0;

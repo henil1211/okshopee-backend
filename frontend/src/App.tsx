@@ -2,6 +2,7 @@
 import { useEffect, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { Toaster } from '@/components/ui/sonner';
+import { toast } from 'sonner';
 import ThemeToggle from '@/components/ThemeToggle';
 import SyncStatusBadge from '@/components/SyncStatusBadge';
 import Database from '@/db';
@@ -94,10 +95,69 @@ function AutoRefreshAnnouncements() {
   return null;
 }
 
+function SessionAccessGuard() {
+  const { isAuthenticated, enforceSessionAccess } = useAuthStore();
+  const lastLogoutReasonRef = useRef('');
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      lastLogoutReasonRef.current = '';
+      return;
+    }
+
+    let mounted = true;
+
+    const runSessionCheck = async (forceServerCheck = false) => {
+      const result = await enforceSessionAccess({ forceServerCheck });
+      if (!mounted) return;
+      if (!result.active && result.message && lastLogoutReasonRef.current !== result.message) {
+        lastLogoutReasonRef.current = result.message;
+        toast.error(result.message);
+      }
+    };
+
+    void runSessionCheck(true);
+
+    const intervalId = window.setInterval(() => {
+      void runSessionCheck(true);
+    }, 10000);
+
+    const onWindowFocus = () => {
+      void runSessionCheck(true);
+    };
+
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        void runSessionCheck(true);
+      }
+    };
+
+    window.addEventListener('focus', onWindowFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    const unsubscribeSync = Database.subscribeRemoteSyncStatus((status) => {
+      if (status.state === 'synced') {
+        void runSessionCheck(false);
+      }
+    });
+
+    return () => {
+      mounted = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', onWindowFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      unsubscribeSync();
+    };
+  }, [isAuthenticated, enforceSessionAccess]);
+
+  return null;
+}
+
 function App() {
   return (
     <Router>
       <ScrollToTop />
+      <SessionAccessGuard />
       <AutoRefreshAnnouncements />
       <Toaster position="top-center" />
       <ThemeToggle />

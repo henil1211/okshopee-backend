@@ -226,6 +226,18 @@ export default function Matrix() {
     }
     return canonicalUsers;
   }, [matrix, syncKey]);
+
+  const getMatrixMemberUser = (userId: string) => {
+    return Database.getUserByUserId(userId) || usersByUserId.get(userId);
+  };
+
+  const isMatrixMemberActive = (userId: string, fallbackIsActive = false) => {
+    const member = getMatrixMemberUser(userId);
+    if (!member) return fallbackIsActive;
+    if (member.accountStatus && member.accountStatus !== 'active') return false;
+    return !!member.isActive;
+  };
+
   const getDisplayName = (userId: string, fallback: string) => usersByUserId.get(userId)?.fullName || fallback;
 
   const downline = useMemo(() => {
@@ -333,7 +345,7 @@ export default function Matrix() {
     if (filterStatus !== 'all') {
       const active = filterStatus === 'active';
       result = result.filter((m) => {
-        const realActive = usersByUserId.get(m.userId)?.isActive ?? m.isActive;
+        const realActive = isMatrixMemberActive(m.userId, m.isActive);
         return realActive === active;
       });
     }
@@ -545,7 +557,7 @@ export default function Matrix() {
                 <>
                   <div className="mb-8 px-4 sm:px-0">
                     <p className="text-center text-white/60 mb-3">Your ID</p>
-                    <TreeNode node={userNode} displayName={getDisplayName(userNode.userId, userNode.username)} realIsActive={usersByUserId.get(userNode.userId)?.isActive ?? userNode.isActive} onNodeClick={setSelectedNode} />
+                    <TreeNode node={userNode} displayName={getDisplayName(userNode.userId, userNode.username)} realIsActive={isMatrixMemberActive(userNode.userId, userNode.isActive)} onNodeClick={setSelectedNode} />
                   </div>
 
                     <div className="w-full space-y-8">
@@ -575,7 +587,7 @@ export default function Matrix() {
                                       node={node}
                                       slotNumber={idx + 1}
                                       displayName={node ? getDisplayName(node.userId, node.username) : undefined}
-                                      realIsActive={node ? (usersByUserId.get(node.userId)?.isActive ?? node.isActive) : undefined}
+                                      realIsActive={node ? isMatrixMemberActive(node.userId, node.isActive) : undefined}
                                       onNodeClick={setSelectedNode}
                                     />
                                   </div>
@@ -787,8 +799,9 @@ export default function Matrix() {
                 </thead>
                 <tbody>
                   {visibleDownline.map((member) => {
-                    const memberUser = usersByUserId.get(member.userId);
+                    const memberUser = getMatrixMemberUser(member.userId);
                     const relativeLevel = Math.max(1, member.level - (userNode?.level || 0));
+                    const memberIsActive = isMatrixMemberActive(member.userId, member.isActive);
                     return (
                       <tr key={member.userId} className="border-b border-white/5 hover:bg-white/5">
                         <td className="py-3 px-4">
@@ -808,7 +821,7 @@ export default function Matrix() {
                           </Badge>
                         </td>
                         <td className="py-3 px-4">
-                          {(memberUser?.isActive ?? member.isActive) ? (
+                          {memberIsActive ? (
                             <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
                               Active
                             </Badge>
@@ -871,7 +884,8 @@ export default function Matrix() {
             </CardHeader>
             <CardContent>
               {(() => {
-                const memberUser = usersByUserId.get(selectedNode.userId);
+                const memberUser = getMatrixMemberUser(selectedNode.userId);
+                const memberIsActive = isMatrixMemberActive(selectedNode.userId, selectedNode.isActive);
                 const memberTotalEarnings = Database.getMaxTotalReceivedByPublicUserId(selectedNode.userId);
                 const memberStats = Database.getTeamCounts(selectedNode.userId);
                 return (
@@ -889,8 +903,8 @@ export default function Matrix() {
                     <div className="grid grid-cols-2 gap-4">
                       <div className="p-3 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Status</p>
-                        <Badge className={(memberUser?.isActive ?? selectedNode.isActive) ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}>
-                          {(memberUser?.isActive ?? selectedNode.isActive) ? 'Active' : 'Inactive'}
+                        <Badge className={memberIsActive ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}>
+                          {memberIsActive ? 'Active' : 'Inactive'}
                         </Badge>
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">
