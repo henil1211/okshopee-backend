@@ -3941,8 +3941,13 @@ const server = createServer(async (req, res) => {
   try {
     // ...existing code...
   } catch (error) {
-    const url = new URL(req.url || '/', `http://${req.headers.host || `localhost:${PORT}`}`);
-    if (!res.writableEnded && url.pathname.startsWith('/api/v2/')) {
+    let url;
+    try {
+      url = new URL(req.url || '/', `http://${req.headers.host || `localhost:${PORT}`}`);
+    } catch {
+      url = { pathname: '' };
+    }
+    if (!res.writableEnded && url.pathname && url.pathname.startsWith('/api/v2/')) {
       const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
       const message = getErrorMessage(error, 'Internal server error');
       sendJson(res, status, {
