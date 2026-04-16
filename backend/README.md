@@ -62,8 +62,38 @@ Data is stored as real documents in separate MongoDB collections, including:
 - `help_trackers`, `matrix_pending_contributions`
 
 ## MySQL sanity helpers (Hostinger)
-- `scripts/db-sanity-lite.sql`: counts, status breakdown, orphan-count check for `users_rel` / `transactions_rel`.
-- `scripts/db-wallet-consistency.sql`: per-type totals and top per-user aggregates to spot wallet/tx mismatches.
-- `scripts/rebuild-rel-from-state.sql`: re-creates `users_rel` and `transactions_rel` from the JSON stored in `state_store` (drops existing tables).
 
 Run in phpMyAdmin (select DB `okshopee24` → SQL tab → paste file contents → Go). These are read-only checks.
+
+## Full system backup (one-click)
+
+Use this script to create a full backup package that includes:
+- MySQL dumps (`full_database.sql` and `state_store_only.sql`)
+- Backend API state backup metadata
+- Backend runtime files (`data/backups`, `data/uploads`, state files)
+- Env files (`backend/.env`, `frontend/.env`, `frontend/.env.production` if present)
+- Source archive (frontend + backend without `node_modules`/`dist`)
+- SHA256 checksum manifest
+
+From repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\backend\scripts\full-system-backup.ps1
+```
+
+Optional flags:
+
+```powershell
+# Skip API backup request
+powershell -ExecutionPolicy Bypass -File .\backend\scripts\full-system-backup.ps1 -SkipApiBackup
+
+# Skip MySQL dump step
+powershell -ExecutionPolicy Bypass -File .\backend\scripts\full-system-backup.ps1 -SkipMySqlDump
+
+# Choose custom output root
+powershell -ExecutionPolicy Bypass -File .\backend\scripts\full-system-backup.ps1 -OutputRoot "E:\SystemBackups"
+```
+
+Notes:
+- The script reads `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` from `backend/.env` if you do not pass them explicitly.
+- `mysqldump` must be installed and available in PATH unless you run with `-SkipMySqlDump`.
