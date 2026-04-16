@@ -899,3 +899,45 @@ Service-level hard rules:
 10. Rollback runbook tested.
 
 If all ten pass, you can safely continue from maintenance to controlled reopen.
+
+---
+
+## 13) Implementation Status Snapshot (2026-04-16)
+
+This section tracks actual implementation progress observed in code/repo plus verified runtime evidence from the RDP backend smoke test. It is intentionally conservative: anything not directly proven stays partial or pending.
+
+Verified complete:
+- V2 finance schema migrations exist for core tables and admin adjustment audit trail.
+- All 4 critical V2 flows are implemented in backend code: fund transfer, pin purchase, referral credit, withdrawal.
+- Admin adjustment flow is implemented with policy restrictions and immutable audit logging.
+- Generic legacy financial writes are blocked when `FINANCE_ENGINE_MODE=v2` and `LEGACY_FINANCIAL_WRITES_ENABLED=false`.
+- Deadlock/lock-wait retry wrapper is implemented and smoke-tested successfully on the RDP backend.
+- Deadlock smoke verification evidence:
+  - Endpoint: `POST /api/v2/fund-transfers`
+  - Requests: `12`
+  - Success `200`: `12`
+  - Conflict `409`: `0`
+  - `retryExhausted`: `0`
+  - `serverErrors5xx`: `0`
+
+Partial or still unverified:
+- Baseline snapshot completion/signoff is not yet evidenced in this repo/doc.
+- Full v2 table population and cutover seeding are not fully evidenced, although the smoke test proves the required V2 records exist for at least the tested users.
+- AuthN/AuthZ hardening is now implemented in code (signed login-issued V2 tokens, admin-role checks, impersonation session enforcement, auth audit logging), but runtime verification evidence across endpoints is still pending.
+- Reconciliation go-live gate for cutover users is not yet evidenced.
+- Post-go-live SLO metrics/alerting are only partially evidenced.
+
+Still remaining:
+- Rollback runbook test evidence is not yet recorded.
+
+Go-live checklist status:
+1. `PENDING` - Baseline snapshot complete and signed.
+2. `PARTIAL` - v2 tables populated and indexed.
+3. `COMPLETE` - All 4 critical flows run in transaction + idempotency + double-entry.
+4. `PARTIAL` - Legacy financial write paths disabled.
+5. `COMPLETE` - Admin adjustment endpoint locked by policy and audited.
+6. `COMPLETE` - Deadlock retry mechanism verified.
+7. `PARTIAL` - AuthN/AuthZ and impersonation audit checks implemented; runtime verification evidence still pending on v2 endpoints.
+8. `PENDING` - Reconciliation go-live gate: zero unexplained diff for cutover window users.
+9. `PARTIAL` - Post-go-live SLO thresholds configured and alerting verified.
+10. `PENDING` - Rollback runbook tested.

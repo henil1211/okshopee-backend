@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { gzip as zlibGzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,6 +55,18 @@ const REQUIRE_IDEMPOTENCY_FOR_MUTATIONS = process.env.REQUIRE_IDEMPOTENCY_FOR_MU
 const REQUIRE_SYSTEM_VERSION_HEADER = process.env.REQUIRE_SYSTEM_VERSION_HEADER
   ? process.env.REQUIRE_SYSTEM_VERSION_HEADER === 'true'
   : FINANCE_ENGINE_MODE === 'v2';
+const V2_AUTH_TOKEN_SECRET = process.env.V2_AUTH_TOKEN_SECRET || '';
+const V2_AUTH_TOKEN_ISSUER = process.env.V2_AUTH_TOKEN_ISSUER || 'matrixmlm-backend';
+const V2_AUTH_TOKEN_TTL_SECONDS_RAW = Number(process.env.V2_AUTH_TOKEN_TTL_SECONDS || 3600);
+const V2_AUTH_TOKEN_TTL_SECONDS = Number.isFinite(V2_AUTH_TOKEN_TTL_SECONDS_RAW)
+  && V2_AUTH_TOKEN_TTL_SECONDS_RAW >= 300
+  && V2_AUTH_TOKEN_TTL_SECONDS_RAW <= 86400
+  ? Math.trunc(V2_AUTH_TOKEN_TTL_SECONDS_RAW)
+  : 3600;
+const V2_ALLOW_LEGACY_BEARER_USER_CODE = process.env.V2_ALLOW_LEGACY_BEARER_USER_CODE
+  ? process.env.V2_ALLOW_LEGACY_BEARER_USER_CODE === 'true'
+  : true;
+const V2_AUTH_AUDIT_ENABLED = process.env.V2_AUTH_AUDIT_ENABLED !== 'false';
 
 const SMTP_HOST = process.env.SMTP_HOST || '';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
@@ -185,6 +197,8 @@ const V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW = Number(process.env.V2_PIN_CODE_MAX_R
 const V2_PIN_CODE_MAX_RETRIES_PER_PIN = Number.isFinite(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW) && V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW >= 1
   ? Math.trunc(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW)
   : 12;
+const V2_REQUEST_ID_MAX_LENGTH = 100;
+const V2_IMPERSONATION_REASON_MAX_LENGTH = 255;
 
 // ─── MySQL connection pool ───────────────────────────────────────────
 let pool;
@@ -213,6 +227,43 @@ async function ensureStateStoreUpdatedAtColumn() {
   }
 }
 
+async function ensureV2AuthAuditTable() {
+  if (!V2_AUTH_AUDIT_ENABLED) return;
+
+  try {
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS v2_auth_impersonation_audit (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        audit_uuid CHAR(36) NOT NULL,
+        endpoint_name VARCHAR(80) NOT NULL,
+        request_id VARCHAR(100) NULL,
+        idempotency_key VARCHAR(128) NULL,
+        auth_mode ENUM('signed_token','legacy_user_code') NOT NULL,
+        auth_subject_user_code VARCHAR(20) NULL,
+        auth_subject_user_id BIGINT UNSIGNED NULL,
+        auth_subject_is_admin TINYINT(1) NOT NULL DEFAULT 0,
+        effective_actor_user_code VARCHAR(20) NULL,
+        effective_actor_user_id BIGINT UNSIGNED NULL,
+        is_impersonated TINYINT(1) NOT NULL DEFAULT 0,
+        impersonator_user_id BIGINT UNSIGNED NULL,
+        impersonated_user_id BIGINT UNSIGNED NULL,
+        impersonation_reason VARCHAR(255) NULL,
+        result ENUM('allowed','rejected') NOT NULL,
+        failure_code VARCHAR(80) NULL,
+        remote_ip VARCHAR(64) NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uq_v2_auth_imp_audit_uuid (audit_uuid),
+        KEY idx_v2_auth_imp_ep_time (endpoint_name, created_at),
+        KEY idx_v2_auth_imp_result_time (result, created_at),
+        KEY idx_v2_auth_imp_request (request_id),
+        KEY idx_v2_auth_imp_idem (idempotency_key)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  } catch (err) {
+    console.error('ensureV2AuthAuditTable failed:', getErrorMessage(err));
+  }
+}
+
 async function connectMySQL() {
   pool = mysql.createPool({
     host: MYSQL_HOST,
@@ -238,6 +289,7 @@ async function connectMySQL() {
 
   // Ensure existing deployments that predate updated_at have the column.
   await ensureStateStoreUpdatedAtColumn();
+  await ensureV2AuthAuditTable();
 
   // Debug: print current DB and columns to confirm schema matches expectations
   try {
@@ -481,7 +533,7 @@ function sendJson(res, statusCode, payload, req) {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-System-Version, X-Request-Id, X-Impersonate-User-Code, X-Impersonation-Reason',
     'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
     'Pragma': 'no-cache',
     'Expires': '0'
@@ -520,7 +572,7 @@ function sendStateSnapshot(res, snapshot, req) {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-System-Version, X-Request-Id, X-Impersonate-User-Code, X-Impersonation-Reason',
     'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
     'Pragma': 'no-cache',
     'Expires': '0'
@@ -690,6 +742,393 @@ function parseBearerToken(req) {
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   if (!match) return '';
   return String(match[1] || '').trim();
+}
+
+function encodeBase64Url(value) {
+  return Buffer.from(value)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function decodeBase64Url(value) {
+  const normalized = String(value || '')
+    .replace(/-/g, '+')
+    .replace(/_/g, '/');
+  const remainder = normalized.length % 4;
+  const padded = remainder === 0 ? normalized : `${normalized}${'='.repeat(4 - remainder)}`;
+  return Buffer.from(padded, 'base64').toString('utf8');
+}
+
+function signV2AccessTokenSegments(encodedHeader, encodedPayload) {
+  if (!V2_AUTH_TOKEN_SECRET) return '';
+  return createHmac('sha256', V2_AUTH_TOKEN_SECRET)
+    .update(`${encodedHeader}.${encodedPayload}`)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function issueV2AccessTokenForUser(user) {
+  if (!V2_AUTH_TOKEN_SECRET || !user?.userId) return null;
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const payload = {
+    iss: V2_AUTH_TOKEN_ISSUER,
+    sub: String(user.userId).trim(),
+    uid: String(user.id || '').trim() || null,
+    adm: !!user.isAdmin,
+    iat: nowSeconds,
+    exp: nowSeconds + V2_AUTH_TOKEN_TTL_SECONDS,
+    jti: randomUUID()
+  };
+  const encodedHeader = encodeBase64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const encodedPayload = encodeBase64Url(JSON.stringify(payload));
+  const signature = signV2AccessTokenSegments(encodedHeader, encodedPayload);
+
+  return {
+    tokenType: 'Bearer',
+    accessToken: `${encodedHeader}.${encodedPayload}.${signature}`,
+    issuer: V2_AUTH_TOKEN_ISSUER,
+    expiresAt: new Date(payload.exp * 1000).toISOString()
+  };
+}
+
+function parseSignedV2AccessToken(token) {
+  if (!V2_AUTH_TOKEN_SECRET) {
+    throw createApiError(401, 'Signed V2 access tokens are not enabled on this backend', 'SIGNED_TOKEN_NOT_ENABLED');
+  }
+
+  const parts = String(token || '').split('.');
+  if (parts.length !== 3) {
+    throw createApiError(401, 'Bearer token is not a valid signed V2 access token', 'INVALID_BEARER_TOKEN');
+  }
+
+  const [encodedHeader, encodedPayload, providedSignature] = parts;
+  const expectedSignature = signV2AccessTokenSegments(encodedHeader, encodedPayload);
+  const providedBuffer = Buffer.from(providedSignature);
+  const expectedBuffer = Buffer.from(expectedSignature);
+  if (
+    providedBuffer.length !== expectedBuffer.length
+    || !timingSafeEqual(providedBuffer, expectedBuffer)
+  ) {
+    throw createApiError(401, 'Bearer token signature is invalid', 'INVALID_BEARER_TOKEN');
+  }
+
+  let header;
+  let payload;
+  try {
+    header = JSON.parse(decodeBase64Url(encodedHeader));
+    payload = JSON.parse(decodeBase64Url(encodedPayload));
+  } catch {
+    throw createApiError(401, 'Bearer token could not be decoded', 'INVALID_BEARER_TOKEN');
+  }
+
+  if (header?.alg !== 'HS256' || header?.typ !== 'JWT') {
+    throw createApiError(401, 'Bearer token header is invalid', 'INVALID_BEARER_TOKEN');
+  }
+  if (payload?.iss !== V2_AUTH_TOKEN_ISSUER) {
+    throw createApiError(401, 'Bearer token issuer is invalid', 'INVALID_TOKEN_ISSUER');
+  }
+
+  const subjectUserCode = normalizeV2UserCode(payload?.sub);
+  if (!isValidV2UserCode(subjectUserCode)) {
+    throw createApiError(401, 'Bearer token subject is invalid', 'INVALID_TOKEN_SUBJECT');
+  }
+
+  const issuedAtSeconds = Number(payload?.iat || 0);
+  const expiresAtSeconds = Number(payload?.exp || 0);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(issuedAtSeconds) || !Number.isFinite(expiresAtSeconds) || expiresAtSeconds <= nowSeconds) {
+    throw createApiError(401, 'Bearer token is expired', 'TOKEN_EXPIRED');
+  }
+
+  return {
+    authMode: 'signed_token',
+    subjectUserCode,
+    subjectLegacyUserId: typeof payload?.uid === 'string' ? payload.uid.trim() || null : null,
+    subjectIsAdminFromToken: !!payload?.adm
+  };
+}
+
+async function loadLegacyUsersForAuth() {
+  const cachedUsersRaw = stateSnapshotCache?.snapshot?.state?.mlm_users;
+  if (typeof cachedUsersRaw === 'string') {
+    const parsed = safeParseJSON(cachedUsersRaw);
+    if (Array.isArray(parsed)) return parsed;
+  }
+
+  const usersRaw = await readStateKeyValue('mlm_users');
+  const parsed = typeof usersRaw === 'string' ? safeParseJSON(usersRaw) : [];
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+async function findLegacyUserByPublicUserId(userId) {
+  const normalizedUserId = normalizeV2UserCode(userId);
+  if (!normalizedUserId) return null;
+  const users = await loadLegacyUsersForAuth();
+  return users.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId) || null;
+}
+
+function isLegacyUserEligibleForV2Access(user) {
+  if (!user || !user.isActive) return false;
+  if (user.accountStatus === 'permanent_blocked') return false;
+  if (user.accountStatus === 'temp_blocked') {
+    const blockedUntil = user.blockedUntil ? new Date(user.blockedUntil) : null;
+    if (blockedUntil && !Number.isNaN(blockedUntil.getTime()) && blockedUntil.getTime() > Date.now()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function findActiveImpersonationSessionForAdmin(adminId) {
+  if (!adminId) return null;
+
+  const cachedSessionsRaw = stateSnapshotCache?.snapshot?.state?.mlm_impersonation;
+  if (typeof cachedSessionsRaw === 'string') {
+    const parsed = safeParseJSON(cachedSessionsRaw);
+    if (Array.isArray(parsed)) {
+      return parsed.find((session) => String(session?.adminId || '') === String(adminId) && !!session?.isActive) || null;
+    }
+  }
+
+  const sessionsRaw = await readStateKeyValue('mlm_impersonation');
+  const parsed = typeof sessionsRaw === 'string' ? safeParseJSON(sessionsRaw) : [];
+  if (!Array.isArray(parsed)) return null;
+  return parsed.find((session) => String(session?.adminId || '') === String(adminId) && !!session?.isActive) || null;
+}
+
+async function loadV2UsersByCodes(userCodes) {
+  if (!pool || !Array.isArray(userCodes) || userCodes.length === 0) return new Map();
+
+  const normalizedCodes = [...new Set(userCodes.map((value) => normalizeV2UserCode(value)).filter((value) => isValidV2UserCode(value)))];
+  if (normalizedCodes.length === 0) return new Map();
+
+  const placeholders = normalizedCodes.map(() => '?').join(', ');
+  const [rows] = await pool.execute(
+    `SELECT id, user_code
+     FROM v2_users
+     WHERE user_code IN (${placeholders})`,
+    normalizedCodes
+  );
+
+  const usersByCode = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    usersByCode.set(String(row.user_code), row);
+  }
+  return usersByCode;
+}
+
+function getRequestRemoteIp(req) {
+  const forwardedFor = getSingleHeaderValue(req, 'x-forwarded-for');
+  if (forwardedFor) {
+    return forwardedFor.split(',').map((item) => item.trim()).filter(Boolean)[0] || null;
+  }
+  return req?.socket?.remoteAddress || null;
+}
+
+async function writeV2AuthAuditEvent(event) {
+  if (!V2_AUTH_AUDIT_ENABLED || STORAGE_MODE !== 'mysql' || !pool) return;
+
+  try {
+    await pool.execute(
+      `INSERT INTO v2_auth_impersonation_audit
+        (audit_uuid, endpoint_name, request_id, idempotency_key, auth_mode,
+         auth_subject_user_code, auth_subject_user_id, auth_subject_is_admin,
+         effective_actor_user_code, effective_actor_user_id, is_impersonated,
+         impersonator_user_id, impersonated_user_id, impersonation_reason,
+         result, failure_code, remote_ip)
+       VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        randomUUID(),
+        String(event?.endpointName || '').slice(0, 80) || 'unknown_v2_endpoint',
+        event?.requestId ? String(event.requestId).slice(0, V2_REQUEST_ID_MAX_LENGTH) : null,
+        event?.idempotencyKey ? String(event.idempotencyKey).slice(0, 128) : null,
+        event?.authMode === 'signed_token' ? 'signed_token' : 'legacy_user_code',
+        event?.authSubjectUserCode ? String(event.authSubjectUserCode).slice(0, 20) : null,
+        Number.isFinite(Number(event?.authSubjectV2UserId)) ? Number(event.authSubjectV2UserId) : null,
+        event?.authSubjectIsAdmin ? 1 : 0,
+        event?.effectiveActorUserCode ? String(event.effectiveActorUserCode).slice(0, 20) : null,
+        Number.isFinite(Number(event?.effectiveActorV2UserId)) ? Number(event.effectiveActorV2UserId) : null,
+        event?.isImpersonated ? 1 : 0,
+        Number.isFinite(Number(event?.impersonatorV2UserId)) ? Number(event.impersonatorV2UserId) : null,
+        Number.isFinite(Number(event?.impersonatedV2UserId)) ? Number(event.impersonatedV2UserId) : null,
+        event?.impersonationReason ? String(event.impersonationReason).slice(0, V2_IMPERSONATION_REASON_MAX_LENGTH) : null,
+        event?.result === 'allowed' ? 'allowed' : 'rejected',
+        event?.failureCode ? String(event.failureCode).slice(0, 80) : null,
+        event?.remoteIp ? String(event.remoteIp).slice(0, 64) : null
+      ]
+    );
+  } catch (error) {
+    console.warn(`[v2-auth-audit] failed: ${getErrorMessage(error, 'Unknown error')}`);
+  }
+}
+
+async function resolveV2RequestAuthContext({
+  req,
+  endpointName,
+  requiredRole = 'user',
+  allowImpersonation = true
+}) {
+  const rawBearerToken = parseBearerToken(req);
+  const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key') || null;
+  const requestId = getSingleHeaderValue(req, 'x-request-id') || null;
+  const impersonateUserCode = normalizeV2UserCode(getSingleHeaderValue(req, 'x-impersonate-user-code'));
+  const impersonationReason = getSingleHeaderValue(req, 'x-impersonation-reason') || null;
+  const remoteIp = getRequestRemoteIp(req);
+
+  const rejectWithAudit = async (status, message, code, auditContext = {}) => {
+    await writeV2AuthAuditEvent({
+      endpointName,
+      requestId,
+      idempotencyKey,
+      remoteIp,
+      result: 'rejected',
+      failureCode: code,
+      ...auditContext
+    });
+    throw createApiError(status, message, code);
+  };
+
+  if (!rawBearerToken) {
+    await rejectWithAudit(401, 'Missing or invalid Bearer token', 'INVALID_BEARER_TOKEN');
+  }
+
+  let parsedAuth;
+  if (rawBearerToken.includes('.')) {
+    parsedAuth = parseSignedV2AccessToken(rawBearerToken);
+  } else if (V2_ALLOW_LEGACY_BEARER_USER_CODE && isValidV2UserCode(rawBearerToken)) {
+    parsedAuth = {
+      authMode: 'legacy_user_code',
+      subjectUserCode: normalizeV2UserCode(rawBearerToken),
+      subjectLegacyUserId: null,
+      subjectIsAdminFromToken: false
+    };
+  } else {
+    await rejectWithAudit(401, 'Missing or invalid Bearer token', 'INVALID_BEARER_TOKEN');
+  }
+
+  const subjectLegacyUser = await findLegacyUserByPublicUserId(parsedAuth.subjectUserCode);
+  if (!subjectLegacyUser) {
+    await rejectWithAudit(401, 'Bearer token subject user was not found', 'AUTH_SUBJECT_NOT_FOUND', {
+      authMode: parsedAuth.authMode,
+      authSubjectUserCode: parsedAuth.subjectUserCode
+    });
+  }
+
+  const subjectIsAdmin = !!subjectLegacyUser?.isAdmin;
+  if (!isLegacyUserEligibleForV2Access(subjectLegacyUser)) {
+    await rejectWithAudit(403, 'Bearer token subject user is not active', 'AUTH_SUBJECT_NOT_ACTIVE', {
+      authMode: parsedAuth.authMode,
+      authSubjectUserCode: parsedAuth.subjectUserCode
+    });
+  }
+
+  if (requiredRole === 'admin' && !subjectIsAdmin) {
+    await rejectWithAudit(403, 'Admin role is required for this endpoint', 'ADMIN_ROLE_REQUIRED', {
+      authMode: parsedAuth.authMode,
+      authSubjectUserCode: parsedAuth.subjectUserCode
+    });
+  }
+
+  let effectiveActorUserCode = parsedAuth.subjectUserCode;
+  let impersonatedLegacyUser = null;
+
+  if (impersonateUserCode) {
+    if (!allowImpersonation) {
+      await rejectWithAudit(403, 'Impersonation is not allowed on this endpoint', 'IMPERSONATION_NOT_ALLOWED', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+    if (!subjectIsAdmin) {
+      await rejectWithAudit(403, 'Only admin users may impersonate', 'IMPERSONATION_ADMIN_REQUIRED', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+    if (!requestId || requestId.length > V2_REQUEST_ID_MAX_LENGTH) {
+      await rejectWithAudit(400, `X-Request-Id is required and must be 1-${V2_REQUEST_ID_MAX_LENGTH} chars for impersonation`, 'IMPERSONATION_REQUEST_ID_REQUIRED', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+    if (!impersonationReason || impersonationReason.length > V2_IMPERSONATION_REASON_MAX_LENGTH) {
+      await rejectWithAudit(400, `X-Impersonation-Reason is required and must be 1-${V2_IMPERSONATION_REASON_MAX_LENGTH} chars`, 'IMPERSONATION_REASON_REQUIRED', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+
+    const activeSession = await findActiveImpersonationSessionForAdmin(subjectLegacyUser.id);
+    if (!activeSession) {
+      await rejectWithAudit(403, 'No active impersonation session found for admin user', 'IMPERSONATION_SESSION_NOT_ACTIVE', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+
+    impersonatedLegacyUser = await findLegacyUserByPublicUserId(impersonateUserCode);
+    if (!impersonatedLegacyUser) {
+      await rejectWithAudit(404, 'Impersonated user was not found', 'IMPERSONATED_USER_NOT_FOUND', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+
+    if (
+      String(activeSession.targetUserId || '') !== String(impersonatedLegacyUser.id)
+      || String(activeSession.adminId || '') !== String(subjectLegacyUser.id)
+    ) {
+      await rejectWithAudit(403, 'Active impersonation session does not match requested impersonated user', 'IMPERSONATION_TARGET_MISMATCH', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+
+    effectiveActorUserCode = impersonateUserCode;
+  }
+
+  const v2UsersByCode = await loadV2UsersByCodes(
+    impersonatedLegacyUser
+      ? [parsedAuth.subjectUserCode, effectiveActorUserCode]
+      : [parsedAuth.subjectUserCode]
+  );
+
+  const subjectV2User = v2UsersByCode.get(parsedAuth.subjectUserCode) || null;
+  const effectiveActorV2User = v2UsersByCode.get(effectiveActorUserCode) || subjectV2User;
+
+  await writeV2AuthAuditEvent({
+    endpointName,
+    requestId,
+    idempotencyKey,
+    remoteIp,
+    authMode: parsedAuth.authMode,
+    authSubjectUserCode: parsedAuth.subjectUserCode,
+    authSubjectV2UserId: subjectV2User?.id || null,
+    authSubjectIsAdmin: subjectIsAdmin,
+    effectiveActorUserCode,
+    effectiveActorV2UserId: effectiveActorV2User?.id || null,
+    isImpersonated: !!impersonatedLegacyUser,
+    impersonatorV2UserId: subjectV2User?.id || null,
+    impersonatedV2UserId: impersonatedLegacyUser ? (effectiveActorV2User?.id || null) : null,
+    impersonationReason,
+    result: 'allowed'
+  });
+
+  return {
+    actorUserCode: effectiveActorUserCode,
+    authMode: parsedAuth.authMode,
+    authSubjectUserCode: parsedAuth.subjectUserCode,
+    authSubjectIsAdmin: subjectIsAdmin,
+    isImpersonated: !!impersonatedLegacyUser,
+    requestId,
+    impersonationReason
+  };
 }
 
 function stableSerialize(value) {
@@ -3575,7 +4014,19 @@ const server = createServer(async (req, res) => {
         sendJson(res, result.status, { ok: false, error: result.error });
         return;
       }
-      sendJson(res, 200, { ok: true, user: result.user });
+      sendJson(res, 200, {
+        ok: true,
+        user: result.user,
+        v2Auth: issueV2AccessTokenForUser(result.user) || {
+          tokenType: 'Bearer',
+          accessToken: null,
+          issuer: V2_AUTH_TOKEN_ISSUER,
+          expiresAt: null,
+          note: V2_ALLOW_LEGACY_BEARER_USER_CODE
+            ? 'Signed V2 auth token unavailable; legacy Bearer userCode compatibility remains enabled'
+            : 'Signed V2 auth token unavailable because V2_AUTH_TOKEN_SECRET is not configured'
+        }
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid request body';
       sendJson(res, 400, { ok: false, error: message });
@@ -3585,14 +4036,15 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/api/v2/fund-transfers') {
     try {
-      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
-      if (!isValidV2UserCode(actorUserCode)) {
-        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
-        return;
-      }
-
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_FUND_TRANSFER_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+      const actorUserCode = authContext.actorUserCode;
       const senderUserCode = normalizeV2UserCode(parsed?.senderUserCode);
       const receiverUserCode = normalizeV2UserCode(parsed?.receiverUserCode);
       const amountCentsRaw = Number(parsed?.amountCents);
@@ -3672,14 +4124,15 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/api/v2/withdrawals') {
     try {
-      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
-      if (!isValidV2UserCode(actorUserCode)) {
-        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
-        return;
-      }
-
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_WITHDRAWAL_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+      const actorUserCode = authContext.actorUserCode;
       const amountCentsRaw = Number(parsed?.amountCents);
       const amountCents = Number.isFinite(amountCentsRaw) ? Math.trunc(amountCentsRaw) : NaN;
       const destinationType = String(parsed?.destinationType || '').trim().toLowerCase();
@@ -3733,14 +4186,15 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/api/v2/pins/purchase') {
     try {
-      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
-      if (!isValidV2UserCode(actorUserCode)) {
-        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
-        return;
-      }
-
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_PIN_PURCHASE_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+      const actorUserCode = authContext.actorUserCode;
       const buyerUserCode = normalizeV2UserCode(parsed?.buyerUserCode || actorUserCode);
       const quantityRaw = Number(parsed?.quantity);
       const quantity = Number.isFinite(quantityRaw) ? quantityRaw : NaN;
@@ -3817,14 +4271,15 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/api/v2/referrals/credit') {
     try {
-      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
-      if (!isValidV2UserCode(actorUserCode)) {
-        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
-        return;
-      }
-
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_REFERRAL_CREDIT_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+      const actorUserCode = authContext.actorUserCode;
       const sourceUserCode = normalizeV2UserCode(parsed?.sourceUserCode);
       const beneficiaryUserCode = normalizeV2UserCode(parsed?.beneficiaryUserCode);
       const eventType = String(parsed?.eventType || '').trim().toLowerCase();
@@ -3912,14 +4367,15 @@ const server = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/api/v2/admin/adjustments') {
     try {
-      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
-      if (!isValidV2UserCode(actorUserCode)) {
-        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
-        return;
-      }
-
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME,
+        requiredRole: 'admin',
+        allowImpersonation: false
+      });
+      const actorUserCode = authContext.actorUserCode;
       const targetUserCode = normalizeV2UserCode(parsed?.targetUserCode);
       const approverUserCode = normalizeV2UserCode(parsed?.approverUserCode);
       const walletType = String(parsed?.walletType || '').trim().toLowerCase();
@@ -4355,6 +4811,14 @@ async function start() {
       `legacyFinancialWritesEnabled=${LEGACY_FINANCIAL_WRITES_ENABLED}`,
       `requireSystemVersion=${REQUIRE_SYSTEM_VERSION_HEADER}`,
       `requireIdempotency=${REQUIRE_IDEMPOTENCY_FOR_MUTATIONS}`
+    );
+    console.log(
+      'V2 auth flags:',
+      `signedTokenEnabled=${!!V2_AUTH_TOKEN_SECRET}`,
+      `legacyBearerCompat=${V2_ALLOW_LEGACY_BEARER_USER_CODE}`,
+      `auditEnabled=${V2_AUTH_AUDIT_ENABLED}`,
+      `issuer=${V2_AUTH_TOKEN_ISSUER}`,
+      `ttlSeconds=${V2_AUTH_TOKEN_TTL_SECONDS}`
     );
     const smtpErrors = getSmtpConfigErrors();
     if (smtpErrors.length === 0) {

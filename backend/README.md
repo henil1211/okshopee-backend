@@ -51,6 +51,44 @@ npm run dev
 - `POST /api/v2/withdrawals`
 - `POST /api/v2/admin/adjustments`
 
+## V2 auth tokens and impersonation audit
+
+`POST /api/auth/login` now returns a `v2Auth` object when `V2_AUTH_TOKEN_SECRET` is configured:
+
+```json
+{
+  "ok": true,
+  "user": { "...": "..." },
+  "v2Auth": {
+    "tokenType": "Bearer",
+    "accessToken": "<signed-token>",
+    "issuer": "matrixmlm-backend",
+    "expiresAt": "2026-04-16T18:30:00.000Z"
+  }
+}
+```
+
+Recommended env vars for V2 auth:
+
+```env
+V2_AUTH_TOKEN_SECRET=replace-with-long-random-secret
+V2_AUTH_TOKEN_ISSUER=matrixmlm-backend
+V2_AUTH_TOKEN_TTL_SECONDS=3600
+V2_ALLOW_LEGACY_BEARER_USER_CODE=true
+V2_AUTH_AUDIT_ENABLED=true
+```
+
+Notes:
+- When `V2_AUTH_TOKEN_SECRET` is set, V2 endpoints accept signed Bearer tokens issued by `/api/auth/login`.
+- While `V2_ALLOW_LEGACY_BEARER_USER_CODE=true`, old smoke scripts that send `Authorization: Bearer <userCode>` continue to work for transition.
+- All V2 mutating endpoints now write auth/impersonation audit rows into `v2_auth_impersonation_audit`.
+- Impersonated V2 requests require:
+  - `X-Impersonate-User-Code`
+  - `X-Impersonation-Reason`
+  - `X-Request-Id`
+  - an active session in `mlm_impersonation` for the admin user
+- Apply migration `backend/scripts/migrations/003_v2_auth_impersonation_audit.sql` for explicit deployment parity, although the backend also bootstraps this table automatically when MySQL is available.
+
 Example request:
 ```bash
 curl -X POST http://127.0.0.1:4000/api/send-mail \
@@ -384,6 +422,32 @@ Expected result:
 - Exit code `0`
 - No `5xx` responses
 - No `TX_RETRY_EXHAUSTED` in report
+
+## V2 auth/authz verification smoke test
+
+This verifies the upgraded V2 auth layer is enforcing:
+- invalid Bearer token rejection
+- actor mismatch rejection for self-service endpoints
+- admin-role requirement on admin adjustments
+
+Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\backend\scripts\smoke-test-v2-auth-impersonation.ps1 \
+  -BackendUrl http://127.0.0.1:4000 \
+  -UserId 1000001 \
+  -Password your_login_password \
+  -OtherUserCode 2000002 \
+  -AdminApproverUserCode 3000003
+```
+
+Expected result:
+- Exit code `0`
+- `invalid-bearer-token` => `401 INVALID_BEARER_TOKEN`
+- `fund-transfer-actor-mismatch` => `403 ACTOR_SENDER_MISMATCH`
+- `pin-purchase-actor-mismatch` => `403 ACTOR_BUYER_MISMATCH`
+- `referral-credit-actor-mismatch` => `403 ACTOR_SOURCE_MISMATCH`
+- `admin-adjustment-admin-role-required` => `403 ADMIN_ROLE_REQUIRED`
 
 ## Storage Model
 Data is stored as real documents in separate MongoDB collections, including:
