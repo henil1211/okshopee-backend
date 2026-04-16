@@ -45,6 +45,7 @@ npm run dev
 - `POST /api/state`
 - `GET /api/admin-audit`
 - `POST /api/send-mail`
+- `POST /api/v2/fund-transfers`
 
 Example request:
 ```bash
@@ -52,6 +53,53 @@ curl -X POST http://127.0.0.1:4000/api/send-mail \
   -H "Content-Type: application/json" \
   -d "{\"to\":\"receiver@example.com\",\"subject\":\"SMTP test\",\"text\":\"Email sent from backend SMTP\"}"
 ```
+
+## V2 fund transfer endpoint
+
+Before using `POST /api/v2/fund-transfers`:
+
+1. Set env flags:
+```env
+STORAGE_MODE=mysql
+FINANCE_ENGINE_MODE=v2
+LEGACY_FINANCIAL_WRITES_ENABLED=false
+REQUIRE_IDEMPOTENCY_FOR_MUTATIONS=true
+REQUIRE_SYSTEM_VERSION_HEADER=true
+```
+2. Apply migration: `backend/scripts/migrations/001_v2_finance_core.sql`
+3. Ensure `v2_users` and `v2_wallet_accounts` are seeded for both sender and receiver.
+
+Request headers:
+- `Authorization: Bearer <actorUserCode>`
+- `X-System-Version: v2`
+- `Idempotency-Key: <unique-per-logical-request>`
+- `Content-Type: application/json`
+
+Request body example:
+```json
+{
+  "senderUserCode": "1000001",
+  "receiverUserCode": "2000002",
+  "amountCents": 5000,
+  "referenceId": "ft-2026-04-16-001",
+  "description": "Fund transfer"
+}
+```
+
+Smoke-test example:
+```bash
+curl -X POST http://127.0.0.1:4000/api/v2/fund-transfers \
+  -H "Authorization: Bearer 1000001" \
+  -H "X-System-Version: v2" \
+  -H "Idempotency-Key: ft-1000001-2000002-5000-001" \
+  -H "Content-Type: application/json" \
+  -d "{\"senderUserCode\":\"1000001\",\"receiverUserCode\":\"2000002\",\"amountCents\":5000,\"referenceId\":\"ft-2026-04-16-001\",\"description\":\"Fund transfer\"}"
+```
+
+Idempotency behavior:
+- First request: posts ledger transaction and updates wallets.
+- Same key + same payload: returns previous success response with `idempotentReplay: true`.
+- Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
 
 ## Storage Model
 Data is stored as real documents in separate MongoDB collections, including:

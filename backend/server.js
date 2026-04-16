@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { gzip as zlibGzip } from 'node:zlib';
 import { promisify } from 'node:util';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +45,16 @@ const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || '';
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'okshopee24';
 const AUTH_MAINTENANCE_ENABLED = process.env.AUTH_MAINTENANCE_ENABLED !== 'false';
 const AUTH_MAINTENANCE_MESSAGE = process.env.AUTH_MAINTENANCE_MESSAGE || 'System in under Maintainance for 72 hours, Try Again After 72 hours';
+const FINANCE_ENGINE_MODE = String(process.env.FINANCE_ENGINE_MODE || 'legacy').toLowerCase();
+const LEGACY_FINANCIAL_WRITES_ENABLED = process.env.LEGACY_FINANCIAL_WRITES_ENABLED
+  ? process.env.LEGACY_FINANCIAL_WRITES_ENABLED === 'true'
+  : FINANCE_ENGINE_MODE !== 'v2';
+const REQUIRE_IDEMPOTENCY_FOR_MUTATIONS = process.env.REQUIRE_IDEMPOTENCY_FOR_MUTATIONS
+  ? process.env.REQUIRE_IDEMPOTENCY_FOR_MUTATIONS === 'true'
+  : FINANCE_ENGINE_MODE === 'v2';
+const REQUIRE_SYSTEM_VERSION_HEADER = process.env.REQUIRE_SYSTEM_VERSION_HEADER
+  ? process.env.REQUIRE_SYSTEM_VERSION_HEADER === 'true'
+  : FINANCE_ENGINE_MODE === 'v2';
 
 const SMTP_HOST = process.env.SMTP_HOST || '';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
@@ -111,6 +122,20 @@ const DB_KEYS = [
 ];
 
 const DB_KEYS_SET = new Set(DB_KEYS);
+const LEGACY_FINANCIAL_STATE_KEYS = new Set([
+  'mlm_wallets',
+  'mlm_transactions',
+  'mlm_safety_pool',
+  'mlm_payments',
+  'mlm_pins',
+  'mlm_pin_transfers',
+  'mlm_pin_purchase_requests',
+  'mlm_help_trackers',
+  'mlm_matrix_pending_contributions'
+]);
+const MUTATING_HTTP_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const V2_FUND_TRANSFER_ENDPOINT_NAME = 'v2_fund_transfer';
+const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 
 // ─── MySQL connection pool ───────────────────────────────────────────
 let pool;
@@ -521,6 +546,358 @@ function sanitizeIncomingState(input) {
     if (typeof value === 'string') out[key] = value;
   }
   return out;
+}
+
+function getIncomingFinancialStateKeys(incomingState) {
+  if (!incomingState || typeof incomingState !== 'object') return [];
+  const keys = [];
+  for (const key of Object.keys(incomingState)) {
+    if (!LEGACY_FINANCIAL_STATE_KEYS.has(key)) continue;
+    if (typeof incomingState[key] === 'string') {
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+function getSingleHeaderValue(req, headerName) {
+  const value = req?.headers?.[headerName];
+  if (Array.isArray(value)) return String(value[0] || '').trim();
+  return String(value || '').trim();
+}
+
+function validateV2MutationHeaders(req, url) {
+  const method = String(req?.method || '').toUpperCase();
+  if (!MUTATING_HTTP_METHODS.has(method)) return null;
+  if (!String(url?.pathname || '').startsWith('/api/v2/')) return null;
+
+  if (REQUIRE_SYSTEM_VERSION_HEADER) {
+    const systemVersion = getSingleHeaderValue(req, 'x-system-version').toLowerCase();
+    if (systemVersion !== 'v2') {
+      return {
+        status: 400,
+        error: 'Missing or invalid X-System-Version header. Expected: v2',
+        code: 'INVALID_SYSTEM_VERSION'
+      };
+    }
+  }
+
+  if (REQUIRE_IDEMPOTENCY_FOR_MUTATIONS) {
+    const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
+    if (!idempotencyKey) {
+      return {
+        status: 400,
+        error: 'Missing required Idempotency-Key header',
+        code: 'MISSING_IDEMPOTENCY_KEY'
+      };
+    }
+  }
+
+  return null;
+}
+
+function isValidV2UserCode(value) {
+  const normalized = String(value || '').trim();
+  return /^[a-zA-Z0-9_-]{3,20}$/.test(normalized);
+}
+
+function normalizeV2UserCode(value) {
+  return String(value || '').trim();
+}
+
+function parseBearerToken(req) {
+  const authHeader = getSingleHeaderValue(req, 'authorization');
+  if (!authHeader) return '';
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) return '';
+  return String(match[1] || '').trim();
+}
+
+function stableSerialize(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(',')}]`;
+  }
+
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    const entries = keys.map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`);
+    return `{${entries.join(',')}}`;
+  }
+
+  return JSON.stringify(value);
+}
+
+function buildV2RequestHash(payload) {
+  const canonical = stableSerialize(payload);
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
+function createApiError(status, message, code) {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
+}
+
+function parseIdempotencyResponseBody(responseBody) {
+  if (!responseBody) return null;
+  if (typeof responseBody === 'object') return responseBody;
+  if (typeof responseBody !== 'string') return null;
+  try {
+    return JSON.parse(responseBody);
+  } catch {
+    return null;
+  }
+}
+
+async function processV2FundTransfer({
+  idempotencyKey,
+  actorUserCode,
+  senderUserCode,
+  receiverUserCode,
+  amountCents,
+  referenceId,
+  description
+}) {
+  if (STORAGE_MODE !== 'mysql') {
+    throw createApiError(503, 'V2 financial APIs require STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
+  }
+
+  if (FINANCE_ENGINE_MODE !== 'v2') {
+    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/fund-transfers', 'FINANCE_MODE_MISMATCH');
+  }
+
+  if (!pool) {
+    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
+  }
+
+  const requestHash = buildV2RequestHash({
+    endpoint: V2_FUND_TRANSFER_ENDPOINT_NAME,
+    actorUserCode,
+    senderUserCode,
+    receiverUserCode,
+    amountCents,
+    referenceId,
+    description
+  });
+
+  const connection = await pool.getConnection();
+  let transactionOpen = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionOpen = true;
+
+    const [actorRows] = await connection.execute(
+      `SELECT id, user_code, status
+       FROM v2_users
+       WHERE user_code = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [actorUserCode]
+    );
+    const actor = Array.isArray(actorRows) ? actorRows[0] : null;
+    if (!actor) {
+      throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
+    }
+    if (actor.status !== 'active') {
+      throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
+    }
+
+    const [idemRows] = await connection.execute(
+      `SELECT idempotency_key, request_hash, status, response_code, response_body, locked_until
+       FROM v2_idempotency_keys
+       WHERE idempotency_key = ?
+       FOR UPDATE`,
+      [idempotencyKey]
+    );
+    const existingIdem = Array.isArray(idemRows) && idemRows.length > 0 ? idemRows[0] : null;
+
+    if (existingIdem) {
+      if (existingIdem.request_hash !== requestHash) {
+        throw createApiError(409, 'Idempotency key reused with different payload', 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+      }
+
+      if (existingIdem.status === 'completed') {
+        const replayPayload = parseIdempotencyResponseBody(existingIdem.response_body) || { ok: true };
+        await connection.commit();
+        transactionOpen = false;
+        return {
+          status: Number(existingIdem.response_code) || 200,
+          payload: { ...replayPayload, idempotentReplay: true }
+        };
+      }
+
+      const lockExpiresAt = existingIdem.locked_until ? new Date(existingIdem.locked_until).getTime() : 0;
+      if (existingIdem.status === 'processing' && Number.isFinite(lockExpiresAt) && lockExpiresAt > Date.now()) {
+        throw createApiError(409, 'Request with this Idempotency-Key is already processing', 'IDEMPOTENCY_IN_PROGRESS');
+      }
+
+      await connection.execute(
+        `UPDATE v2_idempotency_keys
+         SET endpoint_name = ?, actor_user_id = ?, request_hash = ?, status = 'processing',
+             locked_until = DATE_ADD(NOW(3), INTERVAL ? SECOND), error_code = NULL,
+             updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [V2_FUND_TRANSFER_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS, idempotencyKey]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_idempotency_keys
+          (idempotency_key, endpoint_name, actor_user_id, request_hash, status, locked_until)
+         VALUES
+          (?, ?, ?, ?, 'processing', DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
+        [idempotencyKey, V2_FUND_TRANSFER_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
+      );
+    }
+
+    const [walletRows] = await connection.execute(
+      `SELECT
+         wa.id,
+         wa.user_id,
+         wa.wallet_type,
+         wa.current_amount_cents,
+         wa.gl_account_id,
+         u.user_code,
+         u.status AS user_status
+       FROM v2_wallet_accounts wa
+       INNER JOIN v2_users u ON u.id = wa.user_id
+       WHERE u.user_code IN (?, ?) AND wa.wallet_type = 'fund'
+       ORDER BY wa.id
+       FOR UPDATE`,
+      [senderUserCode, receiverUserCode]
+    );
+
+    const senderWallet = Array.isArray(walletRows)
+      ? walletRows.find((row) => row.user_code === senderUserCode)
+      : null;
+    const receiverWallet = Array.isArray(walletRows)
+      ? walletRows.find((row) => row.user_code === receiverUserCode)
+      : null;
+
+    if (!senderWallet || !receiverWallet) {
+      throw createApiError(404, 'Sender or receiver fund wallet is not provisioned in v2', 'V2_WALLET_NOT_FOUND');
+    }
+    if (senderWallet.user_status !== 'active' || receiverWallet.user_status !== 'active') {
+      throw createApiError(403, 'Sender or receiver account is not active', 'USER_NOT_ACTIVE');
+    }
+    if (Number(senderWallet.current_amount_cents) < amountCents) {
+      throw createApiError(409, 'Insufficient fund wallet balance', 'INSUFFICIENT_FUNDS');
+    }
+
+    const txUuid = randomUUID();
+    const reference = referenceId || `${senderUserCode}->${receiverUserCode}`;
+
+    const [ledgerTxnResult] = await connection.execute(
+      `INSERT INTO v2_ledger_transactions
+        (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
+         reference_type, reference_id, description, total_debit_cents, total_credit_cents)
+       VALUES
+        (?, 'v2', 'fund_transfer', 'posted', ?, ?,
+         'fund_transfer', ?, ?, ?, ?)`,
+      [
+        txUuid,
+        idempotencyKey,
+        actor.id,
+        String(reference).slice(0, 80),
+        description,
+        amountCents,
+        amountCents
+      ]
+    );
+
+    const ledgerTxnId = Number(ledgerTxnResult?.insertId || 0);
+    if (!ledgerTxnId) {
+      throw createApiError(500, 'Failed to create ledger transaction', 'LEDGER_TXN_CREATE_FAILED');
+    }
+
+    await connection.execute(
+      `INSERT INTO v2_ledger_entries
+        (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+       VALUES
+        (?, 1, ?, ?, 'fund', 'debit', ?),
+        (?, 2, ?, ?, 'fund', 'credit', ?)`,
+      [
+        ledgerTxnId,
+        senderWallet.gl_account_id,
+        senderWallet.user_id,
+        amountCents,
+        ledgerTxnId,
+        receiverWallet.gl_account_id,
+        receiverWallet.user_id,
+        amountCents
+      ]
+    );
+
+    const [senderUpdateResult] = await connection.execute(
+      `UPDATE v2_wallet_accounts
+       SET current_amount_cents = current_amount_cents - ?, version = version + 1
+       WHERE user_id = ? AND wallet_type = 'fund' AND current_amount_cents >= ?`,
+      [amountCents, senderWallet.user_id, amountCents]
+    );
+    if (Number(senderUpdateResult?.affectedRows || 0) !== 1) {
+      throw createApiError(409, 'Insufficient fund wallet balance', 'INSUFFICIENT_FUNDS');
+    }
+
+    const [receiverUpdateResult] = await connection.execute(
+      `UPDATE v2_wallet_accounts
+       SET current_amount_cents = current_amount_cents + ?, version = version + 1
+       WHERE user_id = ? AND wallet_type = 'fund'`,
+      [amountCents, receiverWallet.user_id]
+    );
+    if (Number(receiverUpdateResult?.affectedRows || 0) !== 1) {
+      throw createApiError(500, 'Failed to credit receiver wallet', 'RECEIVER_WALLET_UPDATE_FAILED');
+    }
+
+    const responsePayload = {
+      ok: true,
+      txUuid,
+      ledgerTransactionId: ledgerTxnId,
+      senderUserCode,
+      receiverUserCode,
+      amountCents,
+      postedAt: new Date().toISOString()
+    };
+
+    await connection.execute(
+      `UPDATE v2_idempotency_keys
+       SET status = 'completed', response_code = ?, response_body = ?,
+           locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+       WHERE idempotency_key = ?`,
+      [200, JSON.stringify(responsePayload), idempotencyKey]
+    );
+
+    await connection.commit();
+    transactionOpen = false;
+    return { status: 200, payload: responsePayload };
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        await connection.rollback();
+      } catch {
+        // Ignore rollback secondary errors.
+      }
+    }
+
+    const shouldMarkFailed = !!idempotencyKey && !!pool;
+    if (shouldMarkFailed) {
+      try {
+        await pool.execute(
+          `UPDATE v2_idempotency_keys
+           SET status = 'failed', error_code = ?, locked_until = NULL,
+               updated_at = NOW(3), last_seen_at = NOW(3)
+           WHERE idempotency_key = ?`,
+          [String(error?.code || 'UNKNOWN_V2_ERROR').slice(0, 80), idempotencyKey]
+        );
+      } catch {
+        // Keep the primary error as source of truth.
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 function getStateArrayLength(state, key) {
@@ -1507,6 +1884,16 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  const v2HeaderValidationError = validateV2MutationHeaders(req, url);
+  if (v2HeaderValidationError) {
+    sendJson(res, v2HeaderValidationError.status, {
+      ok: false,
+      error: v2HeaderValidationError.error,
+      code: v2HeaderValidationError.code
+    });
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname.startsWith('/uploads/')) {
     await serveUploadedFile(req, res, url);
     return;
@@ -1576,12 +1963,93 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/v2/fund-transfers') {
+    try {
+      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
+      if (!isValidV2UserCode(actorUserCode)) {
+        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
+        return;
+      }
+
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const senderUserCode = normalizeV2UserCode(parsed?.senderUserCode);
+      const receiverUserCode = normalizeV2UserCode(parsed?.receiverUserCode);
+      const amountCentsRaw = Number(parsed?.amountCents);
+      const amountCents = Number.isFinite(amountCentsRaw) ? Math.trunc(amountCentsRaw) : NaN;
+      const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
+      const referenceId = typeof parsed?.referenceId === 'string' ? parsed.referenceId.trim() : '';
+      const description = typeof parsed?.description === 'string' ? parsed.description.trim().slice(0, 255) : null;
+
+      if (!isValidV2UserCode(senderUserCode) || !isValidV2UserCode(receiverUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'senderUserCode and receiverUserCode are required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (senderUserCode === receiverUserCode) {
+        sendJson(res, 400, { ok: false, error: 'senderUserCode and receiverUserCode must be different', code: 'SELF_TRANSFER_NOT_ALLOWED' });
+        return;
+      }
+      if (senderUserCode !== actorUserCode) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Actor is only allowed to transfer from their own senderUserCode',
+          code: 'ACTOR_SENDER_MISMATCH'
+        });
+        return;
+      }
+      if (!Number.isFinite(amountCents) || amountCents <= 0) {
+        sendJson(res, 400, { ok: false, error: 'amountCents must be a positive integer', code: 'INVALID_AMOUNT' });
+        return;
+      }
+      if (!idempotencyKey) {
+        sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
+        return;
+      }
+
+      const result = await processV2FundTransfer({
+        idempotencyKey,
+        actorUserCode,
+        senderUserCode,
+        receiverUserCode,
+        amountCents,
+        referenceId,
+        description
+      });
+
+      sendJson(res, result.status, result.payload);
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to process fund transfer');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || 'V2_FUND_TRANSFER_FAILED'
+      });
+    }
+    return;
+  }
+
   // POST state
   if (req.method === 'POST' && url.pathname === '/api/state') {
     try {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
       const incomingState = sanitizeIncomingState(parsed?.state);
+      const blockedFinancialKeys = getIncomingFinancialStateKeys(incomingState);
+      if (FINANCE_ENGINE_MODE === 'v2' && !LEGACY_FINANCIAL_WRITES_ENABLED && blockedFinancialKeys.length > 0) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Legacy financial writes are blocked while FINANCE_ENGINE_MODE=v2',
+          code: 'LEGACY_FINANCIAL_WRITE_BLOCKED',
+          blockedKeys: blockedFinancialKeys
+        });
+        return;
+      }
+
       const incomingBaseUpdatedAt = typeof parsed?.baseUpdatedAt === 'string' ? parsed.baseUpdatedAt : null;
       const incomingUsersCount = getStateArrayLength(incomingState, 'mlm_users');
       const forceWrite = url.searchParams.get('force') === '1';
@@ -1814,6 +2282,15 @@ const server = createServer(async (req, res) => {
 
   // Cleanup for rebuild
   if (req.method === 'POST' && url.pathname === '/api/cleanup-for-rebuild') {
+    if (FINANCE_ENGINE_MODE === 'v2') {
+      sendJson(res, 403, {
+        ok: false,
+        error: 'Cleanup for rebuild is disabled when FINANCE_ENGINE_MODE=v2',
+        code: 'CLEANUP_DISABLED_IN_V2'
+      });
+      return;
+    }
+
     try {
       const now = new Date().toISOString();
       const snapshot = await readStateFromDB();
@@ -1882,6 +2359,13 @@ async function start() {
     } else {
       console.log(`MySQL: ${MYSQL_USER}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}`);
     }
+    console.log(
+      'Finance flags:',
+      `mode=${FINANCE_ENGINE_MODE}`,
+      `legacyFinancialWritesEnabled=${LEGACY_FINANCIAL_WRITES_ENABLED}`,
+      `requireSystemVersion=${REQUIRE_SYSTEM_VERSION_HEADER}`,
+      `requireIdempotency=${REQUIRE_IDEMPOTENCY_FOR_MUTATIONS}`
+    );
     const smtpErrors = getSmtpConfigErrors();
     if (smtpErrors.length === 0) {
       console.log(`SMTP ready: host=${SMTP_HOST} port=${SMTP_PORT} secure=${SMTP_SECURE} from=${SMTP_FROM}`);
