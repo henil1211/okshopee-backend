@@ -46,6 +46,7 @@ npm run dev
 - `GET /api/admin-audit`
 - `POST /api/send-mail`
 - `POST /api/v2/fund-transfers`
+- `POST /api/v2/withdrawals`
 
 Example request:
 ```bash
@@ -98,6 +99,53 @@ curl -X POST http://127.0.0.1:4000/api/v2/fund-transfers \
 
 Idempotency behavior:
 - First request: posts ledger transaction and updates wallets.
+- Same key + same payload: returns previous success response with `idempotentReplay: true`.
+- Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
+
+## V2 withdrawals endpoint
+
+Before using `POST /api/v2/withdrawals`:
+
+1. Set env flags:
+```env
+STORAGE_MODE=mysql
+FINANCE_ENGINE_MODE=v2
+LEGACY_FINANCIAL_WRITES_ENABLED=false
+REQUIRE_IDEMPOTENCY_FOR_MUTATIONS=true
+REQUIRE_SYSTEM_VERSION_HEADER=true
+```
+2. Apply migration: `backend/scripts/migrations/001_v2_finance_core.sql`
+3. Ensure actor user exists in `v2_users` and has an `income` wallet in `v2_wallet_accounts`.
+
+Request headers:
+- `Authorization: Bearer <actorUserCode>`
+- `X-System-Version: v2`
+- `Idempotency-Key: <unique-per-logical-request>`
+- `Content-Type: application/json`
+
+Request body example:
+```json
+{
+  "amountCents": 15000,
+  "destinationType": "upi",
+  "destinationRef": "name@bank",
+  "referenceId": "wd-2026-04-16-001",
+  "description": "User withdrawal"
+}
+```
+
+Smoke-test example:
+```bash
+curl -X POST http://127.0.0.1:4000/api/v2/withdrawals \
+  -H "Authorization: Bearer 1000001" \
+  -H "X-System-Version: v2" \
+  -H "Idempotency-Key: wd-1000001-15000-001" \
+  -H "Content-Type: application/json" \
+  -d "{\"amountCents\":15000,\"destinationType\":\"upi\",\"destinationRef\":\"name@bank\",\"referenceId\":\"wd-2026-04-16-001\",\"description\":\"User withdrawal\"}"
+```
+
+Idempotency behavior:
+- First request: posts ledger transaction and debits actor `income` wallet.
 - Same key + same payload: returns previous success response with `idempotentReplay: true`.
 - Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
 
