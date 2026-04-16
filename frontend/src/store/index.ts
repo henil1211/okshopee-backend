@@ -33,6 +33,8 @@ function resolveCanonicalUserForWalletActions(userRef: string): User | undefined
 }
 
 const WALLET_MAINTENANCE_INTERVAL_MS = 30_000;
+const AUTH_MAINTENANCE_ENABLED = true;
+const AUTH_MAINTENANCE_MESSAGE = 'System in under Maintainance for 72 hours, Try Again After 72 hours';
 const AUTO_WALLET_MAINTENANCE_ENABLED = (() => {
   const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
   const configured = typeof env.VITE_ENABLE_AUTO_WALLET_MAINTENANCE === 'string'
@@ -270,6 +272,14 @@ interface AuthState {
 function evaluateUserAccess(user: User): { allowed: boolean; user: User; message?: string } {
   let resolvedUser = Database.getUserByUserId(user.userId) || Database.getUserById(user.id) || user;
 
+  if (AUTH_MAINTENANCE_ENABLED && !resolvedUser.isAdmin) {
+    return {
+      allowed: false,
+      user: resolvedUser,
+      message: AUTH_MAINTENANCE_MESSAGE
+    };
+  }
+
   if (resolvedUser.accountStatus === 'permanent_blocked') {
     return {
       allowed: false,
@@ -500,6 +510,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   register: async (userData: RegisterData) => {
+    const actingUser = get().user;
+    if (AUTH_MAINTENANCE_ENABLED && !actingUser?.isAdmin) {
+      return { success: false, message: AUTH_MAINTENANCE_MESSAGE };
+    }
+
     await Database.ensureFreshData({
       keys: Database.getRegistrationFreshDataKeys(),
       timeoutMs: 10000,

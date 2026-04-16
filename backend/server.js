@@ -42,6 +42,8 @@ const MYSQL_PORT = Number(process.env.MYSQL_PORT || 3306);
 const MYSQL_USER = process.env.MYSQL_USER || 'root';
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || '';
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'okshopee24';
+const AUTH_MAINTENANCE_ENABLED = process.env.AUTH_MAINTENANCE_ENABLED !== 'false';
+const AUTH_MAINTENANCE_MESSAGE = process.env.AUTH_MAINTENANCE_MESSAGE || 'System in under Maintainance for 72 hours, Try Again After 72 hours';
 
 const SMTP_HOST = process.env.SMTP_HOST || '';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
@@ -787,6 +789,10 @@ async function authenticateUser(userId, password) {
       return { ok: false, status: 500, error: 'Failed to parse user data' };
     }
     if (!user) return { ok: false, status: 404, error: 'User ID not found' };
+  }
+
+  if (AUTH_MAINTENANCE_ENABLED && !user.isAdmin) {
+    return { ok: false, status: 503, error: AUTH_MAINTENANCE_MESSAGE };
   }
 
   if (user.accountStatus === 'permanent_blocked') {
