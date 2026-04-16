@@ -3936,8 +3936,13 @@ async function writePaymentMethodsState(methods) {
 // ─── HTTP server ─────────────────────────────────────────────────────
 
 const server = createServer(async (req, res) => {
+  // Always define url at the very top so it is available everywhere, including error handlers
+  let url;
+  try {
+    url = new URL(req.url || '/', `http://${req.headers.host || `localhost:${PORT}`}`);
+  } catch {
+    url = { pathname: '' };
 
-  // ─── GLOBAL CATCH-ALL FOR /api/v2/* ERRORS ───
   try {
     // ...existing code...
   } catch (error) {
