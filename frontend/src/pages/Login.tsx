@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import BrandLogo from '@/components/BrandLogo';
 import PublicFooter from '@/components/PublicFooter';
+import { AUTH_MAINTENANCE_ENABLED, AUTH_MAINTENANCE_MESSAGE } from '@/lib/maintenance';
 
 export default function Login() {
   const navigate = useNavigate();
@@ -146,6 +147,14 @@ export default function Login() {
                 </Alert>
               )}
 
+              {AUTH_MAINTENANCE_ENABLED && (
+                <Alert className="mb-4 bg-amber-500/10 border-amber-500/30">
+                  <AlertDescription className="text-amber-300">
+                    {AUTH_MAINTENANCE_MESSAGE} Admin login is still available.
+                  </AlertDescription>
+                </Alert>
+              )}
+
               <form onSubmit={handleSubmit} className="space-y-3 sm:space-y-4">
                 <div className="space-y-2">
                   <Label htmlFor="userId" className="text-white/80">User ID (7 digits)</Label>
@@ -220,12 +229,16 @@ export default function Login() {
               </form>
 
               <div className="mt-6 text-center">
-                <p className="text-white/60">
-                  Don't have an account?{' '}
-                  <Link to="/register" className="text-[#118bdd] hover:text-[#38bdf5] font-medium">
-                    Create one
-                  </Link>
-                </p>
+                {AUTH_MAINTENANCE_ENABLED ? (
+                  <p className="text-amber-300/90 text-sm">Public registration is temporarily disabled during maintenance.</p>
+                ) : (
+                  <p className="text-white/60">
+                    Don't have an account?{' '}
+                    <Link to="/register" className="text-[#118bdd] hover:text-[#38bdf5] font-medium">
+                      Create one
+                    </Link>
+                  </p>
+                )}
               </div>
 
             </CardContent>

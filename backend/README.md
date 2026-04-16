@@ -46,6 +46,8 @@ npm run dev
 - `GET /api/admin-audit`
 - `POST /api/send-mail`
 - `POST /api/v2/fund-transfers`
+- `POST /api/v2/pins/purchase`
+- `POST /api/v2/referrals/credit`
 - `POST /api/v2/withdrawals`
 
 Example request:
@@ -146,6 +148,114 @@ curl -X POST http://127.0.0.1:4000/api/v2/withdrawals \
 
 Idempotency behavior:
 - First request: posts ledger transaction and debits actor `income` wallet.
+- Same key + same payload: returns previous success response with `idempotentReplay: true`.
+- Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
+
+## V2 pin purchase endpoint
+
+Before using `POST /api/v2/pins/purchase`:
+
+1. Set env flags:
+```env
+STORAGE_MODE=mysql
+FINANCE_ENGINE_MODE=v2
+LEGACY_FINANCIAL_WRITES_ENABLED=false
+REQUIRE_IDEMPOTENCY_FOR_MUTATIONS=true
+REQUIRE_SYSTEM_VERSION_HEADER=true
+```
+2. Apply migration: `backend/scripts/migrations/001_v2_finance_core.sql`
+3. Ensure buyer user exists in `v2_users` and has a `fund` wallet in `v2_wallet_accounts`.
+4. Ensure system GL account `SYS_PIN_REVENUE` exists and is active.
+
+Request headers:
+- `Authorization: Bearer <actorUserCode>`
+- `X-System-Version: v2`
+- `Idempotency-Key: <unique-per-logical-request>`
+- `Content-Type: application/json`
+
+Request body example:
+```json
+{
+  "buyerUserCode": "1000001",
+  "quantity": 2,
+  "pinPriceCents": 1100,
+  "description": "Direct pin buy"
+}
+```
+
+Notes:
+- `buyerUserCode` defaults to actor code when omitted.
+- `pinPriceCents` is optional; defaults to `V2_DEFAULT_PIN_PRICE_CENTS` (default 1100).
+- Generated PINs are inserted into `v2_pins` in the same transaction as wallet + ledger updates.
+
+Smoke-test example:
+```bash
+curl -X POST http://127.0.0.1:4000/api/v2/pins/purchase \
+  -H "Authorization: Bearer 1000001" \
+  -H "X-System-Version: v2" \
+  -H "Idempotency-Key: pin-1000001-2-001" \
+  -H "Content-Type: application/json" \
+  -d "{\"buyerUserCode\":\"1000001\",\"quantity\":2,\"pinPriceCents\":1100,\"description\":\"Direct pin buy\"}"
+```
+
+Idempotency behavior:
+- First request: posts ledger transaction, debits buyer `fund` wallet, inserts generated PIN rows.
+- Same key + same payload: returns previous success response with `idempotentReplay: true`.
+- Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
+
+## V2 referral credit endpoint
+
+Before using `POST /api/v2/referrals/credit`:
+
+1. Set env flags:
+```env
+STORAGE_MODE=mysql
+FINANCE_ENGINE_MODE=v2
+LEGACY_FINANCIAL_WRITES_ENABLED=false
+REQUIRE_IDEMPOTENCY_FOR_MUTATIONS=true
+REQUIRE_SYSTEM_VERSION_HEADER=true
+```
+2. Apply migration: `backend/scripts/migrations/001_v2_finance_core.sql`
+3. Ensure source and beneficiary users exist in `v2_users`.
+4. Ensure beneficiary user has `income` wallet in `v2_wallet_accounts`.
+5. Ensure system GL account `SYS_REFERRAL_EXPENSE` exists and is active.
+
+Request headers:
+- `Authorization: Bearer <actorUserCode>`
+- `X-System-Version: v2`
+- `Idempotency-Key: <unique-per-logical-request>`
+- `Content-Type: application/json`
+
+Request body example:
+```json
+{
+  "sourceUserCode": "1000001",
+  "beneficiaryUserCode": "2000002",
+  "sourceTxnId": 12345,
+  "eventType": "direct_referral",
+  "levelNo": 1,
+  "amountCents": 500,
+  "description": "Direct referral credit"
+}
+```
+
+Notes:
+- Actor must match `sourceUserCode`.
+- `eventType` must be `direct_referral` or `level_referral`.
+- Event dedupe key is deterministic: `REF:{sourceTxnId}:{beneficiaryUserCode}:{levelNo}:{eventType}`.
+
+Smoke-test example:
+```bash
+curl -X POST http://127.0.0.1:4000/api/v2/referrals/credit \
+  -H "Authorization: Bearer 1000001" \
+  -H "X-System-Version: v2" \
+  -H "Idempotency-Key: ref-1000001-2000002-12345-1-001" \
+  -H "Content-Type: application/json" \
+  -d "{\"sourceUserCode\":\"1000001\",\"beneficiaryUserCode\":\"2000002\",\"sourceTxnId\":12345,\"eventType\":\"direct_referral\",\"levelNo\":1,\"amountCents\":500,\"description\":\"Direct referral credit\"}"
+```
+
+Idempotency behavior:
+- First request: posts ledger transaction, credits beneficiary `income` wallet, marks referral event posted.
 - Same key + same payload: returns previous success response with `idempotentReplay: true`.
 - Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
 

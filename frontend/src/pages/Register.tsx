@@ -22,6 +22,7 @@ import {
   isValidTransactionPassword,
   normalizePhoneNumber
 } from '@/utils/helpers';
+import { AUTH_MAINTENANCE_ENABLED, AUTH_MAINTENANCE_MESSAGE } from '@/lib/maintenance';
 
 export default function Register() {
   const navigate = useNavigate();
@@ -382,6 +383,27 @@ export default function Register() {
     'Indonesia', 'Philippines', 'Thailand', 'Vietnam', 'UAE', 'Saudi Arabia',
     'Other'
   ];
+
+  if (AUTH_MAINTENANCE_ENABLED) {
+    return (
+      <div className="min-h-screen bg-[#0a0e17] flex flex-col">
+        <div className="flex-1 flex items-center justify-center p-4 network-bg">
+          <Card className="glass border-white/10 max-w-md w-full">
+            <CardHeader>
+              <CardTitle className="text-xl font-bold text-white text-center">Registration Unavailable</CardTitle>
+              <CardDescription className="text-center text-white/70">{AUTH_MAINTENANCE_MESSAGE}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button onClick={() => navigate('/login')} className="w-full btn-primary">
+                Back to Login
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+        <PublicFooter />
+      </div>
+    );
+  }
 
   if (success) {
     return (

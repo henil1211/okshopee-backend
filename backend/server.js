@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { gzip as zlibGzip } from 'node:zlib';
 import { promisify } from 'node:util';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { promises as fs, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,7 +136,22 @@ const LEGACY_FINANCIAL_STATE_KEYS = new Set([
 const MUTATING_HTTP_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const V2_FUND_TRANSFER_ENDPOINT_NAME = 'v2_fund_transfer';
 const V2_WITHDRAWAL_ENDPOINT_NAME = 'v2_withdrawal';
+const V2_PIN_PURCHASE_ENDPOINT_NAME = 'v2_pin_purchase';
+const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
+const V2_REFERRAL_MAX_LEVEL = 100;
+const V2_DEFAULT_PIN_PRICE_CENTS_RAW = Number(process.env.V2_DEFAULT_PIN_PRICE_CENTS || 1100);
+const V2_DEFAULT_PIN_PRICE_CENTS = Number.isFinite(V2_DEFAULT_PIN_PRICE_CENTS_RAW) && V2_DEFAULT_PIN_PRICE_CENTS_RAW > 0
+  ? Math.trunc(V2_DEFAULT_PIN_PRICE_CENTS_RAW)
+  : 1100;
+const V2_PIN_PURCHASE_MAX_QUANTITY_RAW = Number(process.env.V2_PIN_PURCHASE_MAX_QUANTITY || 100);
+const V2_PIN_PURCHASE_MAX_QUANTITY = Number.isFinite(V2_PIN_PURCHASE_MAX_QUANTITY_RAW) && V2_PIN_PURCHASE_MAX_QUANTITY_RAW >= 1
+  ? Math.trunc(V2_PIN_PURCHASE_MAX_QUANTITY_RAW)
+  : 100;
+const V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW = Number(process.env.V2_PIN_CODE_MAX_RETRIES_PER_PIN || 12);
+const V2_PIN_CODE_MAX_RETRIES_PER_PIN = Number.isFinite(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW) && V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW >= 1
+  ? Math.trunc(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW)
+  : 12;
 
 // ─── MySQL connection pool ───────────────────────────────────────────
 let pool;
@@ -608,6 +623,19 @@ function normalizeV2UserCode(value) {
 
 function isValidV2WithdrawalDestinationType(value) {
   return value === 'bank' || value === 'upi' || value === 'wallet';
+}
+
+function isValidV2ReferralEventType(value) {
+  return value === 'direct_referral' || value === 'level_referral';
+}
+
+function buildV2ReferralEventKey({ sourceTxnId, beneficiaryUserCode, levelNo, eventType }) {
+  return `REF:${sourceTxnId}:${beneficiaryUserCode}:${levelNo}:${eventType}`;
+}
+
+function generateV2PinCode() {
+  // 16 hex chars == 64 bits entropy from CSPRNG.
+  return randomBytes(8).toString('hex').toUpperCase();
 }
 
 function parseBearerToken(req) {
@@ -1108,6 +1136,662 @@ async function processV2WithdrawalDebit({
       destinationType,
       destinationRef,
       referenceId: String(computedReferenceId).slice(0, 80),
+      postedAt: new Date().toISOString()
+    };
+
+    await connection.execute(
+      `UPDATE v2_idempotency_keys
+       SET status = 'completed', response_code = ?, response_body = ?,
+           locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+       WHERE idempotency_key = ?`,
+      [200, JSON.stringify(responsePayload), idempotencyKey]
+    );
+
+    await connection.commit();
+    transactionOpen = false;
+    return { status: 200, payload: responsePayload };
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        await connection.rollback();
+      } catch {
+        // Ignore rollback secondary errors.
+      }
+    }
+
+    const shouldMarkFailed = !!idempotencyKey && !!pool;
+    if (shouldMarkFailed) {
+      try {
+        await pool.execute(
+          `UPDATE v2_idempotency_keys
+           SET status = 'failed', error_code = ?, locked_until = NULL,
+               updated_at = NOW(3), last_seen_at = NOW(3)
+           WHERE idempotency_key = ?`,
+          [String(error?.code || 'UNKNOWN_V2_ERROR').slice(0, 80), idempotencyKey]
+        );
+      } catch {
+        // Keep the primary error as source of truth.
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function processV2PinPurchase({
+  idempotencyKey,
+  actorUserCode,
+  buyerUserCode,
+  quantity,
+  pinPriceCents,
+  expiresAt,
+  description
+}) {
+  if (STORAGE_MODE !== 'mysql') {
+    throw createApiError(503, 'V2 financial APIs require STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
+  }
+
+  if (FINANCE_ENGINE_MODE !== 'v2') {
+    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/pins/purchase', 'FINANCE_MODE_MISMATCH');
+  }
+
+  if (!pool) {
+    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
+  }
+
+  const effectivePinPriceCents = Number.isFinite(pinPriceCents) && pinPriceCents > 0
+    ? Math.trunc(pinPriceCents)
+    : V2_DEFAULT_PIN_PRICE_CENTS;
+  const totalAmountCents = effectivePinPriceCents * quantity;
+
+  if (!Number.isSafeInteger(totalAmountCents) || totalAmountCents <= 0) {
+    throw createApiError(400, 'Invalid total amount for pin purchase', 'INVALID_PIN_PURCHASE_AMOUNT');
+  }
+
+  const requestHash = buildV2RequestHash({
+    endpoint: V2_PIN_PURCHASE_ENDPOINT_NAME,
+    actorUserCode,
+    buyerUserCode,
+    quantity,
+    pinPriceCents: effectivePinPriceCents,
+    expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+    description
+  });
+
+  const connection = await pool.getConnection();
+  let transactionOpen = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionOpen = true;
+
+    const [actorRows] = await connection.execute(
+      `SELECT id, user_code, status
+       FROM v2_users
+       WHERE user_code = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [actorUserCode]
+    );
+    const actor = Array.isArray(actorRows) ? actorRows[0] : null;
+    if (!actor) {
+      throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
+    }
+    if (actor.status !== 'active') {
+      throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
+    }
+    if (actorUserCode !== buyerUserCode) {
+      throw createApiError(403, 'Actor is only allowed to purchase pins for self', 'ACTOR_BUYER_MISMATCH');
+    }
+
+    const [idemRows] = await connection.execute(
+      `SELECT idempotency_key, request_hash, status, response_code, response_body, locked_until
+       FROM v2_idempotency_keys
+       WHERE idempotency_key = ?
+       FOR UPDATE`,
+      [idempotencyKey]
+    );
+    const existingIdem = Array.isArray(idemRows) && idemRows.length > 0 ? idemRows[0] : null;
+
+    if (existingIdem) {
+      if (existingIdem.request_hash !== requestHash) {
+        throw createApiError(409, 'Idempotency key reused with different payload', 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+      }
+
+      if (existingIdem.status === 'completed') {
+        const replayPayload = parseIdempotencyResponseBody(existingIdem.response_body) || { ok: true };
+        await connection.commit();
+        transactionOpen = false;
+        return {
+          status: Number(existingIdem.response_code) || 200,
+          payload: { ...replayPayload, idempotentReplay: true }
+        };
+      }
+
+      const lockExpiresAt = existingIdem.locked_until ? new Date(existingIdem.locked_until).getTime() : 0;
+      if (existingIdem.status === 'processing' && Number.isFinite(lockExpiresAt) && lockExpiresAt > Date.now()) {
+        throw createApiError(409, 'Request with this Idempotency-Key is already processing', 'IDEMPOTENCY_IN_PROGRESS');
+      }
+
+      await connection.execute(
+        `UPDATE v2_idempotency_keys
+         SET endpoint_name = ?, actor_user_id = ?, request_hash = ?, status = 'processing',
+             locked_until = DATE_ADD(NOW(3), INTERVAL ? SECOND), error_code = NULL,
+             updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [V2_PIN_PURCHASE_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS, idempotencyKey]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_idempotency_keys
+          (idempotency_key, endpoint_name, actor_user_id, request_hash, status, locked_until)
+         VALUES
+          (?, ?, ?, ?, 'processing', DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
+        [idempotencyKey, V2_PIN_PURCHASE_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
+      );
+    }
+
+    const [walletRows] = await connection.execute(
+      `SELECT
+         wa.id,
+         wa.user_id,
+         wa.wallet_type,
+         wa.current_amount_cents,
+         wa.gl_account_id,
+         u.user_code,
+         u.status AS user_status
+       FROM v2_wallet_accounts wa
+       INNER JOIN v2_users u ON u.id = wa.user_id
+       WHERE u.user_code = ? AND wa.wallet_type = 'fund'
+       LIMIT 1
+       FOR UPDATE`,
+      [buyerUserCode]
+    );
+    const buyerFundWallet = Array.isArray(walletRows) ? walletRows[0] : null;
+    if (!buyerFundWallet) {
+      throw createApiError(404, 'Fund wallet is not provisioned in v2', 'V2_FUND_WALLET_NOT_FOUND');
+    }
+    if (buyerFundWallet.user_status !== 'active') {
+      throw createApiError(403, 'Buyer user is not active', 'BUYER_NOT_ACTIVE');
+    }
+    if (Number(buyerFundWallet.current_amount_cents) < totalAmountCents) {
+      throw createApiError(409, 'Insufficient fund wallet balance', 'INSUFFICIENT_FUNDS');
+    }
+
+    const [pinRevenueRows] = await connection.execute(
+      `SELECT id, account_code, is_active
+       FROM v2_gl_accounts
+       WHERE account_code = 'SYS_PIN_REVENUE'
+       LIMIT 1
+       FOR UPDATE`
+    );
+    const pinRevenueAccount = Array.isArray(pinRevenueRows) ? pinRevenueRows[0] : null;
+    if (!pinRevenueAccount || Number(pinRevenueAccount.is_active) !== 1) {
+      throw createApiError(503, 'System pin revenue account is not configured', 'SYS_PIN_REVENUE_ACCOUNT_MISSING');
+    }
+
+    const txUuid = randomUUID();
+    const referenceId = `${buyerUserCode}:${quantity}`;
+    const effectiveDescription = description || `Pin purchase (${quantity})`;
+
+    const [ledgerTxnResult] = await connection.execute(
+      `INSERT INTO v2_ledger_transactions
+        (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
+         reference_type, reference_id, description, total_debit_cents, total_credit_cents)
+       VALUES
+        (?, 'v2', 'pin_purchase', 'posted', ?, ?,
+         'pin_purchase', ?, ?, ?, ?)`,
+      [
+        txUuid,
+        idempotencyKey,
+        actor.id,
+        referenceId,
+        effectiveDescription,
+        totalAmountCents,
+        totalAmountCents
+      ]
+    );
+
+    const ledgerTxnId = Number(ledgerTxnResult?.insertId || 0);
+    if (!ledgerTxnId) {
+      throw createApiError(500, 'Failed to create ledger transaction', 'LEDGER_TXN_CREATE_FAILED');
+    }
+
+    await connection.execute(
+      `INSERT INTO v2_ledger_entries
+        (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+       VALUES
+        (?, 1, ?, ?, 'fund', 'debit', ?),
+        (?, 2, ?, NULL, NULL, 'credit', ?)`,
+      [
+        ledgerTxnId,
+        buyerFundWallet.gl_account_id,
+        buyerFundWallet.user_id,
+        totalAmountCents,
+        ledgerTxnId,
+        pinRevenueAccount.id,
+        totalAmountCents
+      ]
+    );
+
+    const [walletUpdateResult] = await connection.execute(
+      `UPDATE v2_wallet_accounts
+       SET current_amount_cents = current_amount_cents - ?, version = version + 1
+       WHERE user_id = ? AND wallet_type = 'fund' AND current_amount_cents >= ?`,
+      [totalAmountCents, buyerFundWallet.user_id, totalAmountCents]
+    );
+    if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
+      throw createApiError(409, 'Insufficient fund wallet balance', 'INSUFFICIENT_FUNDS');
+    }
+
+    const generatedPinCodes = [];
+    for (let i = 0; i < quantity; i += 1) {
+      let created = false;
+      let attempts = 0;
+
+      while (!created && attempts < V2_PIN_CODE_MAX_RETRIES_PER_PIN) {
+        attempts += 1;
+        const pinCode = generateV2PinCode();
+
+        try {
+          await connection.execute(
+            `INSERT INTO v2_pins
+              (pin_code, buyer_user_id, price_cents, status, purchased_txn_id, expires_at)
+             VALUES
+              (?, ?, ?, 'generated', ?, ?)`,
+            [pinCode, buyerFundWallet.user_id, effectivePinPriceCents, ledgerTxnId, expiresAt]
+          );
+          generatedPinCodes.push(pinCode);
+          created = true;
+        } catch (pinInsertError) {
+          if (pinInsertError?.code === 'ER_DUP_ENTRY') {
+            continue;
+          }
+          throw pinInsertError;
+        }
+      }
+
+      if (!created) {
+        throw createApiError(500, 'Unable to generate unique PIN codes after retries', 'PIN_CODE_GENERATION_FAILED');
+      }
+    }
+
+    const responsePayload = {
+      ok: true,
+      txUuid,
+      ledgerTransactionId: ledgerTxnId,
+      buyerUserCode,
+      quantity,
+      pinPriceCents: effectivePinPriceCents,
+      totalAmountCents,
+      pinCodes: generatedPinCodes,
+      postedAt: new Date().toISOString()
+    };
+
+    await connection.execute(
+      `UPDATE v2_idempotency_keys
+       SET status = 'completed', response_code = ?, response_body = ?,
+           locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+       WHERE idempotency_key = ?`,
+      [200, JSON.stringify(responsePayload), idempotencyKey]
+    );
+
+    await connection.commit();
+    transactionOpen = false;
+    return { status: 200, payload: responsePayload };
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        await connection.rollback();
+      } catch {
+        // Ignore rollback secondary errors.
+      }
+    }
+
+    const shouldMarkFailed = !!idempotencyKey && !!pool;
+    if (shouldMarkFailed) {
+      try {
+        await pool.execute(
+          `UPDATE v2_idempotency_keys
+           SET status = 'failed', error_code = ?, locked_until = NULL,
+               updated_at = NOW(3), last_seen_at = NOW(3)
+           WHERE idempotency_key = ?`,
+          [String(error?.code || 'UNKNOWN_V2_ERROR').slice(0, 80), idempotencyKey]
+        );
+      } catch {
+        // Keep the primary error as source of truth.
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function processV2ReferralCredit({
+  idempotencyKey,
+  actorUserCode,
+  sourceUserCode,
+  beneficiaryUserCode,
+  sourceTxnId,
+  eventType,
+  levelNo,
+  amountCents,
+  description
+}) {
+  if (STORAGE_MODE !== 'mysql') {
+    throw createApiError(503, 'V2 financial APIs require STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
+  }
+
+  if (FINANCE_ENGINE_MODE !== 'v2') {
+    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/referrals/credit', 'FINANCE_MODE_MISMATCH');
+  }
+
+  if (!pool) {
+    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
+  }
+
+  const eventKey = buildV2ReferralEventKey({
+    sourceTxnId,
+    beneficiaryUserCode,
+    levelNo,
+    eventType
+  }).slice(0, 140);
+
+  const requestHash = buildV2RequestHash({
+    endpoint: V2_REFERRAL_CREDIT_ENDPOINT_NAME,
+    actorUserCode,
+    sourceUserCode,
+    beneficiaryUserCode,
+    sourceTxnId,
+    eventType,
+    levelNo,
+    amountCents,
+    eventKey,
+    description
+  });
+
+  const connection = await pool.getConnection();
+  let transactionOpen = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionOpen = true;
+
+    const [actorRows] = await connection.execute(
+      `SELECT id, user_code, status
+       FROM v2_users
+       WHERE user_code = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [actorUserCode]
+    );
+    const actor = Array.isArray(actorRows) ? actorRows[0] : null;
+    if (!actor) {
+      throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
+    }
+    if (actor.status !== 'active') {
+      throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
+    }
+    if (actorUserCode !== sourceUserCode) {
+      throw createApiError(403, 'Actor is only allowed to credit referrals from their own sourceUserCode', 'ACTOR_SOURCE_MISMATCH');
+    }
+
+    const [idemRows] = await connection.execute(
+      `SELECT idempotency_key, request_hash, status, response_code, response_body, locked_until
+       FROM v2_idempotency_keys
+       WHERE idempotency_key = ?
+       FOR UPDATE`,
+      [idempotencyKey]
+    );
+    const existingIdem = Array.isArray(idemRows) && idemRows.length > 0 ? idemRows[0] : null;
+
+    if (existingIdem) {
+      if (existingIdem.request_hash !== requestHash) {
+        throw createApiError(409, 'Idempotency key reused with different payload', 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+      }
+
+      if (existingIdem.status === 'completed') {
+        const replayPayload = parseIdempotencyResponseBody(existingIdem.response_body) || { ok: true };
+        await connection.commit();
+        transactionOpen = false;
+        return {
+          status: Number(existingIdem.response_code) || 200,
+          payload: { ...replayPayload, idempotentReplay: true }
+        };
+      }
+
+      const lockExpiresAt = existingIdem.locked_until ? new Date(existingIdem.locked_until).getTime() : 0;
+      if (existingIdem.status === 'processing' && Number.isFinite(lockExpiresAt) && lockExpiresAt > Date.now()) {
+        throw createApiError(409, 'Request with this Idempotency-Key is already processing', 'IDEMPOTENCY_IN_PROGRESS');
+      }
+
+      await connection.execute(
+        `UPDATE v2_idempotency_keys
+         SET endpoint_name = ?, actor_user_id = ?, request_hash = ?, status = 'processing',
+             locked_until = DATE_ADD(NOW(3), INTERVAL ? SECOND), error_code = NULL,
+             updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [V2_REFERRAL_CREDIT_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS, idempotencyKey]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_idempotency_keys
+          (idempotency_key, endpoint_name, actor_user_id, request_hash, status, locked_until)
+         VALUES
+          (?, ?, ?, ?, 'processing', DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
+        [idempotencyKey, V2_REFERRAL_CREDIT_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
+      );
+    }
+
+    const [userRows] = await connection.execute(
+      `SELECT id, user_code, status
+       FROM v2_users
+       WHERE user_code IN (?, ?)
+       ORDER BY id
+       FOR UPDATE`,
+      [sourceUserCode, beneficiaryUserCode]
+    );
+    const sourceUser = Array.isArray(userRows)
+      ? userRows.find((row) => row.user_code === sourceUserCode)
+      : null;
+    const beneficiaryUser = Array.isArray(userRows)
+      ? userRows.find((row) => row.user_code === beneficiaryUserCode)
+      : null;
+
+    if (!sourceUser || !beneficiaryUser) {
+      throw createApiError(404, 'Source or beneficiary user is not provisioned in v2_users', 'V2_USER_NOT_FOUND');
+    }
+    if (sourceUser.status !== 'active' || beneficiaryUser.status !== 'active') {
+      throw createApiError(403, 'Source or beneficiary user is not active', 'USER_NOT_ACTIVE');
+    }
+
+    const [sourceTxnRows] = await connection.execute(
+      `SELECT id, initiator_user_id
+       FROM v2_ledger_transactions
+       WHERE id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [sourceTxnId]
+    );
+    const sourceTxn = Array.isArray(sourceTxnRows) ? sourceTxnRows[0] : null;
+    if (!sourceTxn) {
+      throw createApiError(404, 'sourceTxnId is not found in v2_ledger_transactions', 'SOURCE_TXN_NOT_FOUND');
+    }
+    if (Number(sourceTxn.initiator_user_id) !== Number(sourceUser.id)) {
+      throw createApiError(409, 'sourceTxnId does not belong to sourceUserCode', 'SOURCE_TXN_USER_MISMATCH');
+    }
+
+    await connection.execute(
+      `INSERT INTO v2_referral_events
+        (event_key, event_type, source_user_id, beneficiary_user_id, source_txn_id, level_no, amount_cents, status)
+       VALUES
+        (?, ?, ?, ?, ?, ?, ?, 'pending')
+       ON DUPLICATE KEY UPDATE id = id`,
+      [eventKey, eventType, sourceUser.id, beneficiaryUser.id, sourceTxnId, levelNo, amountCents]
+    );
+
+    const [eventRows] = await connection.execute(
+      `SELECT id, event_key, event_type, source_user_id, beneficiary_user_id,
+              source_txn_id, level_no, amount_cents, status, credit_txn_id
+       FROM v2_referral_events
+       WHERE event_key = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [eventKey]
+    );
+    const referralEvent = Array.isArray(eventRows) ? eventRows[0] : null;
+    if (!referralEvent) {
+      throw createApiError(500, 'Failed to load referral event', 'REFERRAL_EVENT_LOAD_FAILED');
+    }
+
+    const eventMatchesRequest =
+      Number(referralEvent.source_user_id) === Number(sourceUser.id)
+      && Number(referralEvent.beneficiary_user_id) === Number(beneficiaryUser.id)
+      && Number(referralEvent.source_txn_id) === Number(sourceTxnId)
+      && Number(referralEvent.level_no) === Number(levelNo)
+      && String(referralEvent.event_type) === eventType
+      && Number(referralEvent.amount_cents) === Number(amountCents);
+
+    if (!eventMatchesRequest) {
+      throw createApiError(409, 'Referral event payload mismatches existing deduped event', 'REFERRAL_EVENT_MISMATCH');
+    }
+
+    if (referralEvent.status === 'posted') {
+      const postedTxnId = Number(referralEvent.credit_txn_id || 0);
+      if (!postedTxnId) {
+        throw createApiError(409, 'Referral event is posted without linked credit transaction', 'REFERRAL_EVENT_CORRUPT');
+      }
+
+      const responsePayload = {
+        ok: true,
+        eventKey,
+        sourceTxnId,
+        sourceUserCode,
+        beneficiaryUserCode,
+        eventType,
+        levelNo,
+        amountCents,
+        ledgerTransactionId: postedTxnId,
+        alreadyPosted: true
+      };
+
+      await connection.execute(
+        `UPDATE v2_idempotency_keys
+         SET status = 'completed', response_code = ?, response_body = ?,
+             locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [200, JSON.stringify(responsePayload), idempotencyKey]
+      );
+
+      await connection.commit();
+      transactionOpen = false;
+      return { status: 200, payload: responsePayload };
+    }
+
+    if (referralEvent.status !== 'pending') {
+      throw createApiError(409, 'Referral event is not in a pending state', 'REFERRAL_EVENT_NOT_PENDING');
+    }
+
+    const [incomeWalletRows] = await connection.execute(
+      `SELECT id, user_id, wallet_type, current_amount_cents, gl_account_id
+       FROM v2_wallet_accounts
+       WHERE user_id = ? AND wallet_type = 'income'
+       LIMIT 1
+       FOR UPDATE`,
+      [beneficiaryUser.id]
+    );
+    const beneficiaryIncomeWallet = Array.isArray(incomeWalletRows) ? incomeWalletRows[0] : null;
+    if (!beneficiaryIncomeWallet) {
+      throw createApiError(404, 'Beneficiary income wallet is not provisioned in v2', 'V2_INCOME_WALLET_NOT_FOUND');
+    }
+
+    const [referralExpenseRows] = await connection.execute(
+      `SELECT id, account_code, is_active
+       FROM v2_gl_accounts
+       WHERE account_code = 'SYS_REFERRAL_EXPENSE'
+       LIMIT 1
+       FOR UPDATE`
+    );
+    const referralExpenseAccount = Array.isArray(referralExpenseRows) ? referralExpenseRows[0] : null;
+    if (!referralExpenseAccount || Number(referralExpenseAccount.is_active) !== 1) {
+      throw createApiError(503, 'System referral expense account is not configured', 'SYS_REFERRAL_EXPENSE_ACCOUNT_MISSING');
+    }
+
+    const txUuid = randomUUID();
+    const effectiveDescription = description || `Referral credit (${eventType})`;
+
+    const [ledgerTxnResult] = await connection.execute(
+      `INSERT INTO v2_ledger_transactions
+        (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
+         reference_type, reference_id, description, total_debit_cents, total_credit_cents)
+       VALUES
+        (?, 'v2', 'referral_credit', 'posted', ?, ?,
+         'referral_event', ?, ?, ?, ?)`,
+      [
+        txUuid,
+        idempotencyKey,
+        actor.id,
+        eventKey.slice(0, 80),
+        effectiveDescription,
+        amountCents,
+        amountCents
+      ]
+    );
+
+    const ledgerTxnId = Number(ledgerTxnResult?.insertId || 0);
+    if (!ledgerTxnId) {
+      throw createApiError(500, 'Failed to create ledger transaction', 'LEDGER_TXN_CREATE_FAILED');
+    }
+
+    await connection.execute(
+      `INSERT INTO v2_ledger_entries
+        (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+       VALUES
+        (?, 1, ?, NULL, NULL, 'debit', ?),
+        (?, 2, ?, ?, 'income', 'credit', ?)`,
+      [
+        ledgerTxnId,
+        referralExpenseAccount.id,
+        amountCents,
+        ledgerTxnId,
+        beneficiaryIncomeWallet.gl_account_id,
+        beneficiaryIncomeWallet.user_id,
+        amountCents
+      ]
+    );
+
+    const [walletUpdateResult] = await connection.execute(
+      `UPDATE v2_wallet_accounts
+       SET current_amount_cents = current_amount_cents + ?, version = version + 1
+       WHERE user_id = ? AND wallet_type = 'income'`,
+      [amountCents, beneficiaryIncomeWallet.user_id]
+    );
+    if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
+      throw createApiError(500, 'Failed to credit beneficiary income wallet', 'BENEFICIARY_WALLET_UPDATE_FAILED');
+    }
+
+    await connection.execute(
+      `UPDATE v2_referral_events
+       SET status = 'posted', credit_txn_id = ?, posted_at = NOW(3)
+       WHERE event_key = ?`,
+      [ledgerTxnId, eventKey]
+    );
+
+    const responsePayload = {
+      ok: true,
+      txUuid,
+      eventKey,
+      ledgerTransactionId: ledgerTxnId,
+      sourceTxnId,
+      sourceUserCode,
+      beneficiaryUserCode,
+      eventType,
+      levelNo,
+      amountCents,
       postedAt: new Date().toISOString()
     };
 
@@ -2338,6 +3022,179 @@ const server = createServer(async (req, res) => {
         ok: false,
         error: message,
         code: error?.code || 'V2_WITHDRAWAL_FAILED'
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v2/pins/purchase') {
+    try {
+      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
+      if (!isValidV2UserCode(actorUserCode)) {
+        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
+        return;
+      }
+
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const buyerUserCode = normalizeV2UserCode(parsed?.buyerUserCode || actorUserCode);
+      const quantityRaw = Number(parsed?.quantity);
+      const quantity = Number.isFinite(quantityRaw) ? quantityRaw : NaN;
+      const pinPriceRaw = parsed?.pinPriceCents;
+      const pinPriceNumber = pinPriceRaw == null ? null : Number(pinPriceRaw);
+      const pinPriceCents = Number.isFinite(pinPriceNumber) ? pinPriceNumber : null;
+      const expiresAtRaw = parsed?.expiresAt;
+      const expiresAt = expiresAtRaw == null || String(expiresAtRaw).trim() === '' ? null : new Date(expiresAtRaw);
+      const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
+      const description = typeof parsed?.description === 'string' ? parsed.description.trim().slice(0, 255) : null;
+
+      if (!isValidV2UserCode(buyerUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'buyerUserCode is required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (!Number.isFinite(quantity) || !Number.isInteger(quantity) || quantity < 1 || quantity > V2_PIN_PURCHASE_MAX_QUANTITY) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `quantity must be an integer between 1 and ${V2_PIN_PURCHASE_MAX_QUANTITY}`,
+          code: 'INVALID_QUANTITY'
+        });
+        return;
+      }
+      if (pinPriceCents != null && (!Number.isFinite(pinPriceCents) || !Number.isInteger(pinPriceCents) || pinPriceCents <= 0)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'pinPriceCents must be a positive integer when provided',
+          code: 'INVALID_PIN_PRICE'
+        });
+        return;
+      }
+      if (expiresAt && Number.isNaN(expiresAt.getTime())) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'expiresAt must be a valid ISO datetime string',
+          code: 'INVALID_EXPIRES_AT'
+        });
+        return;
+      }
+      if (!idempotencyKey) {
+        sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
+        return;
+      }
+
+      const result = await processV2PinPurchase({
+        idempotencyKey,
+        actorUserCode,
+        buyerUserCode,
+        quantity,
+        pinPriceCents,
+        expiresAt,
+        description
+      });
+
+      sendJson(res, result.status, result.payload);
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to process pin purchase');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || 'V2_PIN_PURCHASE_FAILED'
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v2/referrals/credit') {
+    try {
+      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
+      if (!isValidV2UserCode(actorUserCode)) {
+        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
+        return;
+      }
+
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const sourceUserCode = normalizeV2UserCode(parsed?.sourceUserCode);
+      const beneficiaryUserCode = normalizeV2UserCode(parsed?.beneficiaryUserCode);
+      const eventType = String(parsed?.eventType || '').trim().toLowerCase();
+      const sourceTxnIdRaw = Number(parsed?.sourceTxnId);
+      const sourceTxnId = Number.isFinite(sourceTxnIdRaw) ? sourceTxnIdRaw : NaN;
+      const levelNoRaw = parsed?.levelNo == null ? 1 : Number(parsed?.levelNo);
+      const levelNo = Number.isFinite(levelNoRaw) ? levelNoRaw : NaN;
+      const amountCentsRaw = Number(parsed?.amountCents);
+      const amountCents = Number.isFinite(amountCentsRaw) ? amountCentsRaw : NaN;
+      const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
+      const description = typeof parsed?.description === 'string' ? parsed.description.trim().slice(0, 255) : null;
+
+      if (!isValidV2UserCode(sourceUserCode) || !isValidV2UserCode(beneficiaryUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'sourceUserCode and beneficiaryUserCode are required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (!isValidV2ReferralEventType(eventType)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'eventType must be one of direct_referral|level_referral',
+          code: 'INVALID_EVENT_TYPE'
+        });
+        return;
+      }
+      if (!Number.isSafeInteger(sourceTxnId) || sourceTxnId <= 0) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'sourceTxnId must be a positive integer',
+          code: 'INVALID_SOURCE_TXN_ID'
+        });
+        return;
+      }
+      if (!Number.isInteger(levelNo) || levelNo < 1 || levelNo > V2_REFERRAL_MAX_LEVEL) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `levelNo must be an integer between 1 and ${V2_REFERRAL_MAX_LEVEL}`,
+          code: 'INVALID_LEVEL_NO'
+        });
+        return;
+      }
+      if (!Number.isInteger(amountCents) || amountCents <= 0) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'amountCents must be a positive integer',
+          code: 'INVALID_AMOUNT'
+        });
+        return;
+      }
+      if (!idempotencyKey) {
+        sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
+        return;
+      }
+
+      const result = await processV2ReferralCredit({
+        idempotencyKey,
+        actorUserCode,
+        sourceUserCode,
+        beneficiaryUserCode,
+        sourceTxnId,
+        eventType,
+        levelNo,
+        amountCents,
+        description
+      });
+
+      sendJson(res, result.status, result.payload);
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to process referral credit');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || 'V2_REFERRAL_CREDIT_FAILED'
       });
     }
     return;

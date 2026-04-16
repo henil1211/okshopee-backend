@@ -151,6 +151,7 @@ CREATE TABLE v2_wallet_accounts (
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   UNIQUE KEY uq_v2_wallet_user_wallet (user_id, wallet_type),
   UNIQUE KEY uq_v2_wallet_gl_account (gl_account_id),
+  CONSTRAINT chk_v2_wallet_non_negative CHECK (current_amount_cents >= 0),
   CONSTRAINT fk_v2_wallet_user FOREIGN KEY (user_id) REFERENCES v2_users(id),
   CONSTRAINT fk_v2_wallet_gl FOREIGN KEY (gl_account_id) REFERENCES v2_gl_accounts(id)
 ) ENGINE=InnoDB;
@@ -331,6 +332,19 @@ Endpoints:
 - POST /api/v2/fund-transfers
 - POST /api/v2/pins/purchase
 - POST /api/v2/referrals/credit
+- POST /api/v2/withdrawals
+
+Authentication and authorization requirements (mandatory):
+- Token must be validated server-side (signature, issuer, expiry).
+- Token subject must match actor_user_id unless caller has admin role.
+- Role checks are explicit per endpoint (user, admin, super-admin).
+- Impersonation must include audit fields: impersonator_user_id, impersonated_user_id, reason, request_id.
+
+Rate limiting (mandatory):
+- Apply per user and per IP limits on all /api/v2 mutating endpoints.
+- Use stricter limits for referral-credit and pin purchase endpoints.
+- Enforce a dedicated cap on in-flight idempotency keys per actor.
+- Return 429 with retry-after seconds when limit exceeded.
 
 Any request without idempotency key or wrong version is rejected.
 
@@ -513,6 +527,12 @@ COMMIT;
 
 If pin insert fails for any row, rollback reverses entire purchase.
 
+Pin generation security requirements:
+- pin_code must be generated using CSPRNG only.
+- Minimum entropy target: 64 bits effective entropy.
+- Never use timestamp-only or predictable incremental format.
+- Keep unique key retry loop with bounded retries and failure alerting.
+
 ---
 
 ## 6.4 Referral/Income Credit Flow (Deduplicated)
@@ -586,6 +606,97 @@ Duplicate credits are prevented by unique event key and idempotency.
 
 ---
 
+## 6.5 Withdrawal Debit Flow
+
+Inputs:
+- actor_user_id
+- amount_cents
+- destination_type (bank|upi|wallet)
+- destination_ref
+- idempotency_key
+
+Validation:
+1. amount_cents > 0
+2. actor wallet_type = income has sufficient balance
+3. destination details pass format and allow-list checks
+4. user is not blocked/closed
+
+SQL sequence:
+
+~~~sql
+START TRANSACTION;
+
+-- Shared idempotency pattern here
+
+SELECT id, user_id, wallet_type, current_amount_cents, gl_account_id
+FROM v2_wallet_accounts
+WHERE user_id = ? AND wallet_type = 'income'
+FOR UPDATE;
+
+-- Validate sufficient income balance
+
+INSERT INTO v2_ledger_transactions (
+  tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
+  reference_type, reference_id, description, total_debit_cents, total_credit_cents
+) VALUES (
+  ?, 'v2', 'withdrawal_debit', 'posted', ?, ?,
+  'withdrawal', ?, ?, ?, ?
+);
+
+SET @ledger_txn_id = LAST_INSERT_ID();
+
+-- Debit user income wallet liability, credit system settlement account
+INSERT INTO v2_ledger_entries
+  (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+VALUES
+  (@ledger_txn_id, 1, ?, ?, 'income', 'debit',  ?),
+  (@ledger_txn_id, 2, ?, NULL, NULL, 'credit', ?);
+
+UPDATE v2_wallet_accounts
+SET current_amount_cents = current_amount_cents - ?, version = version + 1
+WHERE user_id = ? AND wallet_type = 'income' AND current_amount_cents >= ?;
+
+-- finalize idempotency row
+COMMIT;
+~~~
+
+Failure handling:
+- If payout orchestration is async, ledger posting remains source of truth and payout state is tracked separately.
+- Any payout retry must use separate idempotent payout key, never repost financial debit.
+
+---
+
+## 6.6 Admin Adjustment Flow (Restricted)
+
+Admin adjustments are emergency-only and must still be ledger-based.
+
+Rules:
+1. No direct UPDATE on wallet tables by admin tools.
+2. Every adjustment requires reason_code, note, ticket_id, and approver_user_id.
+3. Four-eyes control required for amounts above configured threshold.
+4. Every adjustment writes immutable audit trail row with request payload hash.
+5. Adjustment endpoint disabled by default in production.
+
+Journal model:
+- Debit/Credit between USER wallet liability and SYS_ADJUSTMENT_SUSPENSE.
+- Post-adjustment reconciliation for affected user must pass before request closes.
+
+---
+
+## 6.7 Help Progression State Updates (Transactional Coupling)
+
+Help progression state must update in the same transaction as related money event.
+
+Mandatory rule:
+- For give/receive events that change progression, update v2_help_progress_state inside the same DB transaction after wallet/ledger posting and before idempotency completion.
+
+Concurrency and dedupe:
+- Lock v2_help_progress_state row FOR UPDATE for the actor user.
+- Reject stale/duplicate progression updates using last_progress_event_seq monotonic check.
+- On rollback, progression and money both rollback together.
+
+---
+
 ## 7) Double-Entry Integrity Controls
 
 1. For each v2_ledger_transactions row:
@@ -596,6 +707,10 @@ Duplicate credits are prevented by unique event key and idempotency.
 - Sum(debit) equals sum(credit).
 
 3. Wallet updates only allowed in transaction that also inserts ledger entries.
+
+3.1. Non-negative wallet invariant:
+- current_amount_cents must remain >= 0 (constraint + guarded UPDATE predicate).
+- Any attempted violation is treated as a hard financial error and rolled back.
 
 4. Nightly reconciliation job:
 - Recompute expected wallet balances from baseline + ledger net.
@@ -699,6 +814,9 @@ Permanent validation errors:
 1. Disable legacy money write endpoints.
 2. In generic state endpoints, block writes to financial keys when v2 is active.
 3. Reject requests without X-System-Version: v2 on financial APIs.
+4. Return 410 Gone for retired legacy financial endpoints.
+5. Enforce allow-list: only explicitly approved non-financial legacy endpoints remain writable.
+6. Add startup self-check that fails boot if legacy-write guard middleware is not mounted.
 
 ## 10.2 Database Permission Isolation
 Use dedicated DB users:
@@ -713,6 +831,10 @@ Required flags:
 - LEGACY_FINANCIAL_WRITES_ENABLED = false
 - REQUIRE_IDEMPOTENCY_FOR_MUTATIONS = true
 - REQUIRE_SYSTEM_VERSION_HEADER = true
+- V2_RATE_LIMIT_ENABLED = true
+- V2_MUTATION_RPM_PER_USER = 30
+- V2_MUTATION_RPM_PER_IP = 120
+- V2_IDEMPOTENCY_INFLIGHT_LIMIT_PER_USER = 10
 
 ## 10.4 Safe Cutover Sequence
 1. Maintenance lock on.
@@ -732,6 +854,17 @@ Monitor continuously:
 - failed transaction rate
 - deadlock retry count
 - average lock wait time
+
+Alert thresholds (initial defaults):
+- wallet_ledger_diff_count > 0 for 5 minutes => P1 alert
+- failed_transaction_rate >= 2% over 10 minutes => P1 alert
+- deadlock_retry_rate >= 5% over 10 minutes => P2 alert
+- idempotency_key_payload_mismatch > 0 => P1 alert
+- avg_lock_wait_ms > 2000 for 10 minutes => P2 alert
+
+Automatic protection actions:
+- On sustained P1 for 15 minutes, switch financial APIs to maintenance mode (users blocked, admin only).
+- Keep read APIs active for user visibility and support triage.
 
 ---
 
@@ -756,10 +889,13 @@ Service-level hard rules:
 
 1. Baseline snapshot complete and signed.
 2. v2 tables populated and indexed.
-3. All 3 critical flows run in transaction + idempotency + double-entry.
+3. All 4 critical flows (transfer, pin, referral, withdrawal) run in transaction + idempotency + double-entry.
 4. Legacy financial write paths disabled.
-5. Reconciliation report returns zero unexplained diff.
+5. Admin adjustment endpoint locked by policy and audited.
 6. Deadlock retry mechanism verified.
-7. Rollback runbook tested.
+7. AuthN/AuthZ and impersonation audit checks verified on v2 endpoints.
+8. Reconciliation go-live gate: zero unexplained diff for cutover window users.
+9. Post-go-live SLO thresholds configured and alerting verified.
+10. Rollback runbook tested.
 
-If all seven pass, you can safely continue from maintenance to controlled reopen.
+If all ten pass, you can safely continue from maintenance to controlled reopen.

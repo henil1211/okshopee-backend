@@ -7,6 +7,7 @@ import type {
   MarketplaceInvoice, RewardRedemption
 } from '@/types';
 import Database from '@/db';
+import { AUTH_MAINTENANCE_ENABLED, AUTH_MAINTENANCE_MESSAGE } from '@/lib/maintenance';
 import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
 import { isValidPhoneNumberForCountry, normalizePhoneNumber } from '@/utils/helpers';
 
@@ -33,8 +34,6 @@ function resolveCanonicalUserForWalletActions(userRef: string): User | undefined
 }
 
 const WALLET_MAINTENANCE_INTERVAL_MS = 30_000;
-const AUTH_MAINTENANCE_ENABLED = true;
-const AUTH_MAINTENANCE_MESSAGE = 'System in under Maintainance for 72 hours, Try Again After 72 hours';
 const AUTO_WALLET_MAINTENANCE_ENABLED = (() => {
   const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
   const configured = typeof env.VITE_ENABLE_AUTO_WALLET_MAINTENANCE === 'string'

@@ -1,0 +1,50 @@
+{
+  "sourceFile": "E:\\Again Updated\\live-project\\backend\\data\\app-state.local.json",
+  "generatedAt": "2026-04-15T18:54:23.812Z",
+  "scopedUsers": 1,
+  "walletsFoundForScopedUsers": 1,
+  "fallbackCoverage": {
+    "completedPayments": 0,
+    "completedPinRequests": 0,
+    "paidFromWalletPinRequests": 0
+  },
+  "mismatchCounts": {
+    "usersWithAnyMismatch": 0,
+    "fundMismatches": 0,
+    "incomeMismatches": 0,
+    "lockedMismatches": 0
+  },
+  "totalDelta": {
+    "fund": 0,
+    "income": 0,
+    "locked": 0
+  },
+  "topImpacted": [],
+  "allRows": [
+    {
+      "userId": "1000001",
+      "internalId": "user_1773829460417",
+      "name": "Vikas Jain",
+      "current": {
+        "fund": 50,
+        "income": 1076.2,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 50,
+        "income": 1076.2,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 1,
+        "incomeRelevantCount": 222
+      }
+    }
+  ]
+}
