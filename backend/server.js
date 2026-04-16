@@ -157,6 +157,22 @@ const V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS = Number.isFinite(V2_ADMIN_A
   : 500000;
 const V2_ADMIN_ADJUSTMENT_MAX_NOTE_LENGTH = 500;
 const V2_ADMIN_ADJUSTMENT_MAX_TICKET_ID_LENGTH = 80;
+const V2_TX_RETRY_MAX_ATTEMPTS_RAW = Number(process.env.V2_TX_RETRY_MAX_ATTEMPTS || 3);
+const V2_TX_RETRY_MAX_ATTEMPTS = Number.isFinite(V2_TX_RETRY_MAX_ATTEMPTS_RAW)
+  && V2_TX_RETRY_MAX_ATTEMPTS_RAW >= 1
+  && V2_TX_RETRY_MAX_ATTEMPTS_RAW <= 5
+  ? Math.trunc(V2_TX_RETRY_MAX_ATTEMPTS_RAW)
+  : 3;
+const V2_TX_RETRY_BASE_DELAY_MS_RAW = Number(process.env.V2_TX_RETRY_BASE_DELAY_MS || 40);
+const V2_TX_RETRY_BASE_DELAY_MS = Number.isFinite(V2_TX_RETRY_BASE_DELAY_MS_RAW)
+  && V2_TX_RETRY_BASE_DELAY_MS_RAW >= 0
+  ? Math.trunc(V2_TX_RETRY_BASE_DELAY_MS_RAW)
+  : 40;
+const V2_TX_RETRY_JITTER_MS_RAW = Number(process.env.V2_TX_RETRY_JITTER_MS || 60);
+const V2_TX_RETRY_JITTER_MS = Number.isFinite(V2_TX_RETRY_JITTER_MS_RAW)
+  && V2_TX_RETRY_JITTER_MS_RAW >= 0
+  ? Math.trunc(V2_TX_RETRY_JITTER_MS_RAW)
+  : 60;
 const V2_DEFAULT_PIN_PRICE_CENTS_RAW = Number(process.env.V2_DEFAULT_PIN_PRICE_CENTS || 1100);
 const V2_DEFAULT_PIN_PRICE_CENTS = Number.isFinite(V2_DEFAULT_PIN_PRICE_CENTS_RAW) && V2_DEFAULT_PIN_PRICE_CENTS_RAW > 0
   ? Math.trunc(V2_DEFAULT_PIN_PRICE_CENTS_RAW)
@@ -711,6 +727,69 @@ function parseIdempotencyResponseBody(responseBody) {
   } catch {
     return null;
   }
+}
+
+function isRetryableV2TransactionError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  const errno = Number(error?.errno || 0);
+  return code === 'ER_LOCK_DEADLOCK'
+    || code === 'ER_LOCK_WAIT_TIMEOUT'
+    || errno === 1213
+    || errno === 1205;
+}
+
+function computeV2TxRetryDelayMs(attemptNo) {
+  const exponentialPart = V2_TX_RETRY_BASE_DELAY_MS * Math.max(1, attemptNo);
+  const jitterPart = V2_TX_RETRY_JITTER_MS > 0
+    ? Math.floor(Math.random() * (V2_TX_RETRY_JITTER_MS + 1))
+    : 0;
+  return exponentialPart + jitterPart;
+}
+
+function waitMs(durationMs) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Math.trunc(durationMs)));
+  });
+}
+
+async function executeV2TransactionWithRetry(executor, operationName) {
+  let attempt = 0;
+  let lastError = null;
+
+  while (attempt < V2_TX_RETRY_MAX_ATTEMPTS) {
+    attempt += 1;
+    try {
+      const result = await executor();
+      if (result && typeof result === 'object' && result.payload && attempt > 1) {
+        result.payload.retryAttemptsUsed = attempt - 1;
+        result.payload.retryReason = 'db_lock_contention';
+      }
+      return result;
+    } catch (error) {
+      lastError = error;
+
+      if (!isRetryableV2TransactionError(error)) {
+        throw error;
+      }
+
+      if (attempt >= V2_TX_RETRY_MAX_ATTEMPTS) {
+        const exhaustedError = createApiError(
+          503,
+          `Transaction retry limit exceeded for ${operationName}`,
+          'TX_RETRY_EXHAUSTED'
+        );
+        exhaustedError.causeCode = error?.code || null;
+        exhaustedError.causeErrno = Number(error?.errno || 0) || null;
+        throw exhaustedError;
+      }
+
+      const waitDurationMs = computeV2TxRetryDelayMs(attempt);
+      console.warn(`[v2-retry] ${operationName} attempt ${attempt}/${V2_TX_RETRY_MAX_ATTEMPTS} failed with ${error?.code || error?.message || 'unknown'}; retrying in ${waitDurationMs}ms`);
+      await waitMs(waitDurationMs);
+    }
+  }
+
+  throw lastError || createApiError(500, `Unexpected retry wrapper exit for ${operationName}`, 'TX_RETRY_WRAPPER_ERROR');
 }
 
 function normalizeV2FundTransferProgressUpdates(rawProgressUpdates, senderUserCode, receiverUserCode) {
@@ -3564,16 +3643,19 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const result = await processV2FundTransfer({
-        idempotencyKey,
-        actorUserCode,
-        senderUserCode,
-        receiverUserCode,
-        amountCents,
-        helpProgressUpdates: normalizedProgress.updates,
-        referenceId,
-        description
-      });
+      const result = await executeV2TransactionWithRetry(
+        () => processV2FundTransfer({
+          idempotencyKey,
+          actorUserCode,
+          senderUserCode,
+          receiverUserCode,
+          amountCents,
+          helpProgressUpdates: normalizedProgress.updates,
+          referenceId,
+          description
+        }),
+        V2_FUND_TRANSFER_ENDPOINT_NAME
+      );
 
       sendJson(res, result.status, result.payload);
     } catch (error) {
@@ -3623,15 +3705,18 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const result = await processV2WithdrawalDebit({
-        idempotencyKey,
-        actorUserCode,
-        amountCents,
-        destinationType,
-        destinationRef,
-        referenceId,
-        description
-      });
+      const result = await executeV2TransactionWithRetry(
+        () => processV2WithdrawalDebit({
+          idempotencyKey,
+          actorUserCode,
+          amountCents,
+          destinationType,
+          destinationRef,
+          referenceId,
+          description
+        }),
+        V2_WITHDRAWAL_ENDPOINT_NAME
+      );
 
       sendJson(res, result.status, result.payload);
     } catch (error) {
@@ -3704,15 +3789,18 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const result = await processV2PinPurchase({
-        idempotencyKey,
-        actorUserCode,
-        buyerUserCode,
-        quantity,
-        pinPriceCents,
-        expiresAt,
-        description
-      });
+      const result = await executeV2TransactionWithRetry(
+        () => processV2PinPurchase({
+          idempotencyKey,
+          actorUserCode,
+          buyerUserCode,
+          quantity,
+          pinPriceCents,
+          expiresAt,
+          description
+        }),
+        V2_PIN_PURCHASE_ENDPOINT_NAME
+      );
 
       sendJson(res, result.status, result.payload);
     } catch (error) {
@@ -3794,17 +3882,20 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const result = await processV2ReferralCredit({
-        idempotencyKey,
-        actorUserCode,
-        sourceUserCode,
-        beneficiaryUserCode,
-        sourceTxnId,
-        eventType,
-        levelNo,
-        amountCents,
-        description
-      });
+      const result = await executeV2TransactionWithRetry(
+        () => processV2ReferralCredit({
+          idempotencyKey,
+          actorUserCode,
+          sourceUserCode,
+          beneficiaryUserCode,
+          sourceTxnId,
+          eventType,
+          levelNo,
+          amountCents,
+          description
+        }),
+        V2_REFERRAL_CREDIT_ENDPOINT_NAME
+      );
 
       sendJson(res, result.status, result.payload);
     } catch (error) {
@@ -3902,19 +3993,22 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const result = await processV2AdminAdjustment({
-        idempotencyKey,
-        actorUserCode,
-        targetUserCode,
-        approverUserCode,
-        walletType,
-        direction,
-        amountCents,
-        reasonCode,
-        ticketId,
-        note,
-        description
-      });
+      const result = await executeV2TransactionWithRetry(
+        () => processV2AdminAdjustment({
+          idempotencyKey,
+          actorUserCode,
+          targetUserCode,
+          approverUserCode,
+          walletType,
+          direction,
+          amountCents,
+          reasonCode,
+          ticketId,
+          note,
+          description
+        }),
+        V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME
+      );
 
       sendJson(res, result.status, result.payload);
     } catch (error) {

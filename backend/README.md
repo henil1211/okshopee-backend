@@ -346,6 +346,45 @@ Idempotency behavior:
 - Same key + same payload: returns previous success response with `idempotentReplay: true`.
 - Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
 
+## V2 deadlock retry behavior
+
+V2 mutating endpoints (`fund-transfers`, `withdrawals`, `pins/purchase`, `referrals/credit`, `admin/adjustments`) automatically retry transaction execution for transient DB lock errors:
+
+- `ER_LOCK_DEADLOCK` (MySQL errno 1213)
+- `ER_LOCK_WAIT_TIMEOUT` (MySQL errno 1205)
+
+Retry policy defaults:
+- Max attempts: `3`
+- Delay: exponential base `40ms` + jitter up to `60ms`
+
+Optional tuning env vars:
+```env
+V2_TX_RETRY_MAX_ATTEMPTS=3
+V2_TX_RETRY_BASE_DELAY_MS=40
+V2_TX_RETRY_JITTER_MS=60
+```
+
+Notes:
+- On successful retry, API response includes `retryAttemptsUsed` and `retryReason`.
+- If retries are exhausted, endpoint returns `503` with code `TX_RETRY_EXHAUSTED`.
+
+Deadlock contention smoke test:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\backend\scripts\smoke-test-v2-deadlock-retry.ps1 \
+  -ActorUserCode 1000001 \
+  -SenderUserCode 1000001 \
+  -ReceiverUserCode 2000002 \
+  -AmountCents 100 \
+  -Requests 12 \
+  -Parallelism 6 \
+  -SaveReport
+```
+
+Expected result:
+- Exit code `0`
+- No `5xx` responses
+- No `TX_RETRY_EXHAUSTED` in report
+
 ## Storage Model
 Data is stored as real documents in separate MongoDB collections, including:
 - `users`, `wallets`, `transactions`, `matrix`
