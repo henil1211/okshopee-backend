@@ -4116,7 +4116,7 @@ const server = createServer(async (req, res) => {
       sendJson(res, status, {
         ok: false,
         error: message,
-        code: error?.code || 'V2_FUND_TRANSFER_FAILED'
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_FUND_TRANSFER_FAILED'
       });
     }
     return;
@@ -4178,7 +4178,7 @@ const server = createServer(async (req, res) => {
       sendJson(res, status, {
         ok: false,
         error: message,
-        code: error?.code || 'V2_WITHDRAWAL_FAILED'
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_WITHDRAWAL_FAILED'
       });
     }
     return;
@@ -4263,7 +4263,7 @@ const server = createServer(async (req, res) => {
       sendJson(res, status, {
         ok: false,
         error: message,
-        code: error?.code || 'V2_PIN_PURCHASE_FAILED'
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_PIN_PURCHASE_FAILED'
       });
     }
     return;
@@ -4359,7 +4359,7 @@ const server = createServer(async (req, res) => {
       sendJson(res, status, {
         ok: false,
         error: message,
-        code: error?.code || 'V2_REFERRAL_CREDIT_FAILED'
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_REFERRAL_CREDIT_FAILED'
       });
     }
     return;
@@ -4473,7 +4473,7 @@ const server = createServer(async (req, res) => {
       sendJson(res, status, {
         ok: false,
         error: message,
-        code: error?.code || 'V2_ADMIN_ADJUSTMENT_FAILED'
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_ADMIN_ADJUSTMENT_FAILED'
       });
     }
     return;
