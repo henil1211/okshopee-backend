@@ -49,6 +49,7 @@ npm run dev
 - `POST /api/v2/pins/purchase`
 - `POST /api/v2/referrals/credit`
 - `POST /api/v2/withdrawals`
+- `POST /api/v2/admin/adjustments`
 
 Example request:
 ```bash
@@ -256,6 +257,75 @@ curl -X POST http://127.0.0.1:4000/api/v2/referrals/credit \
 
 Idempotency behavior:
 - First request: posts ledger transaction, credits beneficiary `income` wallet, marks referral event posted.
+- Same key + same payload: returns previous success response with `idempotentReplay: true`.
+- Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
+
+## V2 admin adjustment endpoint
+
+Before using `POST /api/v2/admin/adjustments`:
+
+1. Set env flags:
+```env
+STORAGE_MODE=mysql
+FINANCE_ENGINE_MODE=v2
+LEGACY_FINANCIAL_WRITES_ENABLED=false
+REQUIRE_IDEMPOTENCY_FOR_MUTATIONS=true
+REQUIRE_SYSTEM_VERSION_HEADER=true
+V2_ADMIN_ADJUSTMENT_ENABLED=true
+V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS=1000001,3000003
+V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS=500000
+```
+2. Apply migrations:
+   - `backend/scripts/migrations/001_v2_finance_core.sql`
+   - `backend/scripts/migrations/002_v2_admin_adjustment_audit.sql`
+3. Ensure the following are provisioned:
+   - actor and approver users in `v2_users` (active)
+   - target user with requested wallet type in `v2_wallet_accounts`
+   - active system GL account `SYS_ADJUSTMENT_SUSPENSE`
+
+Request headers:
+- `Authorization: Bearer <actorUserCode>`
+- `X-System-Version: v2`
+- `Idempotency-Key: <unique-per-logical-request>`
+- `Content-Type: application/json`
+
+Request body example:
+```json
+{
+  "targetUserCode": "2000002",
+  "approverUserCode": "3000003",
+  "walletType": "income",
+  "direction": "credit",
+  "amountCents": 500,
+  "reasonCode": "MANUAL_FIX",
+  "ticketId": "INC-2026-0416-01",
+  "note": "Emergency correction approved by operations",
+  "description": "Admin adjustment"
+}
+```
+
+Rules enforced:
+- Endpoint is disabled unless `V2_ADMIN_ADJUSTMENT_ENABLED=true`.
+- Actor and approver must be included in `V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS`.
+- `reasonCode`, `ticketId`, `note`, and `approverUserCode` are mandatory.
+- Four-eyes policy applies when amount is above `V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS` (actor must differ from approver).
+- Wallet and ledger are updated in a single transaction; request hash and payload are written to immutable `v2_admin_adjustment_audit`.
+
+Smoke-test example:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\backend\scripts\smoke-test-v2-admin-adjustment.ps1 \
+  -ActorUserCode 1000001 \
+  -TargetUserCode 2000002 \
+  -ApproverUserCode 3000003 \
+  -WalletType income \
+  -Direction credit \
+  -AmountCents 500 \
+  -ReasonCode MANUAL_FIX \
+  -TicketId INC-2026-0416-01
+```
+
+Idempotency behavior:
+- First request: posts a ledger transaction, updates wallet, and inserts audit row.
 - Same key + same payload: returns previous success response with `idempotentReplay: true`.
 - Same key + different payload: returns `409` with code `IDEMPOTENCY_PAYLOAD_MISMATCH`.
 

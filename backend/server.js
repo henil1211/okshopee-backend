@@ -138,8 +138,23 @@ const V2_FUND_TRANSFER_ENDPOINT_NAME = 'v2_fund_transfer';
 const V2_WITHDRAWAL_ENDPOINT_NAME = 'v2_withdrawal';
 const V2_PIN_PURCHASE_ENDPOINT_NAME = 'v2_pin_purchase';
 const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
+const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 const V2_REFERRAL_MAX_LEVEL = 100;
+const V2_ADMIN_ADJUSTMENT_ENABLED = process.env.V2_ADMIN_ADJUSTMENT_ENABLED === 'true';
+const V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS = new Set(
+  String(process.env.V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS || '')
+    .split(',')
+    .map((value) => normalizeV2UserCode(value))
+    .filter((value) => isValidV2UserCode(value))
+);
+const V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS_RAW = Number(process.env.V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS || 500000);
+const V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS = Number.isFinite(V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS_RAW)
+  && V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS_RAW >= 0
+  ? Math.trunc(V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS_RAW)
+  : 500000;
+const V2_ADMIN_ADJUSTMENT_MAX_NOTE_LENGTH = 500;
+const V2_ADMIN_ADJUSTMENT_MAX_TICKET_ID_LENGTH = 80;
 const V2_DEFAULT_PIN_PRICE_CENTS_RAW = Number(process.env.V2_DEFAULT_PIN_PRICE_CENTS || 1100);
 const V2_DEFAULT_PIN_PRICE_CENTS = Number.isFinite(V2_DEFAULT_PIN_PRICE_CENTS_RAW) && V2_DEFAULT_PIN_PRICE_CENTS_RAW > 0
   ? Math.trunc(V2_DEFAULT_PIN_PRICE_CENTS_RAW)
@@ -627,6 +642,19 @@ function isValidV2WithdrawalDestinationType(value) {
 
 function isValidV2ReferralEventType(value) {
   return value === 'direct_referral' || value === 'level_referral';
+}
+
+function isValidV2WalletType(value) {
+  return value === 'fund' || value === 'income' || value === 'royalty';
+}
+
+function isValidV2AdminAdjustmentDirection(value) {
+  return value === 'credit' || value === 'debit';
+}
+
+function isValidV2AdminAdjustmentReasonCode(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return /^[A-Z0-9_]{3,40}$/.test(normalized);
 }
 
 function buildV2ReferralEventKey({ sourceTxnId, beneficiaryUserCode, levelNo, eventType }) {
@@ -1792,6 +1820,373 @@ async function processV2ReferralCredit({
       eventType,
       levelNo,
       amountCents,
+      postedAt: new Date().toISOString()
+    };
+
+    await connection.execute(
+      `UPDATE v2_idempotency_keys
+       SET status = 'completed', response_code = ?, response_body = ?,
+           locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+       WHERE idempotency_key = ?`,
+      [200, JSON.stringify(responsePayload), idempotencyKey]
+    );
+
+    await connection.commit();
+    transactionOpen = false;
+    return { status: 200, payload: responsePayload };
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        await connection.rollback();
+      } catch {
+        // Ignore rollback secondary errors.
+      }
+    }
+
+    const shouldMarkFailed = !!idempotencyKey && !!pool;
+    if (shouldMarkFailed) {
+      try {
+        await pool.execute(
+          `UPDATE v2_idempotency_keys
+           SET status = 'failed', error_code = ?, locked_until = NULL,
+               updated_at = NOW(3), last_seen_at = NOW(3)
+           WHERE idempotency_key = ?`,
+          [String(error?.code || 'UNKNOWN_V2_ERROR').slice(0, 80), idempotencyKey]
+        );
+      } catch {
+        // Keep the primary error as source of truth.
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function processV2AdminAdjustment({
+  idempotencyKey,
+  actorUserCode,
+  targetUserCode,
+  approverUserCode,
+  walletType,
+  direction,
+  amountCents,
+  reasonCode,
+  ticketId,
+  note,
+  description
+}) {
+  if (STORAGE_MODE !== 'mysql') {
+    throw createApiError(503, 'V2 financial APIs require STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
+  }
+
+  if (FINANCE_ENGINE_MODE !== 'v2') {
+    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/admin/adjustments', 'FINANCE_MODE_MISMATCH');
+  }
+
+  if (!V2_ADMIN_ADJUSTMENT_ENABLED) {
+    throw createApiError(403, 'Admin adjustment endpoint is disabled by policy', 'ADMIN_ADJUSTMENT_DISABLED');
+  }
+
+  if (!pool) {
+    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
+  }
+
+  if (V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.size === 0) {
+    throw createApiError(503, 'V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS policy is not configured', 'ADMIN_ADJUSTMENT_POLICY_MISSING');
+  }
+
+  if (!V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.has(actorUserCode)) {
+    throw createApiError(403, 'Actor is not allowed to perform admin adjustments', 'ACTOR_NOT_ALLOWED');
+  }
+
+  const requiresFourEyes = amountCents > V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS;
+  if (requiresFourEyes && actorUserCode === approverUserCode) {
+    throw createApiError(
+      403,
+      `Four-eyes control requires approverUserCode different from actorUserCode when amount exceeds ${V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS}`,
+      'FOUR_EYES_REQUIRED'
+    );
+  }
+
+  const requestHash = buildV2RequestHash({
+    endpoint: V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME,
+    actorUserCode,
+    targetUserCode,
+    approverUserCode,
+    walletType,
+    direction,
+    amountCents,
+    reasonCode,
+    ticketId,
+    note,
+    description
+  });
+
+  const connection = await pool.getConnection();
+  let transactionOpen = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionOpen = true;
+
+    const [actorRows] = await connection.execute(
+      `SELECT id, user_code, status
+       FROM v2_users
+       WHERE user_code = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [actorUserCode]
+    );
+    const actor = Array.isArray(actorRows) ? actorRows[0] : null;
+    if (!actor) {
+      throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
+    }
+    if (actor.status !== 'active') {
+      throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
+    }
+
+    const [idemRows] = await connection.execute(
+      `SELECT idempotency_key, request_hash, status, response_code, response_body, locked_until
+       FROM v2_idempotency_keys
+       WHERE idempotency_key = ?
+       FOR UPDATE`,
+      [idempotencyKey]
+    );
+    const existingIdem = Array.isArray(idemRows) && idemRows.length > 0 ? idemRows[0] : null;
+
+    if (existingIdem) {
+      if (existingIdem.request_hash !== requestHash) {
+        throw createApiError(409, 'Idempotency key reused with different payload', 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+      }
+
+      if (existingIdem.status === 'completed') {
+        const replayPayload = parseIdempotencyResponseBody(existingIdem.response_body) || { ok: true };
+        await connection.commit();
+        transactionOpen = false;
+        return {
+          status: Number(existingIdem.response_code) || 200,
+          payload: { ...replayPayload, idempotentReplay: true }
+        };
+      }
+
+      const lockExpiresAt = existingIdem.locked_until ? new Date(existingIdem.locked_until).getTime() : 0;
+      if (existingIdem.status === 'processing' && Number.isFinite(lockExpiresAt) && lockExpiresAt > Date.now()) {
+        throw createApiError(409, 'Request with this Idempotency-Key is already processing', 'IDEMPOTENCY_IN_PROGRESS');
+      }
+
+      await connection.execute(
+        `UPDATE v2_idempotency_keys
+         SET endpoint_name = ?, actor_user_id = ?, request_hash = ?, status = 'processing',
+             locked_until = DATE_ADD(NOW(3), INTERVAL ? SECOND), error_code = NULL,
+             updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS, idempotencyKey]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_idempotency_keys
+          (idempotency_key, endpoint_name, actor_user_id, request_hash, status, locked_until)
+         VALUES
+          (?, ?, ?, ?, 'processing', DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
+        [idempotencyKey, V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
+      );
+    }
+
+    const [userRows] = await connection.execute(
+      `SELECT id, user_code, status
+       FROM v2_users
+       WHERE user_code IN (?, ?)
+       ORDER BY id
+       FOR UPDATE`,
+      [targetUserCode, approverUserCode]
+    );
+    const targetUser = Array.isArray(userRows)
+      ? userRows.find((row) => row.user_code === targetUserCode)
+      : null;
+    const approverUser = Array.isArray(userRows)
+      ? userRows.find((row) => row.user_code === approverUserCode)
+      : null;
+
+    if (!targetUser || !approverUser) {
+      throw createApiError(404, 'Target or approver user is not provisioned in v2_users', 'V2_USER_NOT_FOUND');
+    }
+    if (targetUser.status !== 'active' || approverUser.status !== 'active') {
+      throw createApiError(403, 'Target or approver user is not active', 'USER_NOT_ACTIVE');
+    }
+    if (!V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.has(approverUserCode)) {
+      throw createApiError(403, 'Approver user is not allowed by admin adjustment policy', 'APPROVER_NOT_ALLOWED');
+    }
+
+    const [walletRows] = await connection.execute(
+      `SELECT id, user_id, wallet_type, current_amount_cents, gl_account_id
+       FROM v2_wallet_accounts
+       WHERE user_id = ? AND wallet_type = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [targetUser.id, walletType]
+    );
+    const targetWallet = Array.isArray(walletRows) ? walletRows[0] : null;
+    if (!targetWallet) {
+      throw createApiError(404, 'Target wallet is not provisioned in v2', 'V2_WALLET_NOT_FOUND');
+    }
+
+    const [suspenseRows] = await connection.execute(
+      `SELECT id, account_code, is_active
+       FROM v2_gl_accounts
+       WHERE account_code = 'SYS_ADJUSTMENT_SUSPENSE'
+       LIMIT 1
+       FOR UPDATE`
+    );
+    const suspenseAccount = Array.isArray(suspenseRows) ? suspenseRows[0] : null;
+    if (!suspenseAccount || Number(suspenseAccount.is_active) !== 1) {
+      throw createApiError(503, 'System adjustment suspense account is not configured', 'SYS_ADJUSTMENT_SUSPENSE_MISSING');
+    }
+
+    const txUuid = randomUUID();
+    const auditUuid = randomUUID();
+    const referenceId = String(ticketId).slice(0, 80);
+    const effectiveDescription = description || `Admin adjustment ${direction} ${walletType} (${reasonCode})`;
+
+    const [ledgerTxnResult] = await connection.execute(
+      `INSERT INTO v2_ledger_transactions
+        (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
+         reference_type, reference_id, description, total_debit_cents, total_credit_cents)
+       VALUES
+        (?, 'v2', 'admin_adjustment', 'posted', ?, ?,
+         'admin_adjustment', ?, ?, ?, ?)`,
+      [
+        txUuid,
+        idempotencyKey,
+        actor.id,
+        referenceId,
+        effectiveDescription,
+        amountCents,
+        amountCents
+      ]
+    );
+
+    const ledgerTxnId = Number(ledgerTxnResult?.insertId || 0);
+    if (!ledgerTxnId) {
+      throw createApiError(500, 'Failed to create ledger transaction', 'LEDGER_TXN_CREATE_FAILED');
+    }
+
+    const isCreditToUser = direction === 'credit';
+    if (isCreditToUser) {
+      await connection.execute(
+        `INSERT INTO v2_ledger_entries
+          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+         VALUES
+          (?, 1, ?, NULL, NULL, 'debit', ?),
+          (?, 2, ?, ?, ?, 'credit', ?)`,
+        [
+          ledgerTxnId,
+          suspenseAccount.id,
+          amountCents,
+          ledgerTxnId,
+          targetWallet.gl_account_id,
+          targetWallet.user_id,
+          walletType,
+          amountCents
+        ]
+      );
+
+      const [walletUpdateResult] = await connection.execute(
+        `UPDATE v2_wallet_accounts
+         SET current_amount_cents = current_amount_cents + ?, version = version + 1
+         WHERE user_id = ? AND wallet_type = ?`,
+        [amountCents, targetWallet.user_id, walletType]
+      );
+      if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
+        throw createApiError(500, 'Failed to apply wallet credit for admin adjustment', 'WALLET_UPDATE_FAILED');
+      }
+    } else {
+      if (Number(targetWallet.current_amount_cents) < amountCents) {
+        throw createApiError(409, 'Insufficient wallet balance for admin debit adjustment', 'INSUFFICIENT_FUNDS');
+      }
+
+      await connection.execute(
+        `INSERT INTO v2_ledger_entries
+          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+         VALUES
+          (?, 1, ?, ?, ?, 'debit', ?),
+          (?, 2, ?, NULL, NULL, 'credit', ?)`,
+        [
+          ledgerTxnId,
+          targetWallet.gl_account_id,
+          targetWallet.user_id,
+          walletType,
+          amountCents,
+          ledgerTxnId,
+          suspenseAccount.id,
+          amountCents
+        ]
+      );
+
+      const [walletUpdateResult] = await connection.execute(
+        `UPDATE v2_wallet_accounts
+         SET current_amount_cents = current_amount_cents - ?, version = version + 1
+         WHERE user_id = ? AND wallet_type = ? AND current_amount_cents >= ?`,
+        [amountCents, targetWallet.user_id, walletType, amountCents]
+      );
+      if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
+        throw createApiError(409, 'Insufficient wallet balance for admin debit adjustment', 'INSUFFICIENT_FUNDS');
+      }
+    }
+
+    const auditPayload = {
+      endpoint: '/api/v2/admin/adjustments',
+      actorUserCode,
+      targetUserCode,
+      approverUserCode,
+      walletType,
+      direction,
+      amountCents,
+      reasonCode,
+      ticketId,
+      note,
+      description
+    };
+
+    await connection.execute(
+      `INSERT INTO v2_admin_adjustment_audit
+        (audit_uuid, idempotency_key, request_hash, actor_user_id, approver_user_id,
+         target_user_id, wallet_type, direction, amount_cents, reason_code,
+         ticket_id, note, payload_json, ledger_tx_uuid)
+       VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        auditUuid,
+        idempotencyKey,
+        requestHash,
+        actor.id,
+        approverUser.id,
+        targetUser.id,
+        walletType,
+        direction,
+        amountCents,
+        reasonCode,
+        ticketId,
+        note,
+        JSON.stringify(auditPayload),
+        txUuid
+      ]
+    );
+
+    const responsePayload = {
+      ok: true,
+      txUuid,
+      auditUuid,
+      ledgerTransactionId: ledgerTxnId,
+      actorUserCode,
+      targetUserCode,
+      approverUserCode,
+      walletType,
+      direction,
+      amountCents,
+      reasonCode,
+      ticketId,
       postedAt: new Date().toISOString()
     };
 
@@ -3195,6 +3590,116 @@ const server = createServer(async (req, res) => {
         ok: false,
         error: message,
         code: error?.code || 'V2_REFERRAL_CREDIT_FAILED'
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v2/admin/adjustments') {
+    try {
+      const actorUserCode = normalizeV2UserCode(parseBearerToken(req));
+      if (!isValidV2UserCode(actorUserCode)) {
+        sendJson(res, 401, { ok: false, error: 'Missing or invalid Bearer token', code: 'INVALID_BEARER_TOKEN' });
+        return;
+      }
+
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const targetUserCode = normalizeV2UserCode(parsed?.targetUserCode);
+      const approverUserCode = normalizeV2UserCode(parsed?.approverUserCode);
+      const walletType = String(parsed?.walletType || '').trim().toLowerCase();
+      const direction = String(parsed?.direction || '').trim().toLowerCase();
+      const amountCentsRaw = Number(parsed?.amountCents);
+      const amountCents = Number.isFinite(amountCentsRaw) ? amountCentsRaw : NaN;
+      const reasonCode = String(parsed?.reasonCode || '').trim().toUpperCase();
+      const ticketId = String(parsed?.ticketId || '').trim();
+      const note = String(parsed?.note || '').trim();
+      const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
+      const description = typeof parsed?.description === 'string' ? parsed.description.trim().slice(0, 255) : null;
+
+      if (!isValidV2UserCode(targetUserCode) || !isValidV2UserCode(approverUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'targetUserCode and approverUserCode are required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (!isValidV2WalletType(walletType)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'walletType must be one of fund|income|royalty',
+          code: 'INVALID_WALLET_TYPE'
+        });
+        return;
+      }
+      if (!isValidV2AdminAdjustmentDirection(direction)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'direction must be one of credit|debit',
+          code: 'INVALID_DIRECTION'
+        });
+        return;
+      }
+      if (!Number.isInteger(amountCents) || amountCents <= 0) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'amountCents must be a positive integer',
+          code: 'INVALID_AMOUNT'
+        });
+        return;
+      }
+      if (!isValidV2AdminAdjustmentReasonCode(reasonCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'reasonCode must be 3-40 chars and use A-Z, 0-9, _',
+          code: 'INVALID_REASON_CODE'
+        });
+        return;
+      }
+      if (!ticketId || ticketId.length > V2_ADMIN_ADJUSTMENT_MAX_TICKET_ID_LENGTH) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `ticketId is required and must be 1-${V2_ADMIN_ADJUSTMENT_MAX_TICKET_ID_LENGTH} chars`,
+          code: 'INVALID_TICKET_ID'
+        });
+        return;
+      }
+      if (!note || note.length > V2_ADMIN_ADJUSTMENT_MAX_NOTE_LENGTH) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `note is required and must be 1-${V2_ADMIN_ADJUSTMENT_MAX_NOTE_LENGTH} chars`,
+          code: 'INVALID_NOTE'
+        });
+        return;
+      }
+      if (!idempotencyKey) {
+        sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
+        return;
+      }
+
+      const result = await processV2AdminAdjustment({
+        idempotencyKey,
+        actorUserCode,
+        targetUserCode,
+        approverUserCode,
+        walletType,
+        direction,
+        amountCents,
+        reasonCode,
+        ticketId,
+        note,
+        description
+      });
+
+      sendJson(res, result.status, result.payload);
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to process admin adjustment');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || 'V2_ADMIN_ADJUSTMENT_FAILED'
       });
     }
     return;
