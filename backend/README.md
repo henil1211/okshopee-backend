@@ -85,10 +85,27 @@ Request body example:
   "senderUserCode": "1000001",
   "receiverUserCode": "2000002",
   "amountCents": 5000,
+  "progressUpdates": [
+    {
+      "userCode": "1000001",
+      "eventSeq": 101,
+      "currentStageCode": "STAGE_A",
+      "receiveCountInStage": 1,
+      "receiveTotalCentsInStage": 5000,
+      "nextRequiredGiveCents": 10000,
+      "pendingGiveCents": 5000
+    }
+  ],
   "referenceId": "ft-2026-04-16-001",
   "description": "Fund transfer"
 }
 ```
+
+Optional `progressUpdates` notes:
+- Use when this transfer must update help progression state in the same DB transaction.
+- Each entry must target either `senderUserCode` or `receiverUserCode`.
+- `eventSeq` must be strictly increasing compared to `v2_help_progress_state.last_progress_event_seq`.
+- On stale sequence, request fails with `409` and code `STALE_PROGRESS_EVENT_SEQ`.
 
 Smoke-test example:
 ```bash

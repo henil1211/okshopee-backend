@@ -141,6 +141,8 @@ const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
 const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 const V2_REFERRAL_MAX_LEVEL = 100;
+const V2_HELP_STAGE_CODE_MAX_LENGTH = 40;
+const V2_FUND_TRANSFER_MAX_PROGRESS_UPDATES = 2;
 const V2_ADMIN_ADJUSTMENT_ENABLED = process.env.V2_ADMIN_ADJUSTMENT_ENABLED === 'true';
 const V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS = new Set(
   String(process.env.V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS || '')
@@ -711,12 +713,204 @@ function parseIdempotencyResponseBody(responseBody) {
   }
 }
 
+function normalizeV2FundTransferProgressUpdates(rawProgressUpdates, senderUserCode, receiverUserCode) {
+  if (rawProgressUpdates == null) return { updates: [] };
+
+  if (!Array.isArray(rawProgressUpdates)) {
+    return {
+      error: 'progressUpdates must be an array when provided',
+      code: 'INVALID_PROGRESS_UPDATES'
+    };
+  }
+
+  if (rawProgressUpdates.length > V2_FUND_TRANSFER_MAX_PROGRESS_UPDATES) {
+    return {
+      error: `progressUpdates supports at most ${V2_FUND_TRANSFER_MAX_PROGRESS_UPDATES} users per request`,
+      code: 'INVALID_PROGRESS_UPDATES'
+    };
+  }
+
+  const allowedUserCodes = new Set([senderUserCode, receiverUserCode]);
+  const seenUserCodes = new Set();
+  const normalizedUpdates = [];
+
+  for (const entry of rawProgressUpdates) {
+    if (!entry || typeof entry !== 'object') {
+      return {
+        error: 'Each progressUpdates entry must be an object',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+
+    const userCode = normalizeV2UserCode(entry.userCode);
+    if (!isValidV2UserCode(userCode)) {
+      return {
+        error: 'progressUpdates.userCode must be a valid 3-20 chars [a-zA-Z0-9_-]',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+    if (!allowedUserCodes.has(userCode)) {
+      return {
+        error: 'progressUpdates.userCode must be one of senderUserCode or receiverUserCode',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+    if (seenUserCodes.has(userCode)) {
+      return {
+        error: 'progressUpdates cannot contain duplicate userCode entries',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+
+    const eventSeqRaw = Number(entry.eventSeq);
+    const eventSeq = Number.isFinite(eventSeqRaw) ? Math.trunc(eventSeqRaw) : NaN;
+    if (!Number.isSafeInteger(eventSeq) || eventSeq <= 0) {
+      return {
+        error: 'progressUpdates.eventSeq must be a positive integer',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+
+    const currentStageCode = String(entry.currentStageCode || '').trim();
+    if (!currentStageCode || currentStageCode.length > V2_HELP_STAGE_CODE_MAX_LENGTH) {
+      return {
+        error: `progressUpdates.currentStageCode is required and must be 1-${V2_HELP_STAGE_CODE_MAX_LENGTH} chars`,
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+
+    const receiveCountRaw = Number(entry.receiveCountInStage);
+    const receiveCountInStage = Number.isFinite(receiveCountRaw) ? Math.trunc(receiveCountRaw) : NaN;
+    if (!Number.isSafeInteger(receiveCountInStage) || receiveCountInStage < 0) {
+      return {
+        error: 'progressUpdates.receiveCountInStage must be an integer >= 0',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+
+    const receiveTotalRaw = Number(entry.receiveTotalCentsInStage);
+    const receiveTotalCentsInStage = Number.isFinite(receiveTotalRaw) ? Math.trunc(receiveTotalRaw) : NaN;
+    if (!Number.isSafeInteger(receiveTotalCentsInStage) || receiveTotalCentsInStage < 0) {
+      return {
+        error: 'progressUpdates.receiveTotalCentsInStage must be an integer >= 0',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+
+    const nextRequiredRaw = Number(entry.nextRequiredGiveCents);
+    const nextRequiredGiveCents = Number.isFinite(nextRequiredRaw) ? Math.trunc(nextRequiredRaw) : NaN;
+    if (!Number.isSafeInteger(nextRequiredGiveCents) || nextRequiredGiveCents < 0) {
+      return {
+        error: 'progressUpdates.nextRequiredGiveCents must be an integer >= 0',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+
+    const pendingGiveRaw = Number(entry.pendingGiveCents);
+    const pendingGiveCents = Number.isFinite(pendingGiveRaw) ? Math.trunc(pendingGiveRaw) : NaN;
+    if (!Number.isSafeInteger(pendingGiveCents) || pendingGiveCents < 0) {
+      return {
+        error: 'progressUpdates.pendingGiveCents must be an integer >= 0',
+        code: 'INVALID_PROGRESS_UPDATES'
+      };
+    }
+
+    seenUserCodes.add(userCode);
+    normalizedUpdates.push({
+      userCode,
+      eventSeq,
+      currentStageCode,
+      receiveCountInStage,
+      receiveTotalCentsInStage,
+      nextRequiredGiveCents,
+      pendingGiveCents
+    });
+  }
+
+  return { updates: normalizedUpdates };
+}
+
+async function applyV2HelpProgressUpdates({ connection, helpProgressUpdates, allowedUsersByCode }) {
+  if (!Array.isArray(helpProgressUpdates) || helpProgressUpdates.length === 0) {
+    return [];
+  }
+
+  const orderedUpdates = [...helpProgressUpdates].sort((a, b) => a.userCode.localeCompare(b.userCode));
+  const appliedUpdates = [];
+
+  for (const update of orderedUpdates) {
+    const allowedUser = allowedUsersByCode.get(update.userCode);
+    if (!allowedUser) {
+      throw createApiError(400, 'progressUpdates contains userCode outside fund transfer participants', 'INVALID_PROGRESS_USER');
+    }
+
+    const [progressRows] = await connection.execute(
+      `SELECT user_id, last_progress_event_seq
+       FROM v2_help_progress_state
+       WHERE user_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [allowedUser.userId]
+    );
+
+    const existingState = Array.isArray(progressRows) ? progressRows[0] : null;
+    if (existingState && Number(existingState.last_progress_event_seq) >= Number(update.eventSeq)) {
+      throw createApiError(409, 'progressUpdates.eventSeq must be strictly greater than last_progress_event_seq', 'STALE_PROGRESS_EVENT_SEQ');
+    }
+
+    if (existingState) {
+      await connection.execute(
+        `UPDATE v2_help_progress_state
+         SET current_stage_code = ?,
+             receive_count_in_stage = ?,
+             receive_total_cents_in_stage = ?,
+             next_required_give_cents = ?,
+             pending_give_cents = ?,
+             last_progress_event_seq = ?,
+             updated_at = NOW(3)
+         WHERE user_id = ?`,
+        [
+          update.currentStageCode,
+          update.receiveCountInStage,
+          update.receiveTotalCentsInStage,
+          update.nextRequiredGiveCents,
+          update.pendingGiveCents,
+          update.eventSeq,
+          allowedUser.userId
+        ]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_help_progress_state
+          (user_id, current_stage_code, receive_count_in_stage, receive_total_cents_in_stage,
+           next_required_give_cents, pending_give_cents, last_progress_event_seq, baseline_snapshot_at)
+         VALUES
+          (?, ?, ?, ?, ?, ?, ?, NOW(3))`,
+        [
+          allowedUser.userId,
+          update.currentStageCode,
+          update.receiveCountInStage,
+          update.receiveTotalCentsInStage,
+          update.nextRequiredGiveCents,
+          update.pendingGiveCents,
+          update.eventSeq
+        ]
+      );
+    }
+
+    appliedUpdates.push({ userCode: update.userCode, eventSeq: update.eventSeq });
+  }
+
+  return appliedUpdates;
+}
+
 async function processV2FundTransfer({
   idempotencyKey,
   actorUserCode,
   senderUserCode,
   receiverUserCode,
   amountCents,
+  helpProgressUpdates,
   referenceId,
   description
 }) {
@@ -738,6 +932,7 @@ async function processV2FundTransfer({
     senderUserCode,
     receiverUserCode,
     amountCents,
+    helpProgressUpdates,
     referenceId,
     description
   });
@@ -910,6 +1105,15 @@ async function processV2FundTransfer({
       throw createApiError(500, 'Failed to credit receiver wallet', 'RECEIVER_WALLET_UPDATE_FAILED');
     }
 
+    const appliedHelpProgressUpdates = await applyV2HelpProgressUpdates({
+      connection,
+      helpProgressUpdates,
+      allowedUsersByCode: new Map([
+        [senderUserCode, { userId: senderWallet.user_id }],
+        [receiverUserCode, { userId: receiverWallet.user_id }]
+      ])
+    });
+
     const responsePayload = {
       ok: true,
       txUuid,
@@ -919,6 +1123,12 @@ async function processV2FundTransfer({
       amountCents,
       postedAt: new Date().toISOString()
     };
+
+    if (appliedHelpProgressUpdates.length > 0) {
+      responsePayload.helpProgress = {
+        updatedUsers: appliedHelpProgressUpdates
+      };
+    }
 
     await connection.execute(
       `UPDATE v2_idempotency_keys
@@ -3308,6 +3518,11 @@ const server = createServer(async (req, res) => {
       const receiverUserCode = normalizeV2UserCode(parsed?.receiverUserCode);
       const amountCentsRaw = Number(parsed?.amountCents);
       const amountCents = Number.isFinite(amountCentsRaw) ? Math.trunc(amountCentsRaw) : NaN;
+      const normalizedProgress = normalizeV2FundTransferProgressUpdates(
+        parsed?.progressUpdates,
+        senderUserCode,
+        receiverUserCode
+      );
       const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
       const referenceId = typeof parsed?.referenceId === 'string' ? parsed.referenceId.trim() : '';
       const description = typeof parsed?.description === 'string' ? parsed.description.trim().slice(0, 255) : null;
@@ -3336,6 +3551,14 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { ok: false, error: 'amountCents must be a positive integer', code: 'INVALID_AMOUNT' });
         return;
       }
+      if (normalizedProgress.error) {
+        sendJson(res, 400, {
+          ok: false,
+          error: normalizedProgress.error,
+          code: normalizedProgress.code
+        });
+        return;
+      }
       if (!idempotencyKey) {
         sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
         return;
@@ -3347,6 +3570,7 @@ const server = createServer(async (req, res) => {
         senderUserCode,
         receiverUserCode,
         amountCents,
+        helpProgressUpdates: normalizedProgress.updates,
         referenceId,
         description
       });
