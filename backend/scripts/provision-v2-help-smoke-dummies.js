@@ -157,7 +157,7 @@ async function detectStateStoreColumns(conn) {
   };
 }
 
-async function ensureV2User(conn, userCode, fullName, sponsorCode) {
+async function ensureV2User(conn, userCode, fullName) {
   const normalizedCode = normalizeUserCode(userCode);
   await conn.execute(
     `INSERT INTO v2_users
@@ -183,20 +183,6 @@ async function ensureV2User(conn, userCode, fullName, sponsorCode) {
     throw new Error(`Failed to read v2_users id for ${normalizedCode}`);
   }
   const userId = Number(rows[0].id);
-
-  if (sponsorCode) {
-    const [sponsorRows] = await conn.execute(
-      'SELECT id FROM v2_users WHERE user_code = ? LIMIT 1',
-      [normalizeUserCode(sponsorCode)]
-    );
-    const sponsorId = sponsorRows?.[0]?.id ? Number(sponsorRows[0].id) : null;
-    if (sponsorId) {
-      await conn.execute(
-        'UPDATE v2_users SET sponsor_user_id = ? WHERE id = ?',
-        [sponsorId, userId]
-      );
-    }
-  }
 
   return userId;
 }
@@ -251,8 +237,8 @@ async function main() {
   try {
     await conn.beginTransaction();
 
-    const parentUserId = await ensureV2User(conn, PARENT_USER_CODE, 'Smoke Parent', null);
-    const sourceUserId = await ensureV2User(conn, SOURCE_USER_CODE, 'Smoke Source', PARENT_USER_CODE);
+    const parentUserId = await ensureV2User(conn, PARENT_USER_CODE, 'Smoke Parent');
+    const sourceUserId = await ensureV2User(conn, SOURCE_USER_CODE, 'Smoke Source');
 
     for (const walletType of ['fund', 'income', 'royalty']) {
       await ensureWallet(conn, parentUserId, PARENT_USER_CODE, walletType);
