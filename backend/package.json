@@ -11,6 +11,7 @@
     "verify:wallet:mysql": "node scripts/verify-wallet-ledger-resync.cjs --mysql",
     "verify:wallet:gate:file": "node scripts/verify-wallet-ledger-resync.cjs --fail-on-mismatch",
     "verify:wallet:gate:mysql": "node scripts/verify-wallet-ledger-resync.cjs --mysql --fail-on-mismatch",
+    "v2:smoke:inputs": "node scripts/get-v2-smoke-inputs.cjs",
     "phasea:fix:dry": "node scripts/fix-v2-phase-a-seeding.cjs",
     "phasea:fix:apply": "node scripts/fix-v2-phase-a-seeding.cjs --apply",
     "v2:close-fake-users": "node scripts/close-v2-users.cjs 2000002 3000003 --status closed"
