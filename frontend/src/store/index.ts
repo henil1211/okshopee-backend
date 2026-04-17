@@ -485,6 +485,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       return { success: false, message: 'Target user not found' };
     }
     const canonicalTargetUser = Database.getUserByUserId(targetUser.userId) || Database.getUserById(targetUser.id) || targetUser;
+    const targetAccess = evaluateUserAccess(canonicalTargetUser);
+    if (!targetAccess.allowed) {
+      return {
+        success: false,
+        message: `Cannot impersonate this user: ${targetAccess.message || 'Account is inactive. Contact admin.'}`
+      };
+    }
 
     // Start impersonation session
     Database.startImpersonation({
@@ -496,8 +503,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isActive: true
     });
 
-    set({ impersonatedUser: canonicalTargetUser });
-    return { success: true, message: `Now logged in as ${canonicalTargetUser.fullName}` };
+    set({ impersonatedUser: targetAccess.user });
+    return { success: true, message: `Now logged in as ${targetAccess.user.fullName}` };
   },
 
   endImpersonation: () => {
