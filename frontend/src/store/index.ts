@@ -6,7 +6,7 @@ import type {
   MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal,
   MarketplaceInvoice, RewardRedemption
 } from '@/types';
-import Database from '@/db';
+import Database, { DB_KEYS } from '@/db';
 import { AUTH_MAINTENANCE_ENABLED, AUTH_MAINTENANCE_MESSAGE } from '@/lib/maintenance';
 import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
 import { isValidPhoneNumberForCountry, normalizePhoneNumber } from '@/utils/helpers';
@@ -31,6 +31,26 @@ function resolveCanonicalUserForWalletActions(userRef: string): User | undefined
   const resolved = Database.getUserById(userRef) || Database.getUserByUserId(userRef);
   if (!resolved) return undefined;
   return Database.getUserByUserId(resolved.userId) || resolved;
+}
+
+async function verifyTransferPersistedOnServer(expectedTxIds: Array<string | null | undefined>): Promise<boolean> {
+  const txIds = expectedTxIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
+  if (txIds.length === 0) return true;
+
+  try {
+    await Database.hydrateFromServer({
+      keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
+      strict: true,
+      maxAttempts: 2,
+      timeoutMs: 15000,
+      retryDelayMs: 700
+    });
+  } catch {
+    return false;
+  }
+
+  const transactions = Database.getTransactions();
+  return txIds.every((id) => transactions.some((tx) => tx.id === id));
 }
 
 const WALLET_MAINTENANCE_INTERVAL_MS = 30_000;
@@ -1060,6 +1080,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         return { success: false, message: 'Insufficient royalty wallet balance' };
       }
 
+      let royaltySendTxId: string | null = null;
+      let royaltyReceiveTxId: string | null = null;
+
       await Database.runWithLocalStateTransaction(async () => {
         Database.updateWallet(effectiveFromUserId, {
           royaltyWallet: royaltyBalance - amount,
@@ -1069,7 +1092,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
         const now = new Date().toISOString();
         const baseNow = Date.now();
-        const royaltySendTxId = `tx_${baseNow}_royalty_send`;
+        royaltySendTxId = `tx_${baseNow}_royalty_send`;
 
         Database.createTransaction({
           id: royaltySendTxId,
@@ -1083,8 +1106,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
           completedAt: now
         });
 
+        royaltyReceiveTxId = `tx_${baseNow}_royalty_recv_${destinationWallet}`;
         Database.createTransaction({
-          id: `tx_${baseNow}_royalty_recv_${destinationWallet}`,
+          id: royaltyReceiveTxId,
           userId: effectiveFromUserId,
           type: destinationWallet === 'income' ? 'royalty_transfer' : 'p2p_transfer',
           amount,
@@ -1107,6 +1131,15 @@ export const useWalletStore = create<WalletState>((set, get) => ({
           retryDelayMs: 1500
         }
       });
+
+      const persisted = await verifyTransferPersistedOnServer([royaltySendTxId, royaltyReceiveTxId]);
+      if (!persisted) {
+        get().loadWallet(effectiveFromUserId);
+        return {
+          success: false,
+          message: 'Transfer was not persisted on server. Please retry. If it repeats, use the v2 financial API path and check backend sync logs.'
+        };
+      }
 
       get().loadWallet(effectiveFromUserId);
       return {
@@ -1144,6 +1177,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         }
       }
 
+      let incomeSendTxId: string | null = null;
+      let incomeReceiveTxId: string | null = null;
+
       await Database.runWithLocalStateTransaction(async () => {
         Database.updateWallet(effectiveFromUserId, {
           incomeWallet: fromWallet.incomeWallet - amount
@@ -1155,7 +1191,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
         const now = new Date().toISOString();
         const baseNow = Date.now();
-        const incomeSendTxId = `tx_${baseNow}_income_send`;
+        incomeSendTxId = `tx_${baseNow}_income_send`;
         Database.createTransaction({
           id: incomeSendTxId,
           userId: effectiveFromUserId,
@@ -1171,8 +1207,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         });
 
         if (isSelfTransfer) {
+          incomeReceiveTxId = `tx_${baseNow}_fund_recv_self`;
           Database.createTransaction({
-            id: `tx_${baseNow}_fund_recv_self`,
+            id: incomeReceiveTxId,
             userId: effectiveFromUserId,
             type: 'p2p_transfer',
             amount,
@@ -1184,8 +1221,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
             completedAt: now
           });
         } else {
+          incomeReceiveTxId = `tx_${baseNow}_income_recv`;
           Database.createTransaction({
-            id: `tx_${baseNow}_income_recv`,
+            id: incomeReceiveTxId,
             userId: toUser.id,
             type: 'p2p_transfer',
             amount,
@@ -1206,6 +1244,15 @@ export const useWalletStore = create<WalletState>((set, get) => ({
           retryDelayMs: 1500
         }
       });
+
+      const persisted = await verifyTransferPersistedOnServer([incomeSendTxId, incomeReceiveTxId]);
+      if (!persisted) {
+        get().loadWallet(effectiveFromUserId);
+        return {
+          success: false,
+          message: 'Transfer was not persisted on server. Please retry. If it repeats, use the v2 financial API path and check backend sync logs.'
+        };
+      }
 
       get().loadWallet(effectiveFromUserId);
       return {
@@ -1240,6 +1287,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       return { success: false, message: 'Invalid or expired OTP' };
     }
 
+    let fundSendTxId: string | null = null;
+    let fundReceiveTxId: string | null = null;
+
     // Fund wallet P2P transfer (upline/downline only)
     await Database.runWithLocalStateTransaction(async () => {
       Database.updateWallet(effectiveFromUserId, {
@@ -1252,8 +1302,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
       const now = new Date().toISOString();
       const baseNow = Date.now();
+      fundSendTxId = `tx_${baseNow}_send`;
       Database.createTransaction({
-        id: `tx_${baseNow}_send`,
+        id: fundSendTxId,
         userId: effectiveFromUserId,
         type: 'p2p_transfer',
         amount: -amount,
@@ -1264,8 +1315,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         completedAt: now
       });
 
+      fundReceiveTxId = `tx_${baseNow}_recv`;
       Database.createTransaction({
-        id: `tx_${baseNow}_recv`,
+        id: fundReceiveTxId,
         userId: toUser.id,
         type: 'p2p_transfer',
         amount,
@@ -1285,6 +1337,15 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         retryDelayMs: 1500
       }
     });
+
+    const persisted = await verifyTransferPersistedOnServer([fundSendTxId, fundReceiveTxId]);
+    if (!persisted) {
+      get().loadWallet(effectiveFromUserId);
+      return {
+        success: false,
+        message: 'Transfer was not persisted on server. Please retry. If it repeats, use the v2 financial API path and check backend sync logs.'
+      };
+    }
 
     get().loadWallet(effectiveFromUserId);
 
