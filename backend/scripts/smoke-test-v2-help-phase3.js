@@ -181,12 +181,15 @@ async function ensureV2HelpSettlementTables(connection) {
 }
 
 async function main() {
-  const conn = await mysql.createConnection({
+  const pool = mysql.createPool({
     host: process.env.MYSQL_HOST || '127.0.0.1',
     port: Number(process.env.MYSQL_PORT || 3306),
     user: process.env.MYSQL_USER || 'root',
     password: process.env.MYSQL_PASSWORD || '',
-    database: process.env.MYSQL_DATABASE || 'okshopee24'
+    database: process.env.MYSQL_DATABASE || 'okshopee24',
+    waitForConnections: true,
+    connectionLimit: 4,
+    queueLimit: 0
   });
 
   try {
@@ -200,9 +203,9 @@ async function main() {
       throw new Error(`Backend health check failed at ${BACKEND_URL}/api/health`);
     }
 
-    await ensureV2HelpSettlementTables(conn);
+    await ensureV2HelpSettlementTables(pool);
 
-    const [stateRows] = await conn.execute(
+    const [stateRows] = await pool.execute(
       `SELECT state_key, state_value
        FROM state_store
        WHERE state_key IN ('mlm_matrix', 'mlm_users', 'mlm_settings')`
@@ -219,7 +222,7 @@ async function main() {
     const directCountByUserCode = buildLegacyDirectCountMap(Array.isArray(legacyUsers) ? legacyUsers : []);
     const incrementalRequirements = extractIncrementalDirectRequirementsFromLegacySettings(legacySettings, 10);
 
-    const [activeRows] = await conn.execute(
+    const [activeRows] = await pool.execute(
       `SELECT id, user_code, status
        FROM v2_users
        WHERE status = 'active'`
@@ -315,7 +318,7 @@ async function main() {
       throw new Error('Failed to resolve beneficiary ids in v2_users');
     }
 
-    await conn.execute(
+    await pool.execute(
       `INSERT INTO v2_help_level_state
         (user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
          locked_qualification_cents, safety_deducted_cents,
@@ -327,7 +330,7 @@ async function main() {
       [releaseBeneficiaryId, Number(candidate.releaseLevelNo), HELP_AMOUNT_CENTS]
     );
 
-    const [walletBeforeRows] = await conn.execute(
+    const [walletBeforeRows] = await pool.execute(
       `SELECT current_amount_cents
        FROM v2_wallet_accounts
        WHERE user_id = ? AND wallet_type = 'income'
@@ -346,7 +349,7 @@ async function main() {
       idempotencyKey: `smoke-qrel-${Date.now()}-1`
     });
 
-    const [stateAfterRows] = await conn.execute(
+    const [stateAfterRows] = await pool.execute(
       `SELECT locked_qualification_cents
        FROM v2_help_level_state
        WHERE user_id = ? AND level_no = ?
@@ -357,7 +360,7 @@ async function main() {
       ? stateAfterRows[0].locked_qualification_cents
       : 0);
 
-    const [walletAfterRows] = await conn.execute(
+    const [walletAfterRows] = await pool.execute(
       `SELECT current_amount_cents
        FROM v2_wallet_accounts
        WHERE user_id = ? AND wallet_type = 'income'
@@ -387,7 +390,7 @@ async function main() {
       releasedEntry
     };
 
-    await conn.execute(
+    await pool.execute(
       `INSERT INTO v2_help_level_state
         (user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
          locked_qualification_cents, safety_deducted_cents,
@@ -415,7 +418,7 @@ async function main() {
 
     let safetyPoolCreditCount = 0;
     if (fifthEntry?.ledgerTransactionId) {
-      const [safetyRows] = await conn.execute(
+      const [safetyRows] = await pool.execute(
         `SELECT COUNT(*) AS c
          FROM v2_ledger_entries e
          INNER JOIN v2_gl_accounts g ON g.id = e.gl_account_id
@@ -456,7 +459,7 @@ async function main() {
     const [concurrentA, concurrentB] = await Promise.all([reqA, reqB]);
     const eventKey = String(concurrentA.body?.eventKey || concurrentB.body?.eventKey || '');
 
-    const [queueRows] = await conn.execute(
+    const [queueRows] = await pool.execute(
       `SELECT COUNT(*) AS c
        FROM v2_help_events_queue
        WHERE event_key = ?`,
@@ -465,7 +468,7 @@ async function main() {
     const queueCount = Number(Array.isArray(queueRows) && queueRows[0] ? queueRows[0].c : 0);
 
     const refPrefix = `${eventKey.slice(0, 60)}:%`;
-    const [txnRows1] = await conn.execute(
+    const [txnRows1] = await pool.execute(
       `SELECT COUNT(*) AS c
        FROM v2_ledger_transactions
        WHERE reference_type = 'help_event' AND reference_id LIKE ?`,
@@ -481,7 +484,7 @@ async function main() {
       idempotencyKey: `${concurrentSourceRef}-c`
     });
 
-    const [txnRows2] = await conn.execute(
+    const [txnRows2] = await pool.execute(
       `SELECT COUNT(*) AS c
        FROM v2_ledger_transactions
        WHERE reference_type = 'help_event' AND reference_id LIKE ?`,
@@ -510,7 +513,7 @@ async function main() {
       process.exitCode = 2;
     }
   } finally {
-    await conn.end();
+    await pool.end();
   }
 }
 
