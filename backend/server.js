@@ -3942,6 +3942,7 @@ const server = createServer(async (req, res) => {
     url = new URL(req.url || '/', `http://${req.headers.host || `localhost:${PORT}`}`);
   } catch {
     url = { pathname: '' };
+  }
 
   try {
     // ...existing code...
