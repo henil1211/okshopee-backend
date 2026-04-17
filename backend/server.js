@@ -153,6 +153,7 @@ const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
 const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 const V2_REFERRAL_MAX_LEVEL = 100;
+const V2_REFERRAL_SOURCE_REF_MAX_LENGTH = 120;
 const V2_HELP_STAGE_CODE_MAX_LENGTH = 40;
 const V2_FUND_TRANSFER_MAX_PROGRESS_UPDATES = 2;
 const V2_ADMIN_ADJUSTMENT_ENABLED = process.env.V2_ADMIN_ADJUSTMENT_ENABLED === 'true';
@@ -718,6 +719,13 @@ function isValidV2ReferralEventType(value) {
   return value === 'direct_referral' || value === 'level_referral';
 }
 
+function isValidV2ReferralSourceRef(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return false;
+  if (normalized.length > V2_REFERRAL_SOURCE_REF_MAX_LENGTH) return false;
+  return /^[a-zA-Z0-9:_-]+$/.test(normalized);
+}
+
 function isValidV2WalletType(value) {
   return value === 'fund' || value === 'income' || value === 'royalty';
 }
@@ -733,6 +741,10 @@ function isValidV2AdminAdjustmentReasonCode(value) {
 
 function buildV2ReferralEventKey({ sourceTxnId, beneficiaryUserCode, levelNo, eventType }) {
   return `REF:${sourceTxnId}:${beneficiaryUserCode}:${levelNo}:${eventType}`;
+}
+
+function buildV2ReferralEventKeyFromRef({ sourceRef, beneficiaryUserCode, levelNo, eventType }) {
+  return `REFKEY:${sourceRef}:${beneficiaryUserCode}:${levelNo}:${eventType}`;
 }
 
 function generateV2PinCode() {
@@ -2242,6 +2254,7 @@ async function processV2ReferralCredit({
   beneficiaryUserCode,
   allowInactiveActor = false,
   sourceTxnId,
+  sourceRef = null,
   eventType,
   levelNo,
   amountCents,
@@ -2259,19 +2272,38 @@ async function processV2ReferralCredit({
     throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
   }
 
-  const eventKey = buildV2ReferralEventKey({
-    sourceTxnId,
-    beneficiaryUserCode,
-    levelNo,
-    eventType
-  }).slice(0, 140);
+  const hasSourceTxnId = Number.isSafeInteger(sourceTxnId) && sourceTxnId > 0;
+  const normalizedSourceRef = typeof sourceRef === 'string' ? sourceRef.trim() : '';
+  const hasSourceRef = isValidV2ReferralSourceRef(normalizedSourceRef);
+
+  if (hasSourceTxnId && hasSourceRef) {
+    throw createApiError(400, 'sourceTxnId and sourceRef are mutually exclusive', 'REFERRAL_SOURCE_CONFLICT');
+  }
+  if (!hasSourceTxnId && !hasSourceRef) {
+    throw createApiError(400, 'Either sourceTxnId or sourceRef is required', 'REFERRAL_SOURCE_REQUIRED');
+  }
+
+  const eventKey = hasSourceTxnId
+    ? buildV2ReferralEventKey({
+      sourceTxnId,
+      beneficiaryUserCode,
+      levelNo,
+      eventType
+    }).slice(0, 140)
+    : buildV2ReferralEventKeyFromRef({
+      sourceRef: normalizedSourceRef,
+      beneficiaryUserCode,
+      levelNo,
+      eventType
+    }).slice(0, 140);
 
   const requestHash = buildV2RequestHash({
     endpoint: V2_REFERRAL_CREDIT_ENDPOINT_NAME,
     actorUserCode,
     sourceUserCode,
     beneficiaryUserCode,
-    sourceTxnId,
+    sourceTxnId: hasSourceTxnId ? sourceTxnId : null,
+    sourceRef: hasSourceRef ? normalizedSourceRef : null,
     eventType,
     levelNo,
     amountCents,
@@ -2375,20 +2407,22 @@ async function processV2ReferralCredit({
       throw createApiError(403, 'Source or beneficiary user is not active', 'USER_NOT_ACTIVE');
     }
 
-    const [sourceTxnRows] = await connection.execute(
-      `SELECT id, initiator_user_id
-       FROM v2_ledger_transactions
-       WHERE id = ?
-       LIMIT 1
-       FOR UPDATE`,
-      [sourceTxnId]
-    );
-    const sourceTxn = Array.isArray(sourceTxnRows) ? sourceTxnRows[0] : null;
-    if (!sourceTxn) {
-      throw createApiError(404, 'sourceTxnId is not found in v2_ledger_transactions', 'SOURCE_TXN_NOT_FOUND');
-    }
-    if (Number(sourceTxn.initiator_user_id) !== Number(sourceUser.id)) {
-      throw createApiError(409, 'sourceTxnId does not belong to sourceUserCode', 'SOURCE_TXN_USER_MISMATCH');
+    if (hasSourceTxnId) {
+      const [sourceTxnRows] = await connection.execute(
+        `SELECT id, initiator_user_id
+         FROM v2_ledger_transactions
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [sourceTxnId]
+      );
+      const sourceTxn = Array.isArray(sourceTxnRows) ? sourceTxnRows[0] : null;
+      if (!sourceTxn) {
+        throw createApiError(404, 'sourceTxnId is not found in v2_ledger_transactions', 'SOURCE_TXN_NOT_FOUND');
+      }
+      if (Number(sourceTxn.initiator_user_id) !== Number(sourceUser.id)) {
+        throw createApiError(409, 'sourceTxnId does not belong to sourceUserCode', 'SOURCE_TXN_USER_MISMATCH');
+      }
     }
 
     await connection.execute(
@@ -2397,7 +2431,7 @@ async function processV2ReferralCredit({
        VALUES
         (?, ?, ?, ?, ?, ?, ?, 'pending')
        ON DUPLICATE KEY UPDATE id = id`,
-      [eventKey, eventType, sourceUser.id, beneficiaryUser.id, sourceTxnId, levelNo, amountCents]
+      [eventKey, eventType, sourceUser.id, beneficiaryUser.id, hasSourceTxnId ? sourceTxnId : null, levelNo, amountCents]
     );
 
     const [eventRows] = await connection.execute(
@@ -2417,10 +2451,14 @@ async function processV2ReferralCredit({
     const eventMatchesRequest =
       Number(referralEvent.source_user_id) === Number(sourceUser.id)
       && Number(referralEvent.beneficiary_user_id) === Number(beneficiaryUser.id)
-      && Number(referralEvent.source_txn_id) === Number(sourceTxnId)
       && Number(referralEvent.level_no) === Number(levelNo)
       && String(referralEvent.event_type) === eventType
-      && Number(referralEvent.amount_cents) === Number(amountCents);
+      && Number(referralEvent.amount_cents) === Number(amountCents)
+      && (
+        hasSourceTxnId
+          ? Number(referralEvent.source_txn_id) === Number(sourceTxnId)
+          : (referralEvent.source_txn_id == null)
+      );
 
     if (!eventMatchesRequest) {
       throw createApiError(409, 'Referral event payload mismatches existing deduped event', 'REFERRAL_EVENT_MISMATCH');
@@ -2435,7 +2473,7 @@ async function processV2ReferralCredit({
       const responsePayload = {
         ok: true,
         eventKey,
-        sourceTxnId,
+        ...(hasSourceTxnId ? { sourceTxnId } : { sourceRef: normalizedSourceRef }),
         sourceUserCode,
         beneficiaryUserCode,
         eventType,
@@ -2552,7 +2590,7 @@ async function processV2ReferralCredit({
       txUuid,
       eventKey,
       ledgerTransactionId: ledgerTxnId,
-      sourceTxnId,
+      ...(hasSourceTxnId ? { sourceTxnId } : { sourceRef: normalizedSourceRef }),
       sourceUserCode,
       beneficiaryUserCode,
       eventType,
@@ -4302,6 +4340,9 @@ const server = createServer(async (req, res) => {
       const eventType = String(parsed?.eventType || '').trim().toLowerCase();
       const sourceTxnIdRaw = Number(parsed?.sourceTxnId);
       const sourceTxnId = Number.isFinite(sourceTxnIdRaw) ? sourceTxnIdRaw : NaN;
+      const sourceRef = typeof parsed?.sourceRef === 'string' ? parsed.sourceRef.trim() : '';
+      const hasSourceTxnId = Number.isSafeInteger(sourceTxnId) && sourceTxnId > 0;
+      const hasSourceRef = !!sourceRef;
       const levelNoRaw = parsed?.levelNo == null ? 1 : Number(parsed?.levelNo);
       const levelNo = Number.isFinite(levelNoRaw) ? levelNoRaw : NaN;
       const amountCentsRaw = Number(parsed?.amountCents);
@@ -4325,11 +4366,27 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      if (!Number.isSafeInteger(sourceTxnId) || sourceTxnId <= 0) {
+      if (hasSourceTxnId && hasSourceRef) {
         sendJson(res, 400, {
           ok: false,
-          error: 'sourceTxnId must be a positive integer',
-          code: 'INVALID_SOURCE_TXN_ID'
+          error: 'Provide either sourceTxnId or sourceRef, not both',
+          code: 'INVALID_REFERRAL_SOURCE'
+        });
+        return;
+      }
+      if (!hasSourceTxnId && !hasSourceRef) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'sourceTxnId or sourceRef is required',
+          code: 'MISSING_REFERRAL_SOURCE'
+        });
+        return;
+      }
+      if (!hasSourceTxnId && hasSourceRef && !isValidV2ReferralSourceRef(sourceRef)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `sourceRef must be 1-${V2_REFERRAL_SOURCE_REF_MAX_LENGTH} chars [a-zA-Z0-9:_-]`,
+          code: 'INVALID_SOURCE_REF'
         });
         return;
       }
@@ -4361,7 +4418,8 @@ const server = createServer(async (req, res) => {
           sourceUserCode,
           beneficiaryUserCode,
           allowInactiveActor,
-          sourceTxnId,
+          sourceTxnId: hasSourceTxnId ? sourceTxnId : null,
+          sourceRef: hasSourceRef ? sourceRef : null,
           eventType,
           levelNo,
           amountCents,

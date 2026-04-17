@@ -104,6 +104,71 @@ function resolveV2RequestHeaders(params: {
   return { headers };
 }
 
+async function submitV2ReferralCreditBySourceRef(params: {
+  sourceUserCode: string;
+  beneficiaryUserCode: string;
+  amount: number;
+  sourceRef: string;
+  eventType?: 'direct_referral' | 'level_referral';
+  levelNo?: number;
+  description?: string;
+}): Promise<{ success: boolean; message: string; idempotentReplay?: boolean }> {
+  const sourceUserCode = String(params.sourceUserCode || '').trim();
+  const beneficiaryUserCode = String(params.beneficiaryUserCode || '').trim();
+  const sourceRef = String(params.sourceRef || '').trim();
+  const eventType = params.eventType || 'direct_referral';
+  const levelNo = Number.isInteger(params.levelNo) && Number(params.levelNo) > 0 ? Number(params.levelNo) : 1;
+  const amountCents = Math.round(Number(params.amount || 0) * 100);
+
+  if (!sourceUserCode || !beneficiaryUserCode || !sourceRef) {
+    return { success: false, message: 'Missing referral credit parameters' };
+  }
+  if (!Number.isInteger(amountCents) || amountCents <= 0) {
+    return { success: false, message: 'Invalid referral credit amount' };
+  }
+
+  const sourceRefToken = sourceRef
+    .replace(/[^a-zA-Z0-9:_-]+/g, '_')
+    .slice(0, 64);
+  const idempotencyKey = `refsrc_${sourceUserCode}_${beneficiaryUserCode}_${sourceRefToken}`.slice(0, 120);
+  const requestId = generateClientRequestId('referral_credit');
+
+  const response = await fetch(`${getBackendApiBase()}/api/v2/referrals/credit`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${sourceUserCode}`,
+      'Idempotency-Key': idempotencyKey,
+      'X-System-Version': 'v2',
+      'X-Request-Id': requestId
+    },
+    body: JSON.stringify({
+      sourceUserCode,
+      beneficiaryUserCode,
+      sourceRef,
+      eventType,
+      levelNo,
+      amountCents,
+      description: String(params.description || '').trim() || undefined
+    })
+  });
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false) {
+    return {
+      success: false,
+      message: normalizeV2ApiErrorMessage(response.status, payload, 'Referral credit failed')
+    };
+  }
+
+  const idempotentReplay = typeof payload?.idempotentReplay === 'boolean' ? payload.idempotentReplay : false;
+  return {
+    success: true,
+    message: idempotentReplay ? 'Referral credit already processed (idempotent replay).' : 'Referral credit posted.',
+    idempotentReplay
+  };
+}
+
 function resolveCanonicalUserForWalletActions(userRef: string): User | undefined {
   const resolved = Database.getUserById(userRef) || Database.getUserByUserId(userRef);
   if (!resolved) return undefined;
@@ -647,6 +712,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     let newUser: User;
     let newUserId = '';
+    let referralBeneficiaryUserCode: string | null = null;
     try {
       const result = await Database.runWithLocalStateTransaction(() => {
         // Generate unique 7-digit ID
@@ -775,36 +841,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
         // Referral income
         if (sponsor) {
-          const sponsorWallet = Database.getWallet(sponsor.id);
-          const alreadyCredited = Database.hasCompletedReferralIncomeForIdentity({
-            sponsorInternalId: sponsor.id,
-            referredInternalId: createdUser.id,
-            referredUserId: createdUser.userId,
-            fullName: createdUser.fullName,
-            email: createdUser.email,
-            phone: createdUser.phone,
-            referenceTime: createdUser.createdAt
-          });
-          if (sponsorWallet && !alreadyCredited) {
-            Database.updateWallet(sponsor.id, {
-              incomeWallet: sponsorWallet.incomeWallet + directIncome,
-              totalReceived: sponsorWallet.totalReceived + directIncome
-            });
-
-            Database.createTransaction({
-              id: `tx_${Date.now()}_sponsor`,
-              userId: sponsor.id,
-              type: 'direct_income',
-              amount: directIncome,
-              fromUserId: createdUser.id,
-              status: 'completed',
-              description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`,
-              createdAt: new Date().toISOString(),
-              completedAt: new Date().toISOString()
-            });
-            // Try to collect any pending system fee from sponsor now that income arrived
-            Database.deductPendingSystemFee(sponsor.id);
-          }
+          referralBeneficiaryUserCode = sponsor.userId;
         } else {
           Database.addToSafetyPool(directIncome, createdUser.id, 'No sponsor - referral income');
         }
@@ -923,6 +960,57 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       };
     }
 
+    let referralCreditWarning: string | null = null;
+    if (referralBeneficiaryUserCode) {
+      const sourceUserCode = String(newUser.userId || '').trim();
+      const beneficiaryUserCode = String(referralBeneficiaryUserCode || '').trim();
+      const sourceRef = `reg_pin_${sourceUserCode}_${beneficiaryUserCode}`;
+
+      let referralResult = await submitV2ReferralCreditBySourceRef({
+        sourceUserCode,
+        beneficiaryUserCode,
+        amount: 5,
+        sourceRef,
+        eventType: 'direct_referral',
+        levelNo: 1,
+        description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
+      });
+
+      if (!referralResult.success) {
+        try {
+          await Database.forceRemoteSyncNowWithOptions({
+            full: false,
+            force: true,
+            timeoutMs: 30000,
+            maxAttempts: 2,
+            retryDelayMs: 1000
+          });
+          await Database.hydrateFromServer({
+            keys: [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 15000,
+            retryDelayMs: 800
+          });
+          referralResult = await submitV2ReferralCreditBySourceRef({
+            sourceUserCode,
+            beneficiaryUserCode,
+            amount: 5,
+            sourceRef,
+            eventType: 'direct_referral',
+            levelNo: 1,
+            description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
+          });
+        } catch {
+          // best-effort retry only
+        }
+      }
+
+      if (!referralResult.success) {
+        referralCreditWarning = `Referral credit is pending backend processing (${referralResult.message}).`;
+      }
+    }
+
     const welcomeSubject = 'Welcome To ReferNex';
     const welcomeBody = [
       `Hello ${newUser.fullName},`,
@@ -950,7 +1038,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         userId: newUser.userId
       }
     });
-    return { success: true, message: `Registration successful. Your ID is: ${newUserId}`, userId: newUserId };
+    const registrationMessage = referralCreditWarning
+      ? `Registration successful. Your ID is: ${newUserId}. ${referralCreditWarning}`
+      : `Registration successful. Your ID is: ${newUserId}`;
+    return { success: true, message: registrationMessage, userId: newUserId };
   },
 
   logout: () => {
@@ -2448,7 +2539,55 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const yieldEvery = quantity >= 500 ? 20 : 10;
     const progressStep = quantity >= 10 ? 10 : 1;
     const yieldToMainThread = async () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-    let sponsorIncomeCredits = 0;
+    const deferredReferralCredits: Array<{
+      sourceUserCode: string;
+      beneficiaryUserCode: string;
+      sourceRef: string;
+      amount: number;
+      description: string;
+    }> = [];
+
+    const settleDeferredReferralCredits = async (): Promise<{ failedCount: number; failedDetails: string[] }> => {
+      if (deferredReferralCredits.length === 0) {
+        return { failedCount: 0, failedDetails: [] };
+      }
+
+      let failedCount = 0;
+      const failedDetails: string[] = [];
+
+      for (let index = 0; index < deferredReferralCredits.length; index += 1) {
+        const credit = deferredReferralCredits[index];
+        const result = await submitV2ReferralCreditBySourceRef({
+          sourceUserCode: credit.sourceUserCode,
+          beneficiaryUserCode: credit.beneficiaryUserCode,
+          amount: credit.amount,
+          sourceRef: credit.sourceRef,
+          eventType: 'direct_referral',
+          levelNo: 1,
+          description: credit.description
+        });
+
+        if (!result.success) {
+          failedCount += 1;
+          if (failedDetails.length < 10) {
+            failedDetails.push(`${credit.sourceUserCode} -> ${credit.beneficiaryUserCode}: ${result.message}`);
+          }
+        }
+
+        if ((index + 1) % 10 === 0 || index + 1 === deferredReferralCredits.length) {
+          params.onProgress?.({
+            stage: 'syncing',
+            processed: quantity,
+            total: quantity,
+            created: createdUserIds.length,
+            failed: failed.length + failedCount,
+            message: `Posting referral credits... (${index + 1}/${deferredReferralCredits.length})`
+          });
+        }
+      }
+
+      return { failedCount, failedDetails };
+    };
     params.onProgress?.({
       stage: 'creating',
       processed: 0,
@@ -2544,27 +2683,13 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           });
 
           const latestSponsorAfterCount = Database.getUserByUserId(sponsor.userId);
-          const alreadyCredited = Database.hasCompletedReferralIncomeForIdentity({
-            sponsorInternalId: latestSponsorAfterCount?.id || sponsor.id,
-            referredInternalId: newUser.id,
-            referredUserId: newUser.userId,
-            fullName: newUser.fullName,
-            email: newUser.email,
-            phone: newUser.phone,
-            referenceTime: newUser.createdAt
-          });
-          if (latestSponsorAfterCount && !alreadyCredited) {
-            sponsorIncomeCredits += directIncome;
-            deferredTransactions.push({
-              id: `tx_${Date.now()}_admin_bulk_sponsor_${i}`,
-              userId: latestSponsorAfterCount.id,
-              type: 'direct_income',
+          if (latestSponsorAfterCount) {
+            deferredReferralCredits.push({
+              sourceUserCode: newUser.userId,
+              beneficiaryUserCode: latestSponsorAfterCount.userId,
+              sourceRef: `bulk_admin_${newUser.userId}_${latestSponsorAfterCount.userId}`,
               amount: directIncome,
-              fromUserId: newUser.id,
-              status: 'completed',
-              description: `Referral income from ${newUser.fullName} (${newUser.userId})`,
-              createdAt: new Date().toISOString(),
-              completedAt: new Date().toISOString()
+              description: `Referral income from ${newUser.fullName} (${newUser.userId})`
             });
           } else {
             Database.addToSafetyPool(directIncome, newUser.id, 'No sponsor - referral income');
@@ -2631,17 +2756,6 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         Database.updateUser(latestSponsor.id, {
           directCount: (latestSponsor.directCount || 0) + createdUserIds.length
         });
-        if (sponsorIncomeCredits > 0) {
-          const sponsorWallet = Database.getWallet(latestSponsor.id);
-          if (sponsorWallet) {
-            Database.updateWallet(latestSponsor.id, {
-              incomeWallet: sponsorWallet.incomeWallet + sponsorIncomeCredits,
-              totalReceived: sponsorWallet.totalReceived + sponsorIncomeCredits
-            });
-          }
-          // Try to collect any pending system fee now that income arrived
-          Database.deductPendingSystemFee(latestSponsor.id);
-        }
         Database.releaseLockedGiveHelp(latestSponsor.id);
         Database.releaseLockedReceiveHelp(latestSponsor.id);
       }
@@ -2692,20 +2806,26 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           await Database.hydrateFromServer({ strict: true, maxAttempts: 3, timeoutMs: 15000, retryDelayMs: 1200 });
           const missingAfterHydrate = createdUserIds.filter((uid) => !Database.getUserByUserId(uid));
           if (missingAfterHydrate.length === 0) {
+            const baseFailedCount = failed.length;
+            const referralSettlement = await settleDeferredReferralCredits();
+            if (referralSettlement.failedDetails.length > 0) {
+              failed.push(...referralSettlement.failedDetails);
+            }
+            const totalFailedCount = baseFailedCount + referralSettlement.failedCount;
             get().loadAllUsers();
             if (get().allTransactions.length > 0) {
               get().loadAllTransactions();
             }
             get().loadStats();
-            const recoveredMessage = failed.length > 0
-              ? `Created ${createdUserIds.length} ID(s), failed ${failed.length}`
+            const recoveredMessage = totalFailedCount > 0
+              ? `Created ${createdUserIds.length} ID(s), failed ${totalFailedCount}`
               : `Created ${createdUserIds.length} ID(s) without PIN`;
             params.onProgress?.({
               stage: 'completed',
               processed: quantity,
               total: quantity,
               created: createdUserIds.length,
-              failed: failed.length,
+              failed: totalFailedCount,
               message: `${recoveredMessage} (saved after retry)`
             });
             return {
@@ -2745,15 +2865,22 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       }
       get().loadStats();
 
-      const message = failed.length > 0
-        ? `Created ${createdUserIds.length} ID(s), failed ${failed.length}`
+      const baseFailedCount = failed.length;
+      const referralSettlement = await settleDeferredReferralCredits();
+      if (referralSettlement.failedDetails.length > 0) {
+        failed.push(...referralSettlement.failedDetails);
+      }
+      const totalFailedCount = baseFailedCount + referralSettlement.failedCount;
+
+      const message = totalFailedCount > 0
+        ? `Created ${createdUserIds.length} ID(s), failed ${totalFailedCount}`
         : `Created ${createdUserIds.length} ID(s) without PIN`;
       params.onProgress?.({
         stage: 'completed',
         processed: quantity,
         total: quantity,
         created: createdUserIds.length,
-        failed: failed.length,
+        failed: totalFailedCount,
         message
       });
 
