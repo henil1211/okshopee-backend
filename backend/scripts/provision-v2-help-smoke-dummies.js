@@ -1,11 +1,30 @@
 #!/usr/bin/env node
+import path from 'node:path';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const backendDir = path.resolve(__dirname, '..');
+
+const envCandidates = [
+  path.join(backendDir, '.env.local'),
+  path.join(backendDir, '.env')
+];
+const envPath = envCandidates.find((candidate) => existsSync(candidate));
+if (envPath) {
+  dotenv.config({ path: envPath });
+} else {
+  dotenv.config();
+}
 
 const MYSQL_HOST = process.env.MYSQL_HOST || '127.0.0.1';
 const MYSQL_PORT = Number(process.env.MYSQL_PORT || 3306);
 const MYSQL_USER = process.env.MYSQL_USER || 'root';
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || '';
-const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'okshopee';
+const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'okshopee24';
 
 const SOURCE_USER_CODE = String(process.env.SMOKE_SOURCE_USER_CODE || '9900001').trim();
 const PARENT_USER_CODE = String(process.env.SMOKE_PARENT_USER_CODE || '9900002').trim();
@@ -80,12 +99,16 @@ function upsertByKey(arrayValue, keyName, item) {
 }
 
 async function loadStateStoreJson(conn, key) {
+  const stateStoreColumns = await detectStateStoreColumns(conn);
   const [rows] = await conn.execute(
-    'SELECT value FROM state_store WHERE `key` = ? LIMIT 1',
+    `SELECT \`${stateStoreColumns.valueColumn}\` AS value_json
+       FROM state_store
+      WHERE \`${stateStoreColumns.keyColumn}\` = ?
+      LIMIT 1`,
     [key]
   );
   if (!Array.isArray(rows) || rows.length === 0) return [];
-  const raw = rows[0]?.value;
+  const raw = rows[0]?.value_json;
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
@@ -96,13 +119,42 @@ async function loadStateStoreJson(conn, key) {
 }
 
 async function saveStateStoreJson(conn, key, value) {
+  const stateStoreColumns = await detectStateStoreColumns(conn);
   const serialized = JSON.stringify(value);
+  if (stateStoreColumns.hasUpdatedAt) {
+    await conn.execute(
+      `INSERT INTO state_store (\`${stateStoreColumns.keyColumn}\`, \`${stateStoreColumns.valueColumn}\`, updated_at)
+       VALUES (?, ?, NOW())
+       ON DUPLICATE KEY UPDATE \`${stateStoreColumns.valueColumn}\` = VALUES(\`${stateStoreColumns.valueColumn}\`), updated_at = NOW()`,
+      [key, serialized]
+    );
+    return;
+  }
+
   await conn.execute(
-    `INSERT INTO state_store (\`key\`, value, updated_at)
-     VALUES (?, ?, NOW())
-     ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = NOW()`,
+    `INSERT INTO state_store (\`${stateStoreColumns.keyColumn}\`, \`${stateStoreColumns.valueColumn}\`)
+     VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE \`${stateStoreColumns.valueColumn}\` = VALUES(\`${stateStoreColumns.valueColumn}\`)`,
     [key, serialized]
   );
+}
+
+async function detectStateStoreColumns(conn) {
+  const [rows] = await conn.execute(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_schema = DATABASE()
+        AND table_name = 'state_store'`
+  );
+  const columnNames = new Set((Array.isArray(rows) ? rows : []).map((row) => String(row?.column_name || '').toLowerCase()));
+
+  const keyColumn = columnNames.has('state_key') ? 'state_key' : 'key';
+  const valueColumn = columnNames.has('state_value') ? 'state_value' : 'value';
+  return {
+    keyColumn,
+    valueColumn,
+    hasUpdatedAt: columnNames.has('updated_at')
+  };
 }
 
 async function ensureV2User(conn, userCode, fullName, sponsorCode) {
