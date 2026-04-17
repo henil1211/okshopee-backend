@@ -27,6 +27,45 @@ if (envPath) {
 const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:4000';
 const HELP_EVENT_TYPE = 'activation_join';
 const HELP_AMOUNT_CENTS = Number(process.env.V2_HELP_LEVEL1_AMOUNT_CENTS || 500);
+const SAFE_DB_NAME_PATTERN = /(test|sandbox|qa|staging|dev|local|clone)/i;
+const SMOKE_ALLOW_REAL_USERS = String(process.env.SMOKE_ALLOW_REAL_USERS || '').trim().toLowerCase() === 'true';
+const SMOKE_ALLOW_AUTO_PICK = String(process.env.SMOKE_ALLOW_AUTO_PICK || '').trim().toLowerCase() === 'true';
+
+function failSafety(message) {
+  throw new Error(`SAFETY_BLOCK: ${message}`);
+}
+
+function assertSafeDatabaseContext(databaseName) {
+  const normalized = String(databaseName || '').trim();
+  if (!normalized) {
+    failSafety('Database name is empty; refusing smoke execution.');
+  }
+
+  if (SMOKE_ALLOW_REAL_USERS) {
+    return;
+  }
+
+  if (!SAFE_DB_NAME_PATTERN.test(normalized)) {
+    failSafety(
+      `Refusing to run mutating smoke tests on database \"${normalized}\". `
+      + 'Use an isolated/test clone DB name (test/sandbox/qa/staging/dev/local/clone), '
+      + 'or set SMOKE_ALLOW_REAL_USERS=true only if you intentionally accept live-user risk.'
+    );
+  }
+}
+
+function getExplicitSmokeUserCodes() {
+  const sourceUserCode = normalizeUserCode(process.env.SMOKE_SOURCE_USER_CODE);
+  const newMemberUserCode = normalizeUserCode(process.env.SMOKE_NEW_MEMBER_USER_CODE || sourceUserCode);
+  if (!sourceUserCode || !newMemberUserCode) {
+    return null;
+  }
+
+  return {
+    sourceUserCode,
+    newMemberUserCode
+  };
+}
 
 function safeParseJSON(value, fallback) {
   if (typeof value !== 'string') return fallback;
@@ -78,6 +117,8 @@ async function main() {
   });
 
   try {
+    assertSafeDatabaseContext(process.env.MYSQL_DATABASE || '');
+
     const [healthResponse] = await Promise.all([
       fetch(`${BACKEND_URL}/api/health`).catch(() => null)
     ]);
@@ -119,9 +160,21 @@ async function main() {
       });
     }
 
+    const explicitCodes = getExplicitSmokeUserCodes();
     let candidate = null;
     let fallbackCandidate = null;
-    for (const node of matrixByCode.values()) {
+    const selectableNodes = explicitCodes
+      ? [matrixByCode.get(explicitCodes.newMemberUserCode)].filter(Boolean)
+      : Array.from(matrixByCode.values());
+
+    if (!explicitCodes && !SMOKE_ALLOW_AUTO_PICK) {
+      failSafety(
+        'Auto-pick is disabled. Set SMOKE_SOURCE_USER_CODE and optional SMOKE_NEW_MEMBER_USER_CODE for dedicated test users, '
+        + 'or set SMOKE_ALLOW_AUTO_PICK=true if you explicitly allow automatic candidate selection.'
+      );
+    }
+
+    for (const node of selectableNodes) {
       const member = node.userCode;
       const parent = node.parentUserCode;
       const grandParent = parent ? matrixByCode.get(parent)?.parentUserCode || '' : '';
@@ -130,7 +183,7 @@ async function main() {
 
       if (!fallbackCandidate) {
         fallbackCandidate = {
-          sourceUserCode: member,
+          sourceUserCode: explicitCodes?.sourceUserCode || member,
           newMemberUserCode: member,
           level1BeneficiaryCode: parent,
           level2BeneficiaryCode: null,
@@ -152,7 +205,7 @@ async function main() {
       if (!level2Qualified) continue;
 
       candidate = {
-        sourceUserCode: member,
+        sourceUserCode: explicitCodes?.sourceUserCode || member,
         newMemberUserCode: member,
         level1BeneficiaryCode: parent,
         level2BeneficiaryCode: grandParent,
