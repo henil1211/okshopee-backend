@@ -2886,6 +2886,569 @@ async function upsertV2HelpPendingGiveProgress(connection, {
   return { eventSeq: nextSeq, stageCode };
 }
 
+async function ensureV2HelpSettlementTables(connection) {
+  await connection.execute(
+    `CREATE TABLE IF NOT EXISTS v2_help_level_state (
+       id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+       user_id BIGINT UNSIGNED NOT NULL,
+       level_no SMALLINT UNSIGNED NOT NULL,
+       receive_count INT UNSIGNED NOT NULL DEFAULT 0,
+       receive_total_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       locked_first_two_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       pending_give_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       given_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       income_credited_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       last_event_seq BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+       UNIQUE KEY uq_v2_help_level_state_user_level (user_id, level_no),
+       KEY idx_v2_help_level_state_level (level_no),
+       CONSTRAINT fk_v2_help_level_state_user FOREIGN KEY (user_id) REFERENCES v2_users(id)
+     ) ENGINE=InnoDB`
+  );
+
+  await connection.execute(
+    `CREATE TABLE IF NOT EXISTS v2_help_pending_contributions (
+       id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+       source_event_key VARCHAR(180) NOT NULL,
+       source_user_id BIGINT UNSIGNED NOT NULL,
+       beneficiary_user_id BIGINT UNSIGNED NOT NULL,
+       level_no SMALLINT UNSIGNED NOT NULL,
+       side ENUM('left','right','unknown') NOT NULL DEFAULT 'unknown',
+       amount_cents BIGINT UNSIGNED NOT NULL,
+       status ENUM('pending','processed','skipped','failed') NOT NULL DEFAULT 'pending',
+       processed_txn_id BIGINT UNSIGNED NULL,
+       reason VARCHAR(190) NULL,
+       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       processed_at DATETIME(3) NULL,
+       UNIQUE KEY uq_v2_help_pending_dedupe (source_event_key, source_user_id, beneficiary_user_id, level_no, side),
+       KEY idx_v2_help_pending_source_status (source_user_id, status, level_no, id),
+       KEY idx_v2_help_pending_beneficiary_status (beneficiary_user_id, status, level_no, id),
+       CONSTRAINT fk_v2_help_pending_source FOREIGN KEY (source_user_id) REFERENCES v2_users(id),
+       CONSTRAINT fk_v2_help_pending_beneficiary FOREIGN KEY (beneficiary_user_id) REFERENCES v2_users(id),
+       CONSTRAINT fk_v2_help_pending_txn FOREIGN KEY (processed_txn_id) REFERENCES v2_ledger_transactions(id)
+     ) ENGINE=InnoDB`
+  );
+}
+
+function normalizeV2HelpContributionSide(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'left' || normalized === 'right') return normalized;
+  return 'unknown';
+}
+
+async function buildLegacyActivationContributionPlanFromMatrixState(connection, newMemberUserCode) {
+  const normalizedNewMemberUserCode = normalizeV2UserCode(newMemberUserCode);
+  if (!isValidV2UserCode(normalizedNewMemberUserCode)) {
+    return [];
+  }
+
+  const [rows] = await connection.execute(
+    `SELECT state_value
+     FROM state_store
+     WHERE state_key = 'mlm_matrix'
+     LIMIT 1`
+  );
+  const matrixRaw = Array.isArray(rows) && rows[0] ? rows[0].state_value : null;
+  const matrix = typeof matrixRaw === 'string' ? safeParseJSON(matrixRaw) : [];
+  if (!Array.isArray(matrix) || matrix.length === 0) {
+    return [];
+  }
+
+  const byUserCode = new Map();
+  for (const node of matrix) {
+    const userCode = normalizeV2UserCode(node?.userId);
+    if (!isValidV2UserCode(userCode)) continue;
+    byUserCode.set(userCode, {
+      userCode,
+      parentUserCode: normalizeV2UserCode(node?.parentId),
+      leftChildUserCode: normalizeV2UserCode(node?.leftChild),
+      rightChildUserCode: normalizeV2UserCode(node?.rightChild),
+      position: Number(node?.position)
+    });
+  }
+
+  const plan = [];
+  let currentChildUserCode = normalizedNewMemberUserCode;
+  let currentNode = byUserCode.get(currentChildUserCode) || null;
+  let levelNo = 1;
+
+  while (currentNode && levelNo <= 10) {
+    const parentUserCode = isValidV2UserCode(currentNode.parentUserCode)
+      ? currentNode.parentUserCode
+      : null;
+    if (!parentUserCode) break;
+
+    const parentNode = byUserCode.get(parentUserCode) || null;
+    let side = currentNode.position === 0
+      ? 'left'
+      : currentNode.position === 1
+        ? 'right'
+        : 'unknown';
+
+    if (parentNode) {
+      if (parentNode.leftChildUserCode === currentChildUserCode) side = 'left';
+      else if (parentNode.rightChildUserCode === currentChildUserCode) side = 'right';
+    }
+
+    plan.push({
+      beneficiaryUserCode: parentUserCode,
+      levelNo,
+      side: normalizeV2HelpContributionSide(side)
+    });
+
+    currentChildUserCode = parentUserCode;
+    currentNode = parentNode;
+    levelNo += 1;
+  }
+
+  return plan;
+}
+
+async function ensureV2HelpLevelStateRow(connection, userId, levelNo) {
+  await connection.execute(
+    `INSERT INTO v2_help_level_state
+      (user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
+       pending_give_cents, given_cents, income_credited_cents, last_event_seq)
+     VALUES
+      (?, ?, 0, 0, 0, 0, 0, 0, 0)
+     ON DUPLICATE KEY UPDATE id = id`,
+    [userId, levelNo]
+  );
+}
+
+async function lockV2HelpLevelState(connection, userId, levelNo) {
+  await ensureV2HelpLevelStateRow(connection, userId, levelNo);
+  const [rows] = await connection.execute(
+    `SELECT id, user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
+            pending_give_cents, given_cents, income_credited_cents, last_event_seq
+     FROM v2_help_level_state
+     WHERE user_id = ? AND level_no = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [userId, levelNo]
+  );
+  const state = Array.isArray(rows) ? rows[0] : null;
+  if (!state) {
+    throw createApiError(500, 'Failed to lock help level state', 'HELP_LEVEL_STATE_LOCK_FAILED');
+  }
+  return state;
+}
+
+async function consumeV2HelpPendingGiveForContribution(connection, {
+  sourceUserId,
+  levelNo,
+  amountCents
+}) {
+  if (levelNo <= 1) {
+    return {
+      consumed: true,
+      sourceLevelNo: 0,
+      sourceEventSeq: 0,
+      pendingGiveRemainingCents: null
+    };
+  }
+
+  const sourceLevelNo = Math.max(1, levelNo - 1);
+  const sourceState = await lockV2HelpLevelState(connection, sourceUserId, sourceLevelNo);
+  if (Number(sourceState.pending_give_cents || 0) < amountCents) {
+    return {
+      consumed: false,
+      sourceLevelNo,
+      sourceEventSeq: Number(sourceState.last_event_seq || 0),
+      pendingGiveRemainingCents: Number(sourceState.pending_give_cents || 0)
+    };
+  }
+
+  const nextEventSeq = Number(sourceState.last_event_seq || 0) + 1;
+  const nextPendingGive = Number(sourceState.pending_give_cents || 0) - amountCents;
+  const nextGiven = Number(sourceState.given_cents || 0) + amountCents;
+
+  await connection.execute(
+    `UPDATE v2_help_level_state
+     SET pending_give_cents = ?,
+         given_cents = ?,
+         last_event_seq = ?,
+         updated_at = NOW(3)
+     WHERE id = ?`,
+    [nextPendingGive, nextGiven, nextEventSeq, sourceState.id]
+  );
+
+  return {
+    consumed: true,
+    sourceLevelNo,
+    sourceEventSeq: nextEventSeq,
+    pendingGiveRemainingCents: nextPendingGive
+  };
+}
+
+async function createV2HelpLedgerTransaction(connection, {
+  idempotencyKey,
+  actorUserId,
+  eventKey,
+  contributionId,
+  description,
+  amountCents
+}) {
+  const txUuid = randomUUID();
+  const referenceId = `${String(eventKey || '').slice(0, 60)}:${String(contributionId || '').slice(0, 18)}`.slice(0, 80);
+
+  const [ledgerTxnResult] = await connection.execute(
+    `INSERT INTO v2_ledger_transactions
+      (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
+       reference_type, reference_id, description, total_debit_cents, total_credit_cents)
+     VALUES
+      (?, 'v2', 'referral_credit', 'posted', ?, ?,
+       'help_event', ?, ?, ?, ?)`,
+    [
+      txUuid,
+      idempotencyKey,
+      actorUserId,
+      referenceId,
+      description,
+      amountCents,
+      amountCents
+    ]
+  );
+
+  const ledgerTxnId = Number(ledgerTxnResult?.insertId || 0);
+  if (!ledgerTxnId) {
+    throw createApiError(500, 'Failed to create help settlement ledger transaction', 'LEDGER_TXN_CREATE_FAILED');
+  }
+
+  return { txUuid, ledgerTxnId };
+}
+
+async function upsertV2HelpPendingContribution(connection, {
+  sourceEventKey,
+  sourceUserId,
+  beneficiaryUserId,
+  levelNo,
+  side,
+  amountCents
+}) {
+  await connection.execute(
+    `INSERT INTO v2_help_pending_contributions
+      (source_event_key, source_user_id, beneficiary_user_id, level_no, side, amount_cents, status)
+     VALUES
+      (?, ?, ?, ?, ?, ?, 'pending')
+     ON DUPLICATE KEY UPDATE
+      amount_cents = VALUES(amount_cents),
+      status = IF(status = 'processed', status, 'pending'),
+      reason = IF(status = 'processed', reason, NULL),
+      processed_txn_id = IF(status = 'processed', processed_txn_id, NULL),
+      processed_at = IF(status = 'processed', processed_at, NULL)`,
+    [
+      sourceEventKey,
+      sourceUserId,
+      beneficiaryUserId,
+      levelNo,
+      normalizeV2HelpContributionSide(side),
+      amountCents
+    ]
+  );
+}
+
+async function applyV2HelpContributionSettlement(connection, {
+  pendingContribution,
+  actorUserId,
+  idempotencyKey,
+  eventKey,
+  helpExpenseAccount,
+  settlementAccount,
+  usersById
+}) {
+  const beneficiaryUser = usersById.get(Number(pendingContribution.beneficiary_user_id)) || null;
+  if (!beneficiaryUser || String(beneficiaryUser.status) !== 'active') {
+    const amountCents = Number(pendingContribution.amount_cents);
+    const levelNo = Number(pendingContribution.level_no);
+    const holdDescription = `Help hold level ${levelNo} for inactive beneficiary`;
+    const { txUuid, ledgerTxnId } = await createV2HelpLedgerTransaction(connection, {
+      idempotencyKey,
+      actorUserId,
+      eventKey,
+      contributionId: pendingContribution.id,
+      description: holdDescription,
+      amountCents
+    });
+
+    await connection.execute(
+      `INSERT INTO v2_ledger_entries
+        (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+       VALUES
+        (?, 1, ?, NULL, NULL, 'debit', ?),
+        (?, 2, ?, NULL, NULL, 'credit', ?)`,
+      [
+        ledgerTxnId,
+        helpExpenseAccount.id,
+        amountCents,
+        ledgerTxnId,
+        settlementAccount.id,
+        amountCents
+      ]
+    );
+
+    return {
+      status: 'processed',
+      reason: 'system_hold_beneficiary_inactive',
+      settlementMode: 'system_hold',
+      ledgerTransactionId: ledgerTxnId,
+      txUuid,
+      levelNo,
+      amountCents,
+      beneficiaryUserCode: beneficiaryUser?.user_code || null,
+      sourceProgress: null,
+      beneficiaryProgress: null,
+      unlockedIncomeCents: 0,
+      lockedForGiveCents: 0
+    };
+  }
+
+  const levelNo = Number(pendingContribution.level_no);
+  const amountCents = Number(pendingContribution.amount_cents);
+  const beneficiaryState = await lockV2HelpLevelState(connection, beneficiaryUser.id, levelNo);
+  const nextReceiveCount = Number(beneficiaryState.receive_count || 0) + 1;
+  const nextReceiveTotal = Number(beneficiaryState.receive_total_cents || 0) + amountCents;
+  const isLockedFirstTwo = nextReceiveCount <= 2;
+
+  let settlementMode = 'system_hold';
+  let beneficiaryWallet = null;
+  if (!isLockedFirstTwo) {
+    beneficiaryWallet = await lockV2IncomeWalletByUserId(connection, beneficiaryUser.id);
+    settlementMode = 'income_credit';
+  } else {
+    settlementMode = 'locked_for_give';
+  }
+
+  const summaryDescription = isLockedFirstTwo
+    ? `Locked help level ${levelNo} for ${beneficiaryUser.user_code}`
+    : `Help credit level ${levelNo} for ${beneficiaryUser.user_code}`;
+  const { txUuid, ledgerTxnId } = await createV2HelpLedgerTransaction(connection, {
+    idempotencyKey,
+    actorUserId,
+    eventKey,
+    contributionId: pendingContribution.id,
+    description: summaryDescription,
+    amountCents
+  });
+
+  if (isLockedFirstTwo) {
+    await connection.execute(
+      `INSERT INTO v2_ledger_entries
+        (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+       VALUES
+        (?, 1, ?, NULL, NULL, 'debit', ?),
+        (?, 2, ?, NULL, NULL, 'credit', ?)`,
+      [
+        ledgerTxnId,
+        helpExpenseAccount.id,
+        amountCents,
+        ledgerTxnId,
+        settlementAccount.id,
+        amountCents
+      ]
+    );
+  } else {
+    await connection.execute(
+      `INSERT INTO v2_ledger_entries
+        (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+       VALUES
+        (?, 1, ?, NULL, NULL, 'debit', ?),
+        (?, 2, ?, ?, 'income', 'credit', ?)`,
+      [
+        ledgerTxnId,
+        helpExpenseAccount.id,
+        amountCents,
+        ledgerTxnId,
+        beneficiaryWallet.gl_account_id,
+        beneficiaryWallet.user_id,
+        amountCents
+      ]
+    );
+
+    const [walletUpdateResult] = await connection.execute(
+      `UPDATE v2_wallet_accounts
+       SET current_amount_cents = current_amount_cents + ?, version = version + 1
+       WHERE user_id = ? AND wallet_type = 'income'`,
+      [amountCents, beneficiaryWallet.user_id]
+    );
+    if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
+      throw createApiError(500, 'Failed to credit beneficiary income wallet', 'BENEFICIARY_WALLET_UPDATE_FAILED');
+    }
+  }
+
+  const nextEventSeq = Number(beneficiaryState.last_event_seq || 0) + 1;
+  const nextLockedFirstTwo = Number(beneficiaryState.locked_first_two_cents || 0) + (isLockedFirstTwo ? amountCents : 0);
+  const nextPendingGive = Number(beneficiaryState.pending_give_cents || 0) + (isLockedFirstTwo ? amountCents : 0);
+  const nextIncomeCredited = Number(beneficiaryState.income_credited_cents || 0) + (isLockedFirstTwo ? 0 : amountCents);
+
+  await connection.execute(
+    `UPDATE v2_help_level_state
+     SET receive_count = ?,
+         receive_total_cents = ?,
+         locked_first_two_cents = ?,
+         pending_give_cents = ?,
+         income_credited_cents = ?,
+         last_event_seq = ?,
+         updated_at = NOW(3)
+     WHERE id = ?`,
+    [
+      nextReceiveCount,
+      nextReceiveTotal,
+      nextLockedFirstTwo,
+      nextPendingGive,
+      nextIncomeCredited,
+      nextEventSeq,
+      beneficiaryState.id
+    ]
+  );
+
+  const sourceProgress = await upsertV2HelpPendingGiveProgress(connection, {
+    userId: Number(pendingContribution.source_user_id),
+    levelNo,
+    amountCents
+  });
+  const beneficiaryProgress = await upsertV2HelpReceiveProgress(connection, {
+    userId: beneficiaryUser.id,
+    levelNo,
+    amountCents
+  });
+
+  return {
+    status: 'processed',
+    reason: settlementMode,
+    settlementMode,
+    ledgerTransactionId: ledgerTxnId,
+    txUuid,
+    levelNo,
+    amountCents,
+    beneficiaryUserCode: beneficiaryUser.user_code,
+    sourceProgress,
+    beneficiaryProgress,
+    unlockedIncomeCents: isLockedFirstTwo ? 0 : amountCents,
+    lockedForGiveCents: isLockedFirstTwo ? amountCents : 0
+  };
+}
+
+async function processV2HelpContributionCascade(connection, {
+  seedSourceUserIds,
+  usersById,
+  actorUserId,
+  idempotencyKey,
+  eventKey,
+  helpExpenseAccount,
+  settlementAccount
+}) {
+  const queue = [];
+  const queued = new Set();
+  for (const sourceUserId of seedSourceUserIds) {
+    const normalized = Number(sourceUserId || 0);
+    if (!normalized || queued.has(normalized)) continue;
+    queue.push(normalized);
+    queued.add(normalized);
+  }
+
+  const processed = [];
+  const skipped = [];
+  let guard = 0;
+
+  while (queue.length > 0 && guard < 500) {
+    guard += 1;
+    const sourceUserId = Number(queue.shift() || 0);
+    if (!sourceUserId) continue;
+
+    const [pendingRows] = await connection.execute(
+      `SELECT id, source_event_key, source_user_id, beneficiary_user_id, level_no, side, amount_cents,
+              status, processed_txn_id, reason, created_at
+       FROM v2_help_pending_contributions
+       WHERE source_user_id = ? AND status = 'pending'
+       ORDER BY level_no ASC, id ASC
+       FOR UPDATE`,
+      [sourceUserId]
+    );
+
+    const pendingList = Array.isArray(pendingRows) ? pendingRows : [];
+    for (const pendingContribution of pendingList) {
+      const levelNo = Number(pendingContribution.level_no || 0);
+      const amountCents = Number(pendingContribution.amount_cents || 0);
+
+      const consumption = await consumeV2HelpPendingGiveForContribution(connection, {
+        sourceUserId,
+        levelNo,
+        amountCents
+      });
+      if (!consumption.consumed) {
+        continue;
+      }
+
+      const settlement = await applyV2HelpContributionSettlement(connection, {
+        pendingContribution,
+        actorUserId,
+        idempotencyKey,
+        eventKey,
+        helpExpenseAccount,
+        settlementAccount,
+        usersById
+      });
+
+      if (settlement.status === 'processed') {
+        await connection.execute(
+          `UPDATE v2_help_pending_contributions
+           SET status = 'processed', processed_txn_id = ?, reason = ?, processed_at = NOW(3)
+           WHERE id = ?`,
+          [settlement.ledgerTransactionId, settlement.reason, pendingContribution.id]
+        );
+
+        processed.push({
+          contributionId: Number(pendingContribution.id),
+          sourceUserId,
+          beneficiaryUserId: Number(pendingContribution.beneficiary_user_id),
+          beneficiaryUserCode: settlement.beneficiaryUserCode,
+          levelNo,
+          amountCents,
+          side: String(pendingContribution.side || 'unknown'),
+          settlementMode: settlement.settlementMode,
+          ledgerTransactionId: settlement.ledgerTransactionId,
+          txUuid: settlement.txUuid,
+          sourceProgress: settlement.sourceProgress,
+          beneficiaryProgress: settlement.beneficiaryProgress
+        });
+
+        if (settlement.lockedForGiveCents > 0) {
+          const beneficiaryUserId = Number(pendingContribution.beneficiary_user_id || 0);
+          if (beneficiaryUserId && !queued.has(beneficiaryUserId)) {
+            queue.push(beneficiaryUserId);
+            queued.add(beneficiaryUserId);
+          }
+        }
+      } else {
+        await connection.execute(
+          `UPDATE v2_help_pending_contributions
+           SET status = 'skipped', reason = ?, processed_at = NOW(3)
+           WHERE id = ?`,
+          [settlement.reason || 'skipped', pendingContribution.id]
+        );
+
+        skipped.push({
+          contributionId: Number(pendingContribution.id),
+          sourceUserId,
+          beneficiaryUserId: Number(pendingContribution.beneficiary_user_id),
+          levelNo,
+          amountCents,
+          side: String(pendingContribution.side || 'unknown'),
+          reason: settlement.reason || 'skipped'
+        });
+      }
+    }
+  }
+
+  return {
+    processed,
+    skipped,
+    guardTrips: guard
+  };
+}
+
 async function processV2HelpEvent({
   idempotencyKey,
   actorUserCode,
@@ -3101,26 +3664,41 @@ async function processV2HelpEvent({
       return { status: 200, payload: replayPayload };
     }
 
-    const immediateUpline = await resolveLegacyImmediateUplineFromMatrix(connection, newMemberUserCode);
-    const immediateUplineUserCode = immediateUpline.parentUserCode;
-    const immediateUplineSide = immediateUpline.side || null;
+    await ensureV2HelpSettlementTables(connection);
 
-    let immediateUplineUser = null;
-    let immediateUplineIncomeWallet = null;
-    if (immediateUplineUserCode) {
-      const [uplineRows] = await connection.execute(
+    const contributionPlan = await buildLegacyActivationContributionPlanFromMatrixState(connection, newMemberUserCode);
+    const immediateContribution = contributionPlan.find((step) => Number(step.levelNo) === 1) || null;
+    const immediateUplineUserCode = immediateContribution?.beneficiaryUserCode || null;
+    const immediateUplineSide = immediateContribution?.side || null;
+
+    const beneficiaryUserCodes = [...new Set(
+      contributionPlan
+        .map((step) => normalizeV2UserCode(step?.beneficiaryUserCode))
+        .filter((userCode) => isValidV2UserCode(userCode))
+    )];
+
+    const beneficiariesByCode = new Map();
+    if (beneficiaryUserCodes.length > 0) {
+      const placeholders = beneficiaryUserCodes.map(() => '?').join(', ');
+      const [beneficiaryRows] = await connection.execute(
         `SELECT id, user_code, status
          FROM v2_users
-         WHERE user_code = ?
-         LIMIT 1
+         WHERE user_code IN (${placeholders})
+         ORDER BY id
          FOR UPDATE`,
-        [immediateUplineUserCode]
+        beneficiaryUserCodes
       );
-      const resolvedUpline = Array.isArray(uplineRows) ? uplineRows[0] : null;
-      if (resolvedUpline && String(resolvedUpline.status) === 'active') {
-        immediateUplineUser = resolvedUpline;
-        immediateUplineIncomeWallet = await lockV2IncomeWalletByUserId(connection, immediateUplineUser.id);
+      for (const row of Array.isArray(beneficiaryRows) ? beneficiaryRows : []) {
+        beneficiariesByCode.set(String(row.user_code), row);
       }
+    }
+
+    const usersById = new Map([
+      [Number(sourceUser.id), sourceUser],
+      [Number(newMemberUser.id), newMemberUser]
+    ]);
+    for (const beneficiary of beneficiariesByCode.values()) {
+      usersById.set(Number(beneficiary.id), beneficiary);
     }
 
     const helpExpenseAccount = await loadSystemGlAccountForUpdate(connection, {
@@ -3134,61 +3712,19 @@ async function processV2HelpEvent({
       accountType: 'ASSET'
     });
 
-    const settlementMode = immediateUplineIncomeWallet ? 'income_credit' : 'system_hold';
-    const effectiveDescription = description
-      || `Activation help settlement for ${newMemberUserCode}`;
-    const txUuid = randomUUID();
+    const processedContributions = [];
+    const skippedContributions = [];
 
-    const [ledgerTxnResult] = await connection.execute(
-      `INSERT INTO v2_ledger_transactions
-        (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
-         reference_type, reference_id, description, total_debit_cents, total_credit_cents)
-       VALUES
-        (?, 'v2', 'referral_credit', 'posted', ?, ?,
-         'help_event', ?, ?, ?, ?)`,
-      [
-        txUuid,
+    if (contributionPlan.length === 0) {
+      const { txUuid, ledgerTxnId } = await createV2HelpLedgerTransaction(connection, {
         idempotencyKey,
-        actor.id,
-        eventKey.slice(0, 80),
-        effectiveDescription,
-        settlementAmountCents,
-        settlementAmountCents
-      ]
-    );
-    const ledgerTxnId = Number(ledgerTxnResult?.insertId || 0);
-    if (!ledgerTxnId) {
-      throw createApiError(500, 'Failed to create help settlement ledger transaction', 'LEDGER_TXN_CREATE_FAILED');
-    }
+        actorUserId: actor.id,
+        eventKey,
+        contributionId: 'no_upline',
+        description: `Help hold level 1 for ${newMemberUserCode} (no upline)` ,
+        amountCents: settlementAmountCents
+      });
 
-    if (immediateUplineIncomeWallet) {
-      await connection.execute(
-        `INSERT INTO v2_ledger_entries
-          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
-         VALUES
-          (?, 1, ?, NULL, NULL, 'debit', ?),
-          (?, 2, ?, ?, 'income', 'credit', ?)`,
-        [
-          ledgerTxnId,
-          helpExpenseAccount.id,
-          settlementAmountCents,
-          ledgerTxnId,
-          immediateUplineIncomeWallet.gl_account_id,
-          immediateUplineIncomeWallet.user_id,
-          settlementAmountCents
-        ]
-      );
-
-      const [walletUpdateResult] = await connection.execute(
-        `UPDATE v2_wallet_accounts
-         SET current_amount_cents = current_amount_cents + ?, version = version + 1
-         WHERE user_id = ? AND wallet_type = 'income'`,
-        [settlementAmountCents, immediateUplineIncomeWallet.user_id]
-      );
-      if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
-        throw createApiError(500, 'Failed to credit immediate upline income wallet', 'UPLINE_WALLET_UPDATE_FAILED');
-      }
-    } else {
       await connection.execute(
         `INSERT INTO v2_ledger_entries
           (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
@@ -3204,20 +3740,106 @@ async function processV2HelpEvent({
           settlementAmountCents
         ]
       );
+
+      processedContributions.push({
+        contributionId: 'no_upline',
+        sourceUserId: Number(sourceUser.id),
+        beneficiaryUserId: null,
+        beneficiaryUserCode: null,
+        levelNo: 1,
+        amountCents: settlementAmountCents,
+        side: 'unknown',
+        settlementMode: 'system_hold_no_upline',
+        ledgerTransactionId: ledgerTxnId,
+        txUuid,
+        sourceProgress: null,
+        beneficiaryProgress: null
+      });
+    } else {
+      for (const planItem of contributionPlan) {
+        const beneficiary = beneficiariesByCode.get(planItem.beneficiaryUserCode) || null;
+        if (!beneficiary) {
+          const { txUuid, ledgerTxnId } = await createV2HelpLedgerTransaction(connection, {
+            idempotencyKey,
+            actorUserId: actor.id,
+            eventKey,
+            contributionId: `missing_${planItem.levelNo}_${planItem.beneficiaryUserCode}`,
+            description: `Help hold level ${planItem.levelNo} for missing beneficiary`,
+            amountCents: settlementAmountCents
+          });
+
+          await connection.execute(
+            `INSERT INTO v2_ledger_entries
+              (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+             VALUES
+              (?, 1, ?, NULL, NULL, 'debit', ?),
+              (?, 2, ?, NULL, NULL, 'credit', ?)`,
+            [
+              ledgerTxnId,
+              helpExpenseAccount.id,
+              settlementAmountCents,
+              ledgerTxnId,
+              settlementAccount.id,
+              settlementAmountCents
+            ]
+          );
+
+          processedContributions.push({
+            contributionId: `missing_${planItem.levelNo}_${planItem.beneficiaryUserCode}`,
+            sourceUserId: Number(sourceUser.id),
+            beneficiaryUserId: null,
+            beneficiaryUserCode: planItem.beneficiaryUserCode,
+            levelNo: Number(planItem.levelNo),
+            amountCents: settlementAmountCents,
+            side: normalizeV2HelpContributionSide(planItem.side),
+            settlementMode: 'system_hold_missing_beneficiary',
+            ledgerTransactionId: ledgerTxnId,
+            txUuid,
+            sourceProgress: null,
+            beneficiaryProgress: null
+          });
+          continue;
+        }
+
+        await upsertV2HelpPendingContribution(connection, {
+          sourceEventKey: eventKey,
+          sourceUserId: sourceUser.id,
+          beneficiaryUserId: beneficiary.id,
+          levelNo: Number(planItem.levelNo),
+          side: normalizeV2HelpContributionSide(planItem.side),
+          amountCents: settlementAmountCents
+        });
+      }
+
+      const cascadeResult = await processV2HelpContributionCascade(connection, {
+        seedSourceUserIds: [sourceUser.id],
+        usersById,
+        actorUserId: actor.id,
+        idempotencyKey,
+        eventKey,
+        helpExpenseAccount,
+        settlementAccount
+      });
+
+      processedContributions.push(...cascadeResult.processed);
+      skippedContributions.push(...cascadeResult.skipped);
     }
 
-    const sourceHelpProgress = await upsertV2HelpPendingGiveProgress(connection, {
-      userId: sourceUser.id,
-      levelNo,
-      amountCents: settlementAmountCents
-    });
-    const uplineHelpProgress = immediateUplineUser
-      ? await upsertV2HelpReceiveProgress(connection, {
-        userId: immediateUplineUser.id,
-        levelNo,
-        amountCents: settlementAmountCents
-      })
-      : null;
+    const [pendingCountRows] = await connection.execute(
+      `SELECT COUNT(*) AS pending_count
+       FROM v2_help_pending_contributions
+       WHERE source_user_id = ? AND status = 'pending'`,
+      [sourceUser.id]
+    );
+    const pendingContributionCount = Number(
+      Array.isArray(pendingCountRows) && pendingCountRows[0]
+        ? pendingCountRows[0].pending_count
+        : 0
+    );
+
+    const latestProcessedContribution = processedContributions
+      .filter((entry) => Number(entry.ledgerTransactionId || 0) > 0)
+      .slice(-1)[0] || null;
 
     const responsePayload = {
       ok: true,
@@ -3231,26 +3853,34 @@ async function processV2HelpEvent({
       newMemberUserCode,
       levelNo,
       amountCents: settlementAmountCents,
-      immediateUplineUserCode: immediateUplineUser?.user_code || immediateUplineUserCode || null,
+      immediateUplineUserCode,
       immediateUplineSide,
-      settlementMode,
-      ledgerTransactionId: ledgerTxnId,
-      txUuid,
-      beneficiaryUserCode: immediateUplineUser?.user_code || null,
+      settlementMode: latestProcessedContribution?.settlementMode || 'none',
+      ledgerTransactionId: Number(latestProcessedContribution?.ledgerTransactionId || 0) || null,
+      txUuid: latestProcessedContribution?.txUuid || null,
+      beneficiaryUserCode: latestProcessedContribution?.beneficiaryUserCode || null,
+      contributionPlanCount: contributionPlan.length,
+      processedContributionCount: processedContributions.length,
+      skippedContributionCount: skippedContributions.length,
+      pendingContributionCount,
+      processedContributions,
+      skippedContributions,
       queueStatus: 'processed',
       queuedAt: helpEvent.created_at ? new Date(helpEvent.created_at).toISOString() : new Date().toISOString(),
       processedAt: new Date().toISOString(),
       helpProgress: {
-        sourceUser: {
-          stageCode: sourceHelpProgress.stageCode,
-          eventSeq: sourceHelpProgress.eventSeq
-        },
-        beneficiaryUser: uplineHelpProgress
-          ? {
-            stageCode: uplineHelpProgress.stageCode,
-            eventSeq: uplineHelpProgress.eventSeq
-          }
-          : null
+        updatedSources: [...new Set(
+          processedContributions
+            .map((entry) => entry.sourceProgress)
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => `${entry.stageCode}:${entry.eventSeq}`)
+        )],
+        updatedBeneficiaries: [...new Set(
+          processedContributions
+            .map((entry) => entry.beneficiaryProgress)
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => `${entry.stageCode}:${entry.eventSeq}`)
+        )]
       }
     };
 
