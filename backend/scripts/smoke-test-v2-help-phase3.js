@@ -30,12 +30,19 @@ const HELP_AMOUNT_CENTS = Number(process.env.V2_HELP_LEVEL1_AMOUNT_CENTS || 500)
 const SAFE_DB_NAME_PATTERN = /(test|sandbox|qa|staging|dev|local|clone)/i;
 const SMOKE_ALLOW_REAL_USERS = String(process.env.SMOKE_ALLOW_REAL_USERS || '').trim().toLowerCase() === 'true';
 const SMOKE_ALLOW_AUTO_PICK = String(process.env.SMOKE_ALLOW_AUTO_PICK || '').trim().toLowerCase() === 'true';
+const SMOKE_DUMMY_PREFIX = String(process.env.SMOKE_DUMMY_PREFIX || '99').trim();
 
 function failSafety(message) {
   throw new Error(`SAFETY_BLOCK: ${message}`);
 }
 
-function assertSafeDatabaseContext(databaseName) {
+function isDummySmokeUserCode(userCode) {
+  const normalized = normalizeUserCode(userCode);
+  if (!normalized) return false;
+  return SMOKE_DUMMY_PREFIX ? normalized.startsWith(SMOKE_DUMMY_PREFIX) : false;
+}
+
+function assertSafeDatabaseContext(databaseName, explicitCodes) {
   const normalized = String(databaseName || '').trim();
   if (!normalized) {
     failSafety('Database name is empty; refusing smoke execution.');
@@ -46,9 +53,17 @@ function assertSafeDatabaseContext(databaseName) {
   }
 
   if (!SAFE_DB_NAME_PATTERN.test(normalized)) {
+    const explicitDummyUsers = explicitCodes
+      && isDummySmokeUserCode(explicitCodes.sourceUserCode)
+      && isDummySmokeUserCode(explicitCodes.newMemberUserCode);
+    if (explicitDummyUsers) {
+      return;
+    }
+
     failSafety(
       `Refusing to run mutating smoke tests on database \"${normalized}\". `
       + 'Use an isolated/test clone DB name (test/sandbox/qa/staging/dev/local/clone), '
+      + `or use explicit dummy users with SMOKE_DUMMY_PREFIX=${SMOKE_DUMMY_PREFIX}, `
       + 'or set SMOKE_ALLOW_REAL_USERS=true only if you intentionally accept live-user risk.'
     );
   }
@@ -117,7 +132,8 @@ async function main() {
   });
 
   try {
-    assertSafeDatabaseContext(process.env.MYSQL_DATABASE || '');
+    const explicitCodes = getExplicitSmokeUserCodes();
+    assertSafeDatabaseContext(process.env.MYSQL_DATABASE || '', explicitCodes);
 
     const [healthResponse] = await Promise.all([
       fetch(`${BACKEND_URL}/api/health`).catch(() => null)
@@ -160,7 +176,6 @@ async function main() {
       });
     }
 
-    const explicitCodes = getExplicitSmokeUserCodes();
     let candidate = null;
     let fallbackCandidate = null;
     const selectableNodes = explicitCodes
