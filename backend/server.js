@@ -158,6 +158,11 @@ const V2_REFERRAL_SOURCE_REF_MAX_LENGTH = 120;
 const V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH = 120;
 const V2_HELP_EVENT_TYPE_ACTIVATION_JOIN = 'activation_join';
 const V2_HELP_STAGE_CODE_MAX_LENGTH = 40;
+const V2_HELP_LEVEL1_AMOUNT_CENTS_RAW = Number(process.env.V2_HELP_LEVEL1_AMOUNT_CENTS || 500);
+const V2_HELP_LEVEL1_AMOUNT_CENTS = Number.isFinite(V2_HELP_LEVEL1_AMOUNT_CENTS_RAW) && V2_HELP_LEVEL1_AMOUNT_CENTS_RAW > 0
+  ? Math.trunc(V2_HELP_LEVEL1_AMOUNT_CENTS_RAW)
+  : 500;
+const V2_HELP_EXPENSE_ACCOUNT_CODE = 'SYS_HELP_EXPENSE';
 const V2_FUND_TRANSFER_MAX_PROGRESS_UPDATES = 2;
 const V2_ADMIN_ADJUSTMENT_ENABLED = process.env.V2_ADMIN_ADJUSTMENT_ENABLED === 'true';
 const V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS = new Set(
@@ -763,6 +768,14 @@ function buildV2ReferralEventKeyFromRef({ sourceRef, beneficiaryUserCode, levelN
 
 function buildV2HelpEventKey({ sourceRef, sourceUserCode, newMemberUserCode, eventType }) {
   return `HELP:${sourceRef}:${sourceUserCode}:${newMemberUserCode}:${eventType}`;
+}
+
+function buildV2HelpReceiveStageCode(levelNo) {
+  return `L${Math.max(1, Math.trunc(levelNo || 1))}_RECEIVE`.slice(0, V2_HELP_STAGE_CODE_MAX_LENGTH);
+}
+
+function buildV2HelpPendingGiveStageCode(levelNo) {
+  return `L${Math.max(1, Math.trunc(levelNo || 1))}_PENDING_GIVE`.slice(0, V2_HELP_STAGE_CODE_MAX_LENGTH);
 }
 
 function generateV2PinCode() {
@@ -2658,6 +2671,221 @@ async function processV2ReferralCredit({
   }
 }
 
+async function ensureV2HelpEventsQueueTable(connection) {
+  await connection.execute(
+    `CREATE TABLE IF NOT EXISTS v2_help_events_queue (
+       id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+       event_key VARCHAR(180) NOT NULL,
+       event_type VARCHAR(40) NOT NULL,
+       source_ref VARCHAR(120) NOT NULL,
+       actor_user_id BIGINT UNSIGNED NOT NULL,
+       source_user_id BIGINT UNSIGNED NOT NULL,
+       new_member_user_id BIGINT UNSIGNED NOT NULL,
+       status ENUM('queued','processed','failed') NOT NULL DEFAULT 'queued',
+       payload_json JSON NULL,
+       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       processed_at DATETIME(3) NULL,
+       UNIQUE KEY uq_v2_help_events_event_key (event_key),
+       KEY idx_v2_help_events_status_created (status, created_at),
+       CONSTRAINT fk_v2_help_events_actor FOREIGN KEY (actor_user_id) REFERENCES v2_users(id),
+       CONSTRAINT fk_v2_help_events_source FOREIGN KEY (source_user_id) REFERENCES v2_users(id),
+       CONSTRAINT fk_v2_help_events_member FOREIGN KEY (new_member_user_id) REFERENCES v2_users(id)
+     ) ENGINE=InnoDB`
+  );
+}
+
+async function resolveLegacyImmediateUplineFromMatrix(connection, newMemberUserCode) {
+  const normalizedNewMemberUserCode = normalizeV2UserCode(newMemberUserCode);
+  if (!isValidV2UserCode(normalizedNewMemberUserCode)) {
+    return { parentUserCode: null, side: null };
+  }
+
+  const [rows] = await connection.execute(
+    `SELECT state_value
+     FROM state_store
+     WHERE state_key = 'mlm_matrix'
+     LIMIT 1`
+  );
+  const matrixRaw = Array.isArray(rows) && rows[0] ? rows[0].state_value : null;
+  const matrix = typeof matrixRaw === 'string' ? safeParseJSON(matrixRaw) : [];
+  if (!Array.isArray(matrix)) {
+    return { parentUserCode: null, side: null };
+  }
+
+  const node = matrix.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedNewMemberUserCode);
+  if (!node) {
+    return { parentUserCode: null, side: null };
+  }
+
+  const parentUserCode = normalizeV2UserCode(node?.parentId);
+  let side = Number(node?.position) === 0
+    ? 'left'
+    : Number(node?.position) === 1
+      ? 'right'
+      : null;
+
+  if (!side && parentUserCode) {
+    const parentNode = matrix.find((candidate) => normalizeV2UserCode(candidate?.userId) === parentUserCode);
+    if (parentNode) {
+      const leftChild = normalizeV2UserCode(parentNode?.leftChild);
+      const rightChild = normalizeV2UserCode(parentNode?.rightChild);
+      if (leftChild === normalizedNewMemberUserCode) side = 'left';
+      if (rightChild === normalizedNewMemberUserCode) side = 'right';
+    }
+  }
+
+  return {
+    parentUserCode: isValidV2UserCode(parentUserCode) ? parentUserCode : null,
+    side
+  };
+}
+
+async function loadSystemGlAccountForUpdate(connection, {
+  accountCode,
+  accountName,
+  accountType
+}) {
+  await connection.execute(
+    `INSERT INTO v2_gl_accounts
+      (account_code, account_name, account_type, owner_user_id, wallet_type, is_system_account, is_active)
+     VALUES
+      (?, ?, ?, NULL, NULL, 1, 1)
+     ON DUPLICATE KEY UPDATE
+      account_name = VALUES(account_name),
+      account_type = VALUES(account_type),
+      is_system_account = 1,
+      is_active = 1`,
+    [accountCode, accountName, accountType]
+  );
+
+  const [rows] = await connection.execute(
+    `SELECT id, account_code, is_active
+     FROM v2_gl_accounts
+     WHERE account_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [accountCode]
+  );
+  const account = Array.isArray(rows) ? rows[0] : null;
+  if (!account || Number(account.is_active) !== 1) {
+    throw createApiError(503, `System GL account is not configured: ${accountCode}`, 'SYS_GL_ACCOUNT_MISSING');
+  }
+
+  return account;
+}
+
+async function lockV2IncomeWalletByUserId(connection, userId) {
+  const [rows] = await connection.execute(
+    `SELECT id, user_id, wallet_type, current_amount_cents, gl_account_id
+     FROM v2_wallet_accounts
+     WHERE user_id = ? AND wallet_type = 'income'
+     LIMIT 1
+     FOR UPDATE`,
+    [userId]
+  );
+  const wallet = Array.isArray(rows) ? rows[0] : null;
+  if (!wallet) {
+    throw createApiError(404, 'Income wallet is not provisioned in v2', 'V2_INCOME_WALLET_NOT_FOUND');
+  }
+  return wallet;
+}
+
+async function upsertV2HelpReceiveProgress(connection, {
+  userId,
+  levelNo,
+  amountCents
+}) {
+  const [rows] = await connection.execute(
+    `SELECT user_id, receive_count_in_stage, receive_total_cents_in_stage, next_required_give_cents,
+            pending_give_cents, last_progress_event_seq
+     FROM v2_help_progress_state
+     WHERE user_id = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [userId]
+  );
+  const existing = Array.isArray(rows) ? rows[0] : null;
+
+  const stageCode = buildV2HelpReceiveStageCode(levelNo);
+
+  if (!existing) {
+    await connection.execute(
+      `INSERT INTO v2_help_progress_state
+        (user_id, current_stage_code, receive_count_in_stage, receive_total_cents_in_stage,
+         next_required_give_cents, pending_give_cents, last_progress_event_seq, baseline_snapshot_at)
+       VALUES
+        (?, ?, ?, ?, 0, 0, 1, NOW(3))`,
+      [userId, stageCode, 1, amountCents]
+    );
+    return { eventSeq: 1, stageCode };
+  }
+
+  const nextSeq = Number(existing.last_progress_event_seq || 0) + 1;
+  const nextReceiveCount = Number(existing.receive_count_in_stage || 0) + 1;
+  const nextReceiveTotal = Number(existing.receive_total_cents_in_stage || 0) + amountCents;
+
+  await connection.execute(
+    `UPDATE v2_help_progress_state
+     SET current_stage_code = ?,
+         receive_count_in_stage = ?,
+         receive_total_cents_in_stage = ?,
+         last_progress_event_seq = ?,
+         updated_at = NOW(3)
+     WHERE user_id = ?`,
+    [stageCode, nextReceiveCount, nextReceiveTotal, nextSeq, userId]
+  );
+
+  return { eventSeq: nextSeq, stageCode };
+}
+
+async function upsertV2HelpPendingGiveProgress(connection, {
+  userId,
+  levelNo,
+  amountCents
+}) {
+  const [rows] = await connection.execute(
+    `SELECT user_id, receive_count_in_stage, receive_total_cents_in_stage, next_required_give_cents,
+            pending_give_cents, last_progress_event_seq
+     FROM v2_help_progress_state
+     WHERE user_id = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [userId]
+  );
+  const existing = Array.isArray(rows) ? rows[0] : null;
+
+  const stageCode = buildV2HelpPendingGiveStageCode(levelNo);
+
+  if (!existing) {
+    await connection.execute(
+      `INSERT INTO v2_help_progress_state
+        (user_id, current_stage_code, receive_count_in_stage, receive_total_cents_in_stage,
+         next_required_give_cents, pending_give_cents, last_progress_event_seq, baseline_snapshot_at)
+       VALUES
+        (?, ?, 0, 0, ?, ?, 1, NOW(3))`,
+      [userId, stageCode, amountCents, amountCents]
+    );
+    return { eventSeq: 1, stageCode };
+  }
+
+  const nextSeq = Number(existing.last_progress_event_seq || 0) + 1;
+  const nextRequiredGive = Math.max(Number(existing.next_required_give_cents || 0), amountCents);
+  const nextPendingGive = Number(existing.pending_give_cents || 0) + amountCents;
+
+  await connection.execute(
+    `UPDATE v2_help_progress_state
+     SET current_stage_code = ?,
+         next_required_give_cents = ?,
+         pending_give_cents = ?,
+         last_progress_event_seq = ?,
+         updated_at = NOW(3)
+     WHERE user_id = ?`,
+    [stageCode, nextRequiredGive, nextPendingGive, nextSeq, userId]
+  );
+
+  return { eventSeq: nextSeq, stageCode };
+}
+
 async function processV2HelpEvent({
   idempotencyKey,
   actorUserCode,
@@ -2684,6 +2912,8 @@ async function processV2HelpEvent({
   if (!isValidV2HelpEventSourceRef(normalizedSourceRef)) {
     throw createApiError(400, `sourceRef must be 1-${V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH} chars [a-zA-Z0-9:_-]`, 'INVALID_SOURCE_REF');
   }
+  const levelNo = 1;
+  const settlementAmountCents = V2_HELP_LEVEL1_AMOUNT_CENTS;
 
   const eventKey = buildV2HelpEventKey({
     sourceRef: normalizedSourceRef,
@@ -2800,46 +3030,35 @@ async function processV2HelpEvent({
       throw createApiError(403, 'Source user or new member user is not active', 'USER_NOT_ACTIVE');
     }
 
-    await connection.execute(
-      `CREATE TABLE IF NOT EXISTS v2_help_events_queue (
-         id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-         event_key VARCHAR(180) NOT NULL,
-         event_type VARCHAR(40) NOT NULL,
-         source_ref VARCHAR(120) NOT NULL,
-         actor_user_id BIGINT UNSIGNED NOT NULL,
-         source_user_id BIGINT UNSIGNED NOT NULL,
-         new_member_user_id BIGINT UNSIGNED NOT NULL,
-         status ENUM('queued','processed','failed') NOT NULL DEFAULT 'queued',
-         payload_json JSON NULL,
-         created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-         processed_at DATETIME(3) NULL,
-         UNIQUE KEY uq_v2_help_events_event_key (event_key),
-         KEY idx_v2_help_events_status_created (status, created_at),
-         CONSTRAINT fk_v2_help_events_actor FOREIGN KEY (actor_user_id) REFERENCES v2_users(id),
-         CONSTRAINT fk_v2_help_events_source FOREIGN KEY (source_user_id) REFERENCES v2_users(id),
-         CONSTRAINT fk_v2_help_events_member FOREIGN KEY (new_member_user_id) REFERENCES v2_users(id)
-       ) ENGINE=InnoDB`
-    );
+    await ensureV2HelpEventsQueueTable(connection);
 
-    const payloadJson = JSON.stringify({
+    const eventPayload = {
       sourceUserCode,
       newMemberUserCode,
       sourceRef: normalizedSourceRef,
       eventType,
       description: description || null
-    });
+    };
+    const payloadJson = JSON.stringify(eventPayload);
 
     await connection.execute(
       `INSERT INTO v2_help_events_queue
         (event_key, event_type, source_ref, actor_user_id, source_user_id, new_member_user_id, status, payload_json)
        VALUES
         (?, ?, ?, ?, ?, ?, 'queued', ?)
-       ON DUPLICATE KEY UPDATE id = id`,
+       ON DUPLICATE KEY UPDATE
+         source_ref = VALUES(source_ref),
+         actor_user_id = VALUES(actor_user_id),
+         source_user_id = VALUES(source_user_id),
+         new_member_user_id = VALUES(new_member_user_id),
+         status = IF(status = 'failed', 'queued', status),
+         processed_at = IF(status = 'failed', NULL, processed_at),
+         payload_json = VALUES(payload_json)`,
       [eventKey, eventType, normalizedSourceRef, actor.id, sourceUser.id, newMemberUser.id, payloadJson]
     );
 
     const [eventRows] = await connection.execute(
-      `SELECT id, event_key, status, created_at, processed_at
+      `SELECT id, event_key, status, created_at, processed_at, payload_json
        FROM v2_help_events_queue
        WHERE event_key = ?
        LIMIT 1
@@ -2851,19 +3070,198 @@ async function processV2HelpEvent({
       throw createApiError(500, 'Failed to queue help event', 'HELP_EVENT_QUEUE_FAILED');
     }
 
+    if (String(helpEvent.status) === 'processed') {
+      const storedPayload = parseIdempotencyResponseBody(helpEvent.payload_json) || {};
+      const replayPayload = (storedPayload && typeof storedPayload === 'object' && storedPayload.result)
+        ? storedPayload.result
+        : {
+          ok: true,
+          queueEventId: Number(helpEvent.id),
+          eventKey,
+          eventType,
+          sourceRef: normalizedSourceRef,
+          sourceUserCode,
+          newMemberUserCode,
+          queueStatus: 'processed',
+          queuedAt: helpEvent.created_at ? new Date(helpEvent.created_at).toISOString() : new Date().toISOString(),
+          processedAt: helpEvent.processed_at ? new Date(helpEvent.processed_at).toISOString() : new Date().toISOString(),
+          alreadyProcessed: true
+        };
+
+      await connection.execute(
+        `UPDATE v2_idempotency_keys
+         SET status = 'completed', response_code = ?, response_body = ?,
+             locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [200, JSON.stringify(replayPayload), idempotencyKey]
+      );
+
+      await connection.commit();
+      transactionOpen = false;
+      return { status: 200, payload: replayPayload };
+    }
+
+    const immediateUpline = await resolveLegacyImmediateUplineFromMatrix(connection, newMemberUserCode);
+    const immediateUplineUserCode = immediateUpline.parentUserCode;
+    const immediateUplineSide = immediateUpline.side || null;
+
+    let immediateUplineUser = null;
+    let immediateUplineIncomeWallet = null;
+    if (immediateUplineUserCode) {
+      const [uplineRows] = await connection.execute(
+        `SELECT id, user_code, status
+         FROM v2_users
+         WHERE user_code = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [immediateUplineUserCode]
+      );
+      const resolvedUpline = Array.isArray(uplineRows) ? uplineRows[0] : null;
+      if (resolvedUpline && String(resolvedUpline.status) === 'active') {
+        immediateUplineUser = resolvedUpline;
+        immediateUplineIncomeWallet = await lockV2IncomeWalletByUserId(connection, immediateUplineUser.id);
+      }
+    }
+
+    const helpExpenseAccount = await loadSystemGlAccountForUpdate(connection, {
+      accountCode: V2_HELP_EXPENSE_ACCOUNT_CODE,
+      accountName: 'System help settlement expense',
+      accountType: 'EXPENSE'
+    });
+    const settlementAccount = await loadSystemGlAccountForUpdate(connection, {
+      accountCode: 'SYS_CASH_OR_SETTLEMENT',
+      accountName: 'System cash or settlement',
+      accountType: 'ASSET'
+    });
+
+    const settlementMode = immediateUplineIncomeWallet ? 'income_credit' : 'system_hold';
+    const effectiveDescription = description
+      || `Activation help settlement for ${newMemberUserCode}`;
+    const txUuid = randomUUID();
+
+    const [ledgerTxnResult] = await connection.execute(
+      `INSERT INTO v2_ledger_transactions
+        (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
+         reference_type, reference_id, description, total_debit_cents, total_credit_cents)
+       VALUES
+        (?, 'v2', 'referral_credit', 'posted', ?, ?,
+         'help_event', ?, ?, ?, ?)`,
+      [
+        txUuid,
+        idempotencyKey,
+        actor.id,
+        eventKey.slice(0, 80),
+        effectiveDescription,
+        settlementAmountCents,
+        settlementAmountCents
+      ]
+    );
+    const ledgerTxnId = Number(ledgerTxnResult?.insertId || 0);
+    if (!ledgerTxnId) {
+      throw createApiError(500, 'Failed to create help settlement ledger transaction', 'LEDGER_TXN_CREATE_FAILED');
+    }
+
+    if (immediateUplineIncomeWallet) {
+      await connection.execute(
+        `INSERT INTO v2_ledger_entries
+          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+         VALUES
+          (?, 1, ?, NULL, NULL, 'debit', ?),
+          (?, 2, ?, ?, 'income', 'credit', ?)`,
+        [
+          ledgerTxnId,
+          helpExpenseAccount.id,
+          settlementAmountCents,
+          ledgerTxnId,
+          immediateUplineIncomeWallet.gl_account_id,
+          immediateUplineIncomeWallet.user_id,
+          settlementAmountCents
+        ]
+      );
+
+      const [walletUpdateResult] = await connection.execute(
+        `UPDATE v2_wallet_accounts
+         SET current_amount_cents = current_amount_cents + ?, version = version + 1
+         WHERE user_id = ? AND wallet_type = 'income'`,
+        [settlementAmountCents, immediateUplineIncomeWallet.user_id]
+      );
+      if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
+        throw createApiError(500, 'Failed to credit immediate upline income wallet', 'UPLINE_WALLET_UPDATE_FAILED');
+      }
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_ledger_entries
+          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+         VALUES
+          (?, 1, ?, NULL, NULL, 'debit', ?),
+          (?, 2, ?, NULL, NULL, 'credit', ?)`,
+        [
+          ledgerTxnId,
+          helpExpenseAccount.id,
+          settlementAmountCents,
+          ledgerTxnId,
+          settlementAccount.id,
+          settlementAmountCents
+        ]
+      );
+    }
+
+    const sourceHelpProgress = await upsertV2HelpPendingGiveProgress(connection, {
+      userId: sourceUser.id,
+      levelNo,
+      amountCents: settlementAmountCents
+    });
+    const uplineHelpProgress = immediateUplineUser
+      ? await upsertV2HelpReceiveProgress(connection, {
+        userId: immediateUplineUser.id,
+        levelNo,
+        amountCents: settlementAmountCents
+      })
+      : null;
+
     const responsePayload = {
       ok: true,
-      queued: true,
+      queued: false,
+      processed: true,
       queueEventId: Number(helpEvent.id),
       eventKey,
       eventType,
       sourceRef: normalizedSourceRef,
       sourceUserCode,
       newMemberUserCode,
-      queueStatus: String(helpEvent.status || 'queued'),
+      levelNo,
+      amountCents: settlementAmountCents,
+      immediateUplineUserCode: immediateUplineUser?.user_code || immediateUplineUserCode || null,
+      immediateUplineSide,
+      settlementMode,
+      ledgerTransactionId: ledgerTxnId,
+      txUuid,
+      beneficiaryUserCode: immediateUplineUser?.user_code || null,
+      queueStatus: 'processed',
       queuedAt: helpEvent.created_at ? new Date(helpEvent.created_at).toISOString() : new Date().toISOString(),
-      processedAt: helpEvent.processed_at ? new Date(helpEvent.processed_at).toISOString() : null
+      processedAt: new Date().toISOString(),
+      helpProgress: {
+        sourceUser: {
+          stageCode: sourceHelpProgress.stageCode,
+          eventSeq: sourceHelpProgress.eventSeq
+        },
+        beneficiaryUser: uplineHelpProgress
+          ? {
+            stageCode: uplineHelpProgress.stageCode,
+            eventSeq: uplineHelpProgress.eventSeq
+          }
+          : null
+      }
     };
+
+    await connection.execute(
+      `UPDATE v2_help_events_queue
+       SET status = 'processed',
+           processed_at = NOW(3),
+           payload_json = ?
+       WHERE id = ?`,
+      [JSON.stringify({ request: eventPayload, result: responsePayload }), helpEvent.id]
+    );
 
     await connection.execute(
       `UPDATE v2_idempotency_keys
@@ -2897,6 +3295,33 @@ async function processV2HelpEvent({
         );
       } catch {
         // Keep the primary error as source of truth.
+      }
+
+      if (eventKey) {
+        try {
+          await pool.execute(
+            `UPDATE v2_help_events_queue
+             SET status = 'failed',
+                 processed_at = NOW(3),
+                 payload_json = ?
+             WHERE event_key = ?`,
+            [
+              JSON.stringify({
+                ok: false,
+                eventKey,
+                sourceUserCode,
+                newMemberUserCode,
+                sourceRef: normalizedSourceRef,
+                errorCode: String(error?.code || 'UNKNOWN_V2_ERROR').slice(0, 80),
+                error: getErrorMessage(error, 'Failed to settle help event'),
+                failedAt: new Date().toISOString()
+              }),
+              eventKey
+            ]
+          );
+        } catch {
+          // Keep the primary error as source of truth.
+        }
       }
     }
 
