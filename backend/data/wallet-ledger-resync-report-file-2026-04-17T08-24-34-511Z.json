@@ -1,0 +1,5025 @@
+{
+  "sourceFile": "E:\\Again Updated\\live-project\\backend\\data\\app-state.local.json",
+  "generatedAt": "2026-04-17T08:24:34.509Z",
+  "scopedUsers": 200,
+  "walletsFoundForScopedUsers": 200,
+  "fallbackCoverage": {
+    "completedPayments": 0,
+    "completedPinRequests": 0,
+    "paidFromWalletPinRequests": 0
+  },
+  "mismatchCounts": {
+    "usersWithAnyMismatch": 0,
+    "fundMismatches": 0,
+    "incomeMismatches": 0,
+    "lockedMismatches": 0
+  },
+  "totalDelta": {
+    "fund": 0,
+    "income": 0,
+    "locked": 0
+  },
+  "topImpacted": [],
+  "allRows": [
+    {
+      "userId": "1000001",
+      "internalId": "user_1773829460417",
+      "name": "Vikas Jain",
+      "current": {
+        "fund": 50,
+        "income": 1076.2,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 50,
+        "income": 1076.2,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 1,
+        "incomeRelevantCount": 222
+      }
+    },
+    {
+      "userId": "9762224",
+      "internalId": "user_1774623409126_0",
+      "name": "Member 001",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 120
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 120
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 18
+      }
+    },
+    {
+      "userId": "3679359",
+      "internalId": "user_1774623409128_1",
+      "name": "Member 002",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 40
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 40
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 9
+      }
+    },
+    {
+      "userId": "7901829",
+      "internalId": "user_1774623409132_2",
+      "name": "Member 003",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "7461131",
+      "internalId": "user_1774623409133_3",
+      "name": "Member 004",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "4948321",
+      "internalId": "user_1774623409135_4",
+      "name": "Member 005",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "3807793",
+      "internalId": "user_1774623409136_5",
+      "name": "Member 006",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "2008911",
+      "internalId": "user_1774623409138_6",
+      "name": "Member 007",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "3429391",
+      "internalId": "user_1774623409139_7",
+      "name": "Member 008",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "1262406",
+      "internalId": "user_1774623409141_8",
+      "name": "Member 009",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "6349543",
+      "internalId": "user_1774623409142_9",
+      "name": "Member 010",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "1857996",
+      "internalId": "user_1774623409557_10",
+      "name": "Member 011",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "5214321",
+      "internalId": "user_1774623409557_11",
+      "name": "Member 012",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "3353990",
+      "internalId": "user_1774623409559_12",
+      "name": "Member 013",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "4288971",
+      "internalId": "user_1774623409560_13",
+      "name": "Member 014",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "2799047",
+      "internalId": "user_1774623409562_14",
+      "name": "Member 015",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "7791342",
+      "internalId": "user_1774623409563_15",
+      "name": "Member 016",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "3609048",
+      "internalId": "user_1774623409565_16",
+      "name": "Member 017",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "1259364",
+      "internalId": "user_1774623409566_17",
+      "name": "Member 018",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "4429345",
+      "internalId": "user_1774623409570_18",
+      "name": "Member 019",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "5085501",
+      "internalId": "user_1774623409571_19",
+      "name": "Member 020",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "6050591",
+      "internalId": "user_1774623410021_20",
+      "name": "Member 021",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "7665058",
+      "internalId": "user_1774623410022_21",
+      "name": "Member 022",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "2067878",
+      "internalId": "user_1774623410025_22",
+      "name": "Member 023",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 20
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 8
+      }
+    },
+    {
+      "userId": "4929340",
+      "internalId": "user_1774623410026_23",
+      "name": "Member 024",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "9749784",
+      "internalId": "user_1774623410028_24",
+      "name": "Member 025",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "6940157",
+      "internalId": "user_1774623410028_25",
+      "name": "Member 026",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5793053",
+      "internalId": "user_1774623410030_26",
+      "name": "Member 027",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1819430",
+      "internalId": "user_1774623410031_27",
+      "name": "Member 028",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2499146",
+      "internalId": "user_1774623410033_28",
+      "name": "Member 029",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "9021447",
+      "internalId": "user_1774623410043_29",
+      "name": "Member 030",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5662973",
+      "internalId": "user_1774623410208_30",
+      "name": "Member 031",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5511446",
+      "internalId": "user_1774623410210_31",
+      "name": "Member 032",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5478864",
+      "internalId": "user_1774623410214_32",
+      "name": "Member 033",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1848499",
+      "internalId": "user_1774623410215_33",
+      "name": "Member 034",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2836923",
+      "internalId": "user_1774623410218_34",
+      "name": "Member 035",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "8277640",
+      "internalId": "user_1774623410219_35",
+      "name": "Member 036",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7826157",
+      "internalId": "user_1774623410222_36",
+      "name": "Member 037",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "9169099",
+      "internalId": "user_1774623410223_37",
+      "name": "Member 038",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "9571325",
+      "internalId": "user_1774623410225_38",
+      "name": "Member 039",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7314597",
+      "internalId": "user_1774623410226_39",
+      "name": "Member 040",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1123676",
+      "internalId": "user_1774623410662_40",
+      "name": "Member 041",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7370337",
+      "internalId": "user_1774623410663_41",
+      "name": "Member 042",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "3024373",
+      "internalId": "user_1774623410666_42",
+      "name": "Member 043",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5535660",
+      "internalId": "user_1774623410668_43",
+      "name": "Member 044",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1085746",
+      "internalId": "user_1774623410670_44",
+      "name": "Member 045",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1477849",
+      "internalId": "user_1774623410672_45",
+      "name": "Member 046",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "8517594",
+      "internalId": "user_1774623410673_46",
+      "name": "Member 047",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "6283498",
+      "internalId": "user_1774623410674_47",
+      "name": "Member 048",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "4324839",
+      "internalId": "user_1774623410676_48",
+      "name": "Member 049",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1074645",
+      "internalId": "user_1774623410677_49",
+      "name": "Member 050",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2953462",
+      "internalId": "user_1774623411115_50",
+      "name": "Member 051",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "9739032",
+      "internalId": "user_1774623411117_51",
+      "name": "Member 052",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "9886750",
+      "internalId": "user_1774623411119_52",
+      "name": "Member 053",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "3660199",
+      "internalId": "user_1774623411120_53",
+      "name": "Member 054",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "4568928",
+      "internalId": "user_1774623411122_54",
+      "name": "Member 055",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5990532",
+      "internalId": "user_1774623411123_55",
+      "name": "Member 056",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "9996470",
+      "internalId": "user_1774623411125_56",
+      "name": "Member 057",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "4985963",
+      "internalId": "user_1774623411126_57",
+      "name": "Member 058",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7375508",
+      "internalId": "user_1774623411128_58",
+      "name": "Member 059",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7937932",
+      "internalId": "user_1774623411130_59",
+      "name": "Member 060",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "9303537",
+      "internalId": "user_1774623411293_60",
+      "name": "Member 061",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2908702",
+      "internalId": "user_1774623411294_61",
+      "name": "Member 062",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5658639",
+      "internalId": "user_1774623411297_62",
+      "name": "Member 063",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7635727",
+      "internalId": "user_1774623411298_63",
+      "name": "Member 064",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2786625",
+      "internalId": "user_1774623411301_64",
+      "name": "Member 065",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2308812",
+      "internalId": "user_1774623411302_65",
+      "name": "Member 066",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2387140",
+      "internalId": "user_1774623411306_66",
+      "name": "Member 067",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7637355",
+      "internalId": "user_1774623411307_67",
+      "name": "Member 068",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "4166878",
+      "internalId": "user_1774623411309_68",
+      "name": "Member 069",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "4925892",
+      "internalId": "user_1774623411319_69",
+      "name": "Member 070",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "3380811",
+      "internalId": "user_1774623411756_70",
+      "name": "Member 071",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "8403323",
+      "internalId": "user_1774623411758_71",
+      "name": "Member 072",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "8846096",
+      "internalId": "user_1774623411761_72",
+      "name": "Member 073",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2688221",
+      "internalId": "user_1774623411763_73",
+      "name": "Member 074",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5074490",
+      "internalId": "user_1774623411768_74",
+      "name": "Member 075",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2176582",
+      "internalId": "user_1774623411770_75",
+      "name": "Member 076",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "3891177",
+      "internalId": "user_1774623411772_76",
+      "name": "Member 077",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "8054623",
+      "internalId": "user_1774623411774_77",
+      "name": "Member 078",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "4905141",
+      "internalId": "user_1774623411776_78",
+      "name": "Member 079",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "6236064",
+      "internalId": "user_1774623411778_79",
+      "name": "Member 080",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2073811",
+      "internalId": "user_1774623412230_80",
+      "name": "Member 081",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7578798",
+      "internalId": "user_1774623412232_81",
+      "name": "Member 082",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "4323289",
+      "internalId": "user_1774623412237_82",
+      "name": "Member 083",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "3184206",
+      "internalId": "user_1774623412238_83",
+      "name": "Member 084",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1904339",
+      "internalId": "user_1774623412242_84",
+      "name": "Member 085",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1809698",
+      "internalId": "user_1774623412244_85",
+      "name": "Member 086",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "8279945",
+      "internalId": "user_1774623412247_86",
+      "name": "Member 087",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "3083395",
+      "internalId": "user_1774623412249_87",
+      "name": "Member 088",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "4170773",
+      "internalId": "user_1774623412251_88",
+      "name": "Member 089",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "6824568",
+      "internalId": "user_1774623412253_89",
+      "name": "Member 090",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7806902",
+      "internalId": "user_1774623412419_90",
+      "name": "Member 091",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "3241354",
+      "internalId": "user_1774623412423_91",
+      "name": "Member 092",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5034324",
+      "internalId": "user_1774623412426_92",
+      "name": "Member 093",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "5929975",
+      "internalId": "user_1774623412428_93",
+      "name": "Member 094",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "6145205",
+      "internalId": "user_1774623412431_94",
+      "name": "Member 095",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "2471345",
+      "internalId": "user_1774623412432_95",
+      "name": "Member 096",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "6591787",
+      "internalId": "user_1774623412436_96",
+      "name": "Member 097",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "1083015",
+      "internalId": "user_1774623412437_97",
+      "name": "Member 098",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 3
+      }
+    },
+    {
+      "userId": "7326752",
+      "internalId": "user_1774623412441_98",
+      "name": "Member 099",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 5
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 5
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 1
+      }
+    },
+    {
+      "userId": "6410727",
+      "internalId": "user_1774623412443_99",
+      "name": "Member 100",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4495342",
+      "internalId": "user_1774623466557_0",
+      "name": "User 001",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3785656",
+      "internalId": "user_1774623466560_1",
+      "name": "User 002",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9088343",
+      "internalId": "user_1774623466569_2",
+      "name": "User 003",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4891283",
+      "internalId": "user_1774623466571_3",
+      "name": "User 004",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "8494919",
+      "internalId": "user_1774623466574_4",
+      "name": "User 005",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6602410",
+      "internalId": "user_1774623466576_5",
+      "name": "User 006",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "1317464",
+      "internalId": "user_1774623466580_6",
+      "name": "User 007",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "1373809",
+      "internalId": "user_1774623466581_7",
+      "name": "User 008",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "5086207",
+      "internalId": "user_1774623466584_8",
+      "name": "User 009",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9559195",
+      "internalId": "user_1774623466587_9",
+      "name": "User 010",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4650280",
+      "internalId": "user_1774623467206_10",
+      "name": "User 011",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3101179",
+      "internalId": "user_1774623467210_11",
+      "name": "User 012",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6166150",
+      "internalId": "user_1774623467213_12",
+      "name": "User 013",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "8408452",
+      "internalId": "user_1774623467216_13",
+      "name": "User 014",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7792009",
+      "internalId": "user_1774623467224_14",
+      "name": "User 015",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "8748072",
+      "internalId": "user_1774623467227_15",
+      "name": "User 016",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7864423",
+      "internalId": "user_1774623467232_16",
+      "name": "User 017",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "5320675",
+      "internalId": "user_1774623467235_17",
+      "name": "User 018",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3433871",
+      "internalId": "user_1774623467239_18",
+      "name": "User 019",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "8283866",
+      "internalId": "user_1774623467243_19",
+      "name": "User 020",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3617413",
+      "internalId": "user_1774623467328_20",
+      "name": "User 021",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2746277",
+      "internalId": "user_1774623467330_21",
+      "name": "User 022",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6550700",
+      "internalId": "user_1774623467336_22",
+      "name": "User 023",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3642053",
+      "internalId": "user_1774623467339_23",
+      "name": "User 024",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7864944",
+      "internalId": "user_1774623467341_24",
+      "name": "User 025",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4449248",
+      "internalId": "user_1774623467343_25",
+      "name": "User 026",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7232207",
+      "internalId": "user_1774623467347_26",
+      "name": "User 027",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2793400",
+      "internalId": "user_1774623467348_27",
+      "name": "User 028",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "5981006",
+      "internalId": "user_1774623467353_28",
+      "name": "User 029",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7359740",
+      "internalId": "user_1774623467355_29",
+      "name": "User 030",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "5625461",
+      "internalId": "user_1774623467418_30",
+      "name": "User 031",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "8749430",
+      "internalId": "user_1774623467421_31",
+      "name": "User 032",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9363478",
+      "internalId": "user_1774623467425_32",
+      "name": "User 033",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "8317763",
+      "internalId": "user_1774623467427_33",
+      "name": "User 034",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3987088",
+      "internalId": "user_1774623467432_34",
+      "name": "User 035",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2231265",
+      "internalId": "user_1774623467434_35",
+      "name": "User 036",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4608902",
+      "internalId": "user_1774623467439_36",
+      "name": "User 037",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6901384",
+      "internalId": "user_1774623467441_37",
+      "name": "User 038",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9654442",
+      "internalId": "user_1774623467448_38",
+      "name": "User 039",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9324644",
+      "internalId": "user_1774623467451_39",
+      "name": "User 040",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2234596",
+      "internalId": "user_1774623467516_40",
+      "name": "User 041",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7342048",
+      "internalId": "user_1774623467521_41",
+      "name": "User 042",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7126531",
+      "internalId": "user_1774623467527_42",
+      "name": "User 043",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4889846",
+      "internalId": "user_1774623467529_43",
+      "name": "User 044",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "1989304",
+      "internalId": "user_1774623467533_44",
+      "name": "User 045",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7304672",
+      "internalId": "user_1774623467535_45",
+      "name": "User 046",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "5736798",
+      "internalId": "user_1774623467541_46",
+      "name": "User 047",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7099593",
+      "internalId": "user_1774623467543_47",
+      "name": "User 048",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4377878",
+      "internalId": "user_1774623467547_48",
+      "name": "User 049",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7450128",
+      "internalId": "user_1774623467549_49",
+      "name": "User 050",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2286694",
+      "internalId": "user_1774623467602_50",
+      "name": "User 051",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4260068",
+      "internalId": "user_1774623467606_51",
+      "name": "User 052",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2597157",
+      "internalId": "user_1774623467612_52",
+      "name": "User 053",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4117615",
+      "internalId": "user_1774623467615_53",
+      "name": "User 054",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7174419",
+      "internalId": "user_1774623467621_54",
+      "name": "User 055",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4607841",
+      "internalId": "user_1774623467625_55",
+      "name": "User 056",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9799133",
+      "internalId": "user_1774623467630_56",
+      "name": "User 057",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2694759",
+      "internalId": "user_1774623467633_57",
+      "name": "User 058",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "5605586",
+      "internalId": "user_1774623467637_58",
+      "name": "User 059",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "5754722",
+      "internalId": "user_1774623467640_59",
+      "name": "User 060",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9283506",
+      "internalId": "user_1774623468264_60",
+      "name": "User 061",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2665861",
+      "internalId": "user_1774623468267_61",
+      "name": "User 062",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7115439",
+      "internalId": "user_1774623468273_62",
+      "name": "User 063",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7227364",
+      "internalId": "user_1774623468276_63",
+      "name": "User 064",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "1670011",
+      "internalId": "user_1774623468280_64",
+      "name": "User 065",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7265089",
+      "internalId": "user_1774623468283_65",
+      "name": "User 066",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7076205",
+      "internalId": "user_1774623468288_66",
+      "name": "User 067",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3301812",
+      "internalId": "user_1774623468292_67",
+      "name": "User 068",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "8834821",
+      "internalId": "user_1774623468298_68",
+      "name": "User 069",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4838251",
+      "internalId": "user_1774623468301_69",
+      "name": "User 070",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "5665846",
+      "internalId": "user_1774623468399_70",
+      "name": "User 071",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6221150",
+      "internalId": "user_1774623468403_71",
+      "name": "User 072",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2294182",
+      "internalId": "user_1774623468409_72",
+      "name": "User 073",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "8923632",
+      "internalId": "user_1774623468412_73",
+      "name": "User 074",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9885878",
+      "internalId": "user_1774623468418_74",
+      "name": "User 075",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "1674101",
+      "internalId": "user_1774623468420_75",
+      "name": "User 076",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6619298",
+      "internalId": "user_1774623468432_76",
+      "name": "User 077",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3449707",
+      "internalId": "user_1774623468435_77",
+      "name": "User 078",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3973267",
+      "internalId": "user_1774623468441_78",
+      "name": "User 079",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7654776",
+      "internalId": "user_1774623468444_79",
+      "name": "User 080",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "1384406",
+      "internalId": "user_1774623468502_80",
+      "name": "User 081",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "1111005",
+      "internalId": "user_1774623468506_81",
+      "name": "User 082",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2787580",
+      "internalId": "user_1774623468510_82",
+      "name": "User 083",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7472522",
+      "internalId": "user_1774623468513_83",
+      "name": "User 084",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2204349",
+      "internalId": "user_1774623468517_84",
+      "name": "User 085",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6634770",
+      "internalId": "user_1774623468520_85",
+      "name": "User 086",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3117770",
+      "internalId": "user_1774623468526_86",
+      "name": "User 087",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3309947",
+      "internalId": "user_1774623468529_87",
+      "name": "User 088",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6896786",
+      "internalId": "user_1774623468534_88",
+      "name": "User 089",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4144544",
+      "internalId": "user_1774623468536_89",
+      "name": "User 090",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "7150310",
+      "internalId": "user_1774623468596_90",
+      "name": "User 091",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2284671",
+      "internalId": "user_1774623468600_91",
+      "name": "User 092",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "4351685",
+      "internalId": "user_1774623468610_92",
+      "name": "User 093",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "1550623",
+      "internalId": "user_1774623468613_93",
+      "name": "User 094",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3791926",
+      "internalId": "user_1774623468620_94",
+      "name": "User 095",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "3346095",
+      "internalId": "user_1774623468622_95",
+      "name": "User 096",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "6510280",
+      "internalId": "user_1774623468626_96",
+      "name": "User 097",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "2034136",
+      "internalId": "user_1774623468629_97",
+      "name": "User 098",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    },
+    {
+      "userId": "9037353",
+      "internalId": "user_1774623468634_98",
+      "name": "User 099",
+      "current": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "expected": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "delta": {
+        "fund": 0,
+        "income": 0,
+        "locked": 0
+      },
+      "hasMismatch": false,
+      "details": {
+        "fundRelevantCount": 0,
+        "incomeRelevantCount": 0
+      }
+    }
+  ]
+}
