@@ -3970,6 +3970,21 @@ const server = createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/health') {
+    const storageHealth = await getMySQLHealth();
+    const statusCode = storageHealth.ok ? 200 : 503;
+    sendJson(res, statusCode, {
+      ok: storageHealth.ok,
+      service: 'backend',
+      env: NODE_ENV,
+      storageMode: STORAGE_MODE,
+      uptimeSeconds: Math.floor(process.uptime()),
+      now: new Date().toISOString(),
+      storage: storageHealth
+    });
+    return;
+  }
+
   // POST state
   if (req.method === 'POST' && url.pathname === '/api/state') {
     try {
