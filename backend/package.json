@@ -10,7 +10,9 @@
     "verify:wallet:file": "node scripts/verify-wallet-ledger-resync.cjs",
     "verify:wallet:mysql": "node scripts/verify-wallet-ledger-resync.cjs --mysql",
     "verify:wallet:gate:file": "node scripts/verify-wallet-ledger-resync.cjs --fail-on-mismatch",
-    "verify:wallet:gate:mysql": "node scripts/verify-wallet-ledger-resync.cjs --mysql --fail-on-mismatch"
+    "verify:wallet:gate:mysql": "node scripts/verify-wallet-ledger-resync.cjs --mysql --fail-on-mismatch",
+    "phasea:fix:dry": "node scripts/fix-v2-phase-a-seeding.cjs",
+    "phasea:fix:apply": "node scripts/fix-v2-phase-a-seeding.cjs --apply"
   },
   "dependencies": {
     "cors": "^2.8.6",
