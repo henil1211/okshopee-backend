@@ -665,7 +665,7 @@ Failure handling:
 - Any payout retry must use separate idempotent payout key, never repost financial debit.
 
 ---
-
+    
 ## 6.6 Admin Adjustment Flow (Restricted)
 
 Admin adjustments are emergency-only and must still be ledger-based.
@@ -902,42 +902,194 @@ If all ten pass, you can safely continue from maintenance to controlled reopen.
 
 ---
 
-## 13) Implementation Status Snapshot (2026-04-16)
+## 13) Implementation Status Snapshot (2026-04-17)
 
-This section tracks actual implementation progress observed in code/repo plus verified runtime evidence from the RDP backend smoke test. It is intentionally conservative: anything not directly proven stays partial or pending.
+This section supersedes the previous 2026-04-16 snapshot. It reflects code changes already merged plus verified RDP runtime output through 2026-04-17.
 
-Verified complete:
-- V2 finance schema migrations exist for core tables and admin adjustment audit trail.
-- All 4 critical V2 flows are implemented in backend code: fund transfer, pin purchase, referral credit, withdrawal.
-- Admin adjustment flow is implemented with policy restrictions and immutable audit logging.
-- Generic legacy financial writes are blocked when `FINANCE_ENGINE_MODE=v2` and `LEGACY_FINANCIAL_WRITES_ENABLED=false`.
-- Deadlock/lock-wait retry wrapper is implemented and smoke-tested successfully on the RDP backend.
-- Deadlock smoke verification evidence:
-  - Endpoint: `POST /api/v2/fund-transfers`
-  - Requests: `12`
-  - Success `200`: `12`
-  - Conflict `409`: `0`
-  - `retryExhausted`: `0`
-  - `serverErrors5xx`: `0`
+Policy lock (confirmed):
+- Legacy/current user financial history remains untouched.
+- No retroactive correction campaign for old users.
+- V2 rollout focus is future/new users only.
+- Website remains live; cutover is feature-flag/config based (not full downtime).
 
-Partial or still unverified:
-- Baseline snapshot completion/signoff is not yet evidenced in this repo/doc.
-- Full v2 table population and cutover seeding are not fully evidenced, although the smoke test proves the required V2 records exist for at least the tested users.
-- AuthN/AuthZ hardening is now implemented in code (signed login-issued V2 tokens, admin-role checks, impersonation session enforcement, auth audit logging), but runtime verification evidence across endpoints is still pending.
-- Reconciliation go-live gate for cutover users is not yet evidenced.
-- Post-go-live SLO metrics/alerting are only partially evidenced.
+New evidence captured since last snapshot:
+- Auth/AuthZ smoke verification passed on RDP for invalid bearer and actor-mismatch paths.
+- V2 reconciliation gate commands were added:
+  - `npm run verify:wallet:gate:file`
+  - `npm run verify:wallet:gate:mysql`
+- Local snapshot gate run passed with zero mismatches.
+- RDP MySQL gate run failed globally due legacy drift:
+  - `Users with mismatch: 17`
+  - `Fund mismatches: 2`
+  - `Income mismatches: 4`
+  - `Locked mismatches: 12`
+  - `Total delta (fund/income/locked): -19.00 / -29.00 / -105.00`
 
-Still remaining:
-- Rollback runbook test evidence is not yet recorded.
+Go-live checklist status (detailed):
 
-Go-live checklist status:
-1. `PENDING` - Baseline snapshot complete and signed.
-2. `PARTIAL` - v2 tables populated and indexed.
-3. `COMPLETE` - All 4 critical flows run in transaction + idempotency + double-entry.
-4. `PARTIAL` - Legacy financial write paths disabled.
-5. `COMPLETE` - Admin adjustment endpoint locked by policy and audited.
-6. `COMPLETE` - Deadlock retry mechanism verified.
-7. `PARTIAL` - AuthN/AuthZ and impersonation audit checks implemented; runtime verification evidence still pending on v2 endpoints.
-8. `PENDING` - Reconciliation go-live gate: zero unexplained diff for cutover window users.
-9. `PARTIAL` - Post-go-live SLO thresholds configured and alerting verified.
-10. `PENDING` - Rollback runbook tested.
+| # | Checklist item | Status | Current evidence | Remaining to close |
+|---|---|---|---|---|
+| 1 | Baseline snapshot complete and signed | `PENDING` | Baseline/no-correction model is defined in this doc. | Signed cutover snapshot artifact and signoff record are still not attached. |
+| 2 | v2 tables populated and indexed | `PARTIAL` | Runtime smoke proves required records exist for tested users; v2 paths execute. | Full DB inventory evidence (all required v2 tables/indexes populated for target scope) needs to be recorded. |
+| 3 | 4 critical flows run in transaction + idempotency + double-entry | `COMPLETE` | Fund transfer, pin purchase, referral credit, and withdrawal are implemented and exercised by smoke paths. | Keep regression coverage during rollout. |
+| 4 | Legacy financial write paths disabled | `PARTIAL` | Flag-based protection exists and is used in v2 mode. | Production flag-state evidence for full cutover policy needs an explicit record. |
+| 5 | Admin adjustment endpoint locked by policy and audited | `COMPLETE` | Endpoint restrictions and immutable audit trail are implemented and in active flow. | None for baseline closure; continue operational monitoring. |
+| 6 | Deadlock retry mechanism verified | `COMPLETE` | Deadlock smoke passed (no retry exhaustion, no 5xx) and retry wrapper is active in v2 mutations. | None for baseline closure; continue threshold monitoring. |
+| 7 | AuthN/AuthZ and impersonation audit checks verified on v2 endpoints | `PARTIAL` | Invalid bearer and actor-mismatch checks are verified; auth hardening is active. | Complete non-admin role-path and full impersonation-path runtime evidence on v2 endpoints. |
+| 8 | Reconciliation go-live gate (zero unexplained diff for cutover scope) | `PARTIAL` | Gate command exists and runs; global MySQL run reveals legacy drift as expected under no-correction policy. | Record scoped zero-diff evidence for post-cutover future-user cohort (not legacy global set). |
+| 9 | Post-go-live SLO thresholds configured and alerting verified | `PARTIAL` | SLO/alert thresholds are defined and ledger mismatch alerting hooks exist. | End-to-end alert delivery and dashboard evidence (firing, routing, ack) still needs to be recorded. |
+| 10 | Rollback runbook tested | `PENDING` | Rollback helper scripts exist. | Execute and document a rollback drill with pass/fail evidence. |
+
+Status summary (weighted):
+- Complete: 3
+- Partial: 5
+- Pending: 2
+- Weighted completion (Complete=1, Partial=0.5, Pending=0): `55%`
+- Weighted remaining: `45%`
+
+Operational interpretation for current strategy:
+- Global legacy-inclusive reconciliation is expected to show drift and is not a blocker under the no-legacy-correction policy.
+- Release confidence should be measured on future-user scoped V2 behavior and scoped reconciliation gates.
+
+Immediate remaining actions:
+1. Produce signed baseline/cutover artifact record.
+2. Run and store scoped reconciliation gate reports for new post-cutover users.
+3. Capture full auth/impersonation runtime evidence for non-admin and admin paths.
+4. Verify SLO alert delivery chain end-to-end.
+5. Run and document rollback runbook drill.
+
+---
+
+## 14) Seeding Verification + V2-Only Write Cutover Runbook
+
+This section is the operational bridge from "design ready" to "safe production execution".
+
+Non-negotiable target model:
+- One write engine only for money operations: v2.
+- Legacy financial paths: read-only history/reference.
+- No fallback from v2 financial write errors to legacy write paths.
+
+### 14.1 Phase A: Pre-Switch Seeding Verification (must pass first)
+
+Run these checks in MySQL before enforcing v2-only writes.
+
+1) Active users missing any of the 3 required wallet accounts:
+
+~~~sql
+SELECT
+  u.id,
+  u.user_code,
+  IF(f.id IS NULL, 1, 0) AS missing_fund,
+  IF(i.id IS NULL, 1, 0) AS missing_income,
+  IF(r.id IS NULL, 1, 0) AS missing_royalty
+FROM v2_users u
+LEFT JOIN v2_wallet_accounts f ON f.user_id = u.id AND f.wallet_type = 'fund'
+LEFT JOIN v2_wallet_accounts i ON i.user_id = u.id AND i.wallet_type = 'income'
+LEFT JOIN v2_wallet_accounts r ON r.user_id = u.id AND r.wallet_type = 'royalty'
+WHERE u.status = 'active'
+  AND (f.id IS NULL OR i.id IS NULL OR r.id IS NULL)
+ORDER BY u.id;
+~~~
+
+Pass rule: query returns 0 rows.
+
+2) Active users missing help progression seed row:
+
+~~~sql
+SELECT u.id, u.user_code
+FROM v2_users u
+LEFT JOIN v2_help_progress_state h ON h.user_id = u.id
+WHERE u.status = 'active'
+  AND h.user_id IS NULL
+ORDER BY u.id;
+~~~
+
+Pass rule: query returns 0 rows.
+
+3) Wallet accounts missing active baseline row:
+
+~~~sql
+SELECT wa.user_id, wa.wallet_type
+FROM v2_wallet_accounts wa
+LEFT JOIN v2_baseline_balances bb
+  ON bb.user_id = wa.user_id
+ AND bb.wallet_type = wa.wallet_type
+ AND bb.is_active = 1
+WHERE bb.id IS NULL
+ORDER BY wa.user_id, wa.wallet_type;
+~~~
+
+Pass rule: query returns 0 rows.
+
+4) Sanity check for users with no posted v2 ledger entries:
+
+~~~sql
+SELECT
+  u.user_code,
+  wa.wallet_type,
+  wa.current_amount_cents,
+  bb.baseline_amount_cents
+FROM v2_wallet_accounts wa
+INNER JOIN v2_users u ON u.id = wa.user_id
+INNER JOIN v2_baseline_balances bb
+  ON bb.user_id = wa.user_id
+ AND bb.wallet_type = wa.wallet_type
+ AND bb.is_active = 1
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM v2_ledger_entries le
+  INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
+  WHERE le.gl_account_id = wa.gl_account_id
+    AND lt.system_version = 'v2'
+    AND lt.status = 'posted'
+)
+AND wa.current_amount_cents <> bb.baseline_amount_cents
+ORDER BY u.user_code, wa.wallet_type;
+~~~
+
+Pass rule: query returns 0 rows.
+
+### 14.2 Phase B: Switch Configuration to v2-Only Writes
+
+Required runtime settings:
+- FINANCE_ENGINE_MODE=v2
+- LEGACY_FINANCIAL_WRITES_ENABLED=false
+- REQUIRE_IDEMPOTENCY_FOR_MUTATIONS=true
+- REQUIRE_SYSTEM_VERSION_HEADER=true
+
+Operational rule:
+- If a v2 write request fails, return error and stop.
+- Do not retry by sending the same write into legacy paths.
+
+### 14.3 Phase C: Runtime Proof Pack (same day)
+
+1) Run v2 auth/authorization smoke verification.
+2) Run v2 critical flow smokes (transfer, withdrawal, pin purchase, referral credit, admin adjustment where allowed).
+3) Run reconciliation gate command and archive output report.
+4) For no-correction policy, treat legacy-inclusive mismatch as expected drift, then run scoped checks for the post-cutover cohort and archive those reports.
+
+### 14.4 Go/No-Go Decision
+
+Go if all are true:
+- Phase A seeding checks passed.
+- v2 write-mode flags are active.
+- No legacy financial write path remains open.
+- v2 smoke runs pass.
+- Scoped post-cutover reconciliation checks pass.
+- Alert pipeline and rollback drill evidence captured.
+
+No-Go if any are true:
+- Missing v2 wallet/progression/baseline seed rows for transacting users.
+- Any financial write still depends on legacy endpoint path.
+- No rollback drill evidence.
+- No alert-delivery evidence.
+
+### 14.5 Evidence Folder Convention (recommended)
+
+Store cutover evidence artifacts in a dated folder, for example:
+- baseline snapshot export + hash + signoff file
+- seeding SQL check outputs
+- smoke test outputs
+- reconciliation reports (global + scoped)
+- alert trigger screenshots/logs
+- rollback drill timeline and result
