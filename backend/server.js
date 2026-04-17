@@ -8,6 +8,13 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import mysql from 'mysql2/promise';
 import nodemailer from 'nodemailer';
+import {
+  buildLegacyDirectCountMap,
+  claimPendingContributionForProcessing,
+  computeV2HelpSettlementDecision,
+  extractIncrementalDirectRequirementsFromLegacySettings,
+  isV2UserQualifiedForLevel
+} from './help-cascade-rules.js';
 
 const gzipAsync = promisify(zlibGzip);
 
@@ -163,6 +170,8 @@ const V2_HELP_LEVEL1_AMOUNT_CENTS = Number.isFinite(V2_HELP_LEVEL1_AMOUNT_CENTS_
   ? Math.trunc(V2_HELP_LEVEL1_AMOUNT_CENTS_RAW)
   : 500;
 const V2_HELP_EXPENSE_ACCOUNT_CODE = 'SYS_HELP_EXPENSE';
+const V2_HELP_SETTLEMENT_ACCOUNT_CODE = 'SYS_CASH_OR_SETTLEMENT';
+const V2_HELP_SAFETY_POOL_ACCOUNT_CODE = 'SYS_HELP_SAFETY_POOL';
 const V2_FUND_TRANSFER_MAX_PROGRESS_UPDATES = 2;
 const V2_ADMIN_ADJUSTMENT_ENABLED = process.env.V2_ADMIN_ADJUSTMENT_ENABLED === 'true';
 const V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS = new Set(
@@ -2895,6 +2904,8 @@ async function ensureV2HelpSettlementTables(connection) {
        receive_count INT UNSIGNED NOT NULL DEFAULT 0,
        receive_total_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
        locked_first_two_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       locked_qualification_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       safety_deducted_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
        pending_give_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
        given_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
        income_credited_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
@@ -2906,6 +2917,17 @@ async function ensureV2HelpSettlementTables(connection) {
        CONSTRAINT fk_v2_help_level_state_user FOREIGN KEY (user_id) REFERENCES v2_users(id)
      ) ENGINE=InnoDB`
   );
+
+    await connection.execute(
+     `ALTER TABLE v2_help_level_state
+      ADD COLUMN IF NOT EXISTS locked_qualification_cents BIGINT UNSIGNED NOT NULL DEFAULT 0
+      AFTER locked_first_two_cents`
+    );
+    await connection.execute(
+     `ALTER TABLE v2_help_level_state
+      ADD COLUMN IF NOT EXISTS safety_deducted_cents BIGINT UNSIGNED NOT NULL DEFAULT 0
+      AFTER locked_qualification_cents`
+    );
 
   await connection.execute(
     `CREATE TABLE IF NOT EXISTS v2_help_pending_contributions (
@@ -2935,6 +2957,33 @@ function normalizeV2HelpContributionSide(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'left' || normalized === 'right') return normalized;
   return 'unknown';
+}
+
+async function loadLegacyHelpQualificationContext(connection) {
+  const [rows] = await connection.execute(
+    `SELECT state_key, state_value
+     FROM state_store
+     WHERE state_key IN ('mlm_users', 'mlm_settings')`
+  );
+
+  const rowList = Array.isArray(rows) ? rows : [];
+  const byKey = new Map(rowList.map((row) => [String(row.state_key || ''), row.state_value]));
+  const legacyUsers = safeParseJSON(byKey.get('mlm_users'));
+  const legacySettings = safeParseJSON(byKey.get('mlm_settings'));
+
+  return {
+    directCountByUserCode: buildLegacyDirectCountMap(Array.isArray(legacyUsers) ? legacyUsers : []),
+    incrementalDirectRequirements: extractIncrementalDirectRequirementsFromLegacySettings(legacySettings, 10)
+  };
+}
+
+function isV2HelpQualifiedForLevel(qualificationContext, userCode, levelNo) {
+  return isV2UserQualifiedForLevel({
+    userCode,
+    levelNo,
+    directCountByUserCode: qualificationContext?.directCountByUserCode,
+    incrementalRequirements: qualificationContext?.incrementalDirectRequirements
+  });
 }
 
 async function buildLegacyActivationContributionPlanFromMatrixState(connection, newMemberUserCode) {
@@ -3009,9 +3058,10 @@ async function ensureV2HelpLevelStateRow(connection, userId, levelNo) {
   await connection.execute(
     `INSERT INTO v2_help_level_state
       (user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
+       locked_qualification_cents, safety_deducted_cents,
        pending_give_cents, given_cents, income_credited_cents, last_event_seq)
      VALUES
-      (?, ?, 0, 0, 0, 0, 0, 0, 0)
+      (?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0)
      ON DUPLICATE KEY UPDATE id = id`,
     [userId, levelNo]
   );
@@ -3021,6 +3071,7 @@ async function lockV2HelpLevelState(connection, userId, levelNo) {
   await ensureV2HelpLevelStateRow(connection, userId, levelNo);
   const [rows] = await connection.execute(
     `SELECT id, user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
+            locked_qualification_cents, safety_deducted_cents,
             pending_give_cents, given_cents, income_credited_cents, last_event_seq
      FROM v2_help_level_state
      WHERE user_id = ? AND level_no = ?
@@ -3156,6 +3207,8 @@ async function applyV2HelpContributionSettlement(connection, {
   eventKey,
   helpExpenseAccount,
   settlementAccount,
+  safetyPoolAccount,
+  qualificationContext,
   usersById
 }) {
   const beneficiaryUser = usersById.get(Number(pendingContribution.beneficiary_user_id)) || null;
@@ -3207,32 +3260,44 @@ async function applyV2HelpContributionSettlement(connection, {
   const levelNo = Number(pendingContribution.level_no);
   const amountCents = Number(pendingContribution.amount_cents);
   const beneficiaryState = await lockV2HelpLevelState(connection, beneficiaryUser.id, levelNo);
-  const nextReceiveCount = Number(beneficiaryState.receive_count || 0) + 1;
-  const nextReceiveTotal = Number(beneficiaryState.receive_total_cents || 0) + amountCents;
-  const isLockedFirstTwo = nextReceiveCount <= 2;
+  const decision = computeV2HelpSettlementDecision({
+    receiveCountBefore: Number(beneficiaryState.receive_count || 0),
+    safetyDeductedCents: Number(beneficiaryState.safety_deducted_cents || 0),
+    isQualifiedForLevel: isV2HelpQualifiedForLevel(qualificationContext, beneficiaryUser.user_code, levelNo),
+    amountCents,
+    lockedQualificationCents: Number(beneficiaryState.locked_qualification_cents || 0)
+  });
 
-  let settlementMode = 'system_hold';
-  let beneficiaryWallet = null;
-  if (!isLockedFirstTwo) {
-    beneficiaryWallet = await lockV2IncomeWalletByUserId(connection, beneficiaryUser.id);
-    settlementMode = 'income_credit';
-  } else {
-    settlementMode = 'locked_for_give';
-  }
+  const settlementMode = String(decision.mode || 'system_hold');
+  const incomeCreditCents = Number(decision.incomeCreditCents || 0);
+  const qualificationReleaseCents = Number(decision.qualificationReleaseCents || 0);
+  const lockFirstTwoCents = Number(decision.lockFirstTwoCents || 0);
+  const lockQualificationCents = Number(decision.lockQualificationCents || 0);
+  const divertedSafetyCents = Number(decision.divertedSafetyCents || 0);
 
-  const summaryDescription = isLockedFirstTwo
-    ? `Locked help level ${levelNo} for ${beneficiaryUser.user_code}`
-    : `Help credit level ${levelNo} for ${beneficiaryUser.user_code}`;
+  const summaryDescription = settlementMode === 'locked_for_give'
+    ? `Locked first-two help level ${levelNo} for ${beneficiaryUser.user_code}`
+    : settlementMode === 'locked_for_qualification'
+      ? `Locked receive help level ${levelNo} for ${beneficiaryUser.user_code}`
+      : settlementMode === 'safety_pool_diversion'
+        ? `5th help diversion level ${levelNo} for ${beneficiaryUser.user_code}`
+        : qualificationReleaseCents > 0
+          ? `Released locked receive + help credit level ${levelNo} for ${beneficiaryUser.user_code}`
+          : `Help credit level ${levelNo} for ${beneficiaryUser.user_code}`;
+  const ledgerTransactionTotalCents = settlementMode === 'income_credit_with_release'
+    ? incomeCreditCents
+    : amountCents;
+
   const { txUuid, ledgerTxnId } = await createV2HelpLedgerTransaction(connection, {
     idempotencyKey,
     actorUserId,
     eventKey,
     contributionId: pendingContribution.id,
     description: summaryDescription,
-    amountCents
+    amountCents: ledgerTransactionTotalCents
   });
 
-  if (isLockedFirstTwo) {
+  if (settlementMode === 'locked_for_give' || settlementMode === 'locked_for_qualification') {
     await connection.execute(
       `INSERT INTO v2_ledger_entries
         (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
@@ -3248,29 +3313,70 @@ async function applyV2HelpContributionSettlement(connection, {
         amountCents
       ]
     );
-  } else {
+  } else if (settlementMode === 'safety_pool_diversion') {
     await connection.execute(
       `INSERT INTO v2_ledger_entries
         (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
        VALUES
         (?, 1, ?, NULL, NULL, 'debit', ?),
-        (?, 2, ?, ?, 'income', 'credit', ?)`,
+        (?, 2, ?, NULL, NULL, 'credit', ?)`,
       [
         ledgerTxnId,
         helpExpenseAccount.id,
         amountCents,
         ledgerTxnId,
-        beneficiaryWallet.gl_account_id,
-        beneficiaryWallet.user_id,
+        safetyPoolAccount.id,
         amountCents
       ]
     );
+  } else {
+    const beneficiaryWallet = await lockV2IncomeWalletByUserId(connection, beneficiaryUser.id);
+
+    if (qualificationReleaseCents > 0) {
+      await connection.execute(
+        `INSERT INTO v2_ledger_entries
+          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+         VALUES
+          (?, 1, ?, NULL, NULL, 'debit', ?),
+          (?, 2, ?, NULL, NULL, 'debit', ?),
+          (?, 3, ?, ?, 'income', 'credit', ?)`,
+        [
+          ledgerTxnId,
+          helpExpenseAccount.id,
+          amountCents,
+          ledgerTxnId,
+          settlementAccount.id,
+          qualificationReleaseCents,
+          ledgerTxnId,
+          beneficiaryWallet.gl_account_id,
+          beneficiaryWallet.user_id,
+          incomeCreditCents
+        ]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_ledger_entries
+          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+         VALUES
+          (?, 1, ?, NULL, NULL, 'debit', ?),
+          (?, 2, ?, ?, 'income', 'credit', ?)`,
+        [
+          ledgerTxnId,
+          helpExpenseAccount.id,
+          amountCents,
+          ledgerTxnId,
+          beneficiaryWallet.gl_account_id,
+          beneficiaryWallet.user_id,
+          incomeCreditCents
+        ]
+      );
+    }
 
     const [walletUpdateResult] = await connection.execute(
       `UPDATE v2_wallet_accounts
        SET current_amount_cents = current_amount_cents + ?, version = version + 1
        WHERE user_id = ? AND wallet_type = 'income'`,
-      [amountCents, beneficiaryWallet.user_id]
+      [incomeCreditCents, beneficiaryWallet.user_id]
     );
     if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
       throw createApiError(500, 'Failed to credit beneficiary income wallet', 'BENEFICIARY_WALLET_UPDATE_FAILED');
@@ -3278,15 +3384,24 @@ async function applyV2HelpContributionSettlement(connection, {
   }
 
   const nextEventSeq = Number(beneficiaryState.last_event_seq || 0) + 1;
-  const nextLockedFirstTwo = Number(beneficiaryState.locked_first_two_cents || 0) + (isLockedFirstTwo ? amountCents : 0);
-  const nextPendingGive = Number(beneficiaryState.pending_give_cents || 0) + (isLockedFirstTwo ? amountCents : 0);
-  const nextIncomeCredited = Number(beneficiaryState.income_credited_cents || 0) + (isLockedFirstTwo ? 0 : amountCents);
+  const nextReceiveCount = Number(beneficiaryState.receive_count || 0) + 1;
+  const nextReceiveTotal = Number(beneficiaryState.receive_total_cents || 0) + amountCents;
+  const nextLockedFirstTwo = Number(beneficiaryState.locked_first_two_cents || 0) + lockFirstTwoCents;
+  const nextLockedQualification = Math.max(
+    0,
+    Number(beneficiaryState.locked_qualification_cents || 0) + lockQualificationCents - qualificationReleaseCents
+  );
+  const nextSafetyDeducted = Number(beneficiaryState.safety_deducted_cents || 0) + divertedSafetyCents;
+  const nextPendingGive = Number(beneficiaryState.pending_give_cents || 0) + lockFirstTwoCents;
+  const nextIncomeCredited = Number(beneficiaryState.income_credited_cents || 0) + incomeCreditCents;
 
   await connection.execute(
     `UPDATE v2_help_level_state
      SET receive_count = ?,
          receive_total_cents = ?,
          locked_first_two_cents = ?,
+         locked_qualification_cents = ?,
+         safety_deducted_cents = ?,
          pending_give_cents = ?,
          income_credited_cents = ?,
          last_event_seq = ?,
@@ -3296,6 +3411,8 @@ async function applyV2HelpContributionSettlement(connection, {
       nextReceiveCount,
       nextReceiveTotal,
       nextLockedFirstTwo,
+      nextLockedQualification,
+      nextSafetyDeducted,
       nextPendingGive,
       nextIncomeCredited,
       nextEventSeq,
@@ -3325,9 +3442,156 @@ async function applyV2HelpContributionSettlement(connection, {
     beneficiaryUserCode: beneficiaryUser.user_code,
     sourceProgress,
     beneficiaryProgress,
-    unlockedIncomeCents: isLockedFirstTwo ? 0 : amountCents,
-    lockedForGiveCents: isLockedFirstTwo ? amountCents : 0
+    unlockedIncomeCents: incomeCreditCents,
+    lockedForGiveCents: lockFirstTwoCents,
+    lockedForQualificationCents: lockQualificationCents,
+    releasedQualificationCents: qualificationReleaseCents,
+    divertedSafetyCents
   };
+}
+
+async function releaseV2QualifiedLockedReceiveBalances(connection, {
+  candidateUserIds,
+  usersById,
+  actorUserId,
+  idempotencyKey,
+  eventKey,
+  settlementAccount,
+  qualificationContext
+}) {
+  const userIds = [...new Set(
+    (Array.isArray(candidateUserIds) ? candidateUserIds : [])
+      .map((value) => Number(value || 0))
+      .filter((value) => value > 0)
+  )];
+
+  if (userIds.length === 0) {
+    return { processed: [], skipped: [] };
+  }
+
+  const processed = [];
+  const skipped = [];
+
+  for (const userId of userIds) {
+    let user = usersById.get(userId) || null;
+    if (!user) {
+      const [userRows] = await connection.execute(
+        `SELECT id, user_code, status
+         FROM v2_users
+         WHERE id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [userId]
+      );
+      user = Array.isArray(userRows) ? userRows[0] : null;
+      if (user) usersById.set(Number(user.id), user);
+    }
+    if (!user || String(user.status) !== 'active') continue;
+
+    const [stateRows] = await connection.execute(
+      `SELECT id, level_no, locked_qualification_cents, income_credited_cents, last_event_seq
+       FROM v2_help_level_state
+       WHERE user_id = ? AND locked_qualification_cents > 0
+       ORDER BY level_no ASC
+       FOR UPDATE`,
+      [userId]
+    );
+
+    const states = Array.isArray(stateRows) ? stateRows : [];
+    for (const state of states) {
+      const levelNo = Number(state.level_no || 0);
+      const lockedAmountCents = Number(state.locked_qualification_cents || 0);
+      if (levelNo <= 0 || lockedAmountCents <= 0) continue;
+
+      const isQualified = isV2HelpQualifiedForLevel(qualificationContext, user.user_code, levelNo);
+      if (!isQualified) {
+        skipped.push({
+          contributionId: `locked_release_${userId}_${levelNo}`,
+          sourceUserId: null,
+          beneficiaryUserId: userId,
+          levelNo,
+          amountCents: lockedAmountCents,
+          side: 'unknown',
+          reason: 'not_qualified'
+        });
+        continue;
+      }
+
+      const beneficiaryWallet = await lockV2IncomeWalletByUserId(connection, userId);
+      const { txUuid, ledgerTxnId } = await createV2HelpLedgerTransaction(connection, {
+        idempotencyKey,
+        actorUserId,
+        eventKey,
+        contributionId: `release_${userId}_${levelNo}`,
+        description: `Released locked receive help level ${levelNo} for ${user.user_code}`,
+        amountCents: lockedAmountCents
+      });
+
+      await connection.execute(
+        `INSERT INTO v2_ledger_entries
+          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+         VALUES
+          (?, 1, ?, NULL, NULL, 'debit', ?),
+          (?, 2, ?, ?, 'income', 'credit', ?)`,
+        [
+          ledgerTxnId,
+          settlementAccount.id,
+          lockedAmountCents,
+          ledgerTxnId,
+          beneficiaryWallet.gl_account_id,
+          beneficiaryWallet.user_id,
+          lockedAmountCents
+        ]
+      );
+
+      const [walletUpdateResult] = await connection.execute(
+        `UPDATE v2_wallet_accounts
+         SET current_amount_cents = current_amount_cents + ?, version = version + 1
+         WHERE user_id = ? AND wallet_type = 'income'`,
+        [lockedAmountCents, userId]
+      );
+      if (Number(walletUpdateResult?.affectedRows || 0) !== 1) {
+        throw createApiError(500, 'Failed to credit released locked receive amount', 'LOCKED_RECEIVE_RELEASE_WALLET_UPDATE_FAILED');
+      }
+
+      await connection.execute(
+        `UPDATE v2_help_level_state
+         SET locked_qualification_cents = 0,
+             income_credited_cents = income_credited_cents + ?,
+             last_event_seq = ?,
+             updated_at = NOW(3)
+         WHERE id = ?`,
+        [
+          lockedAmountCents,
+          Number(state.last_event_seq || 0) + 1,
+          state.id
+        ]
+      );
+
+      const beneficiaryProgress = await upsertV2HelpReceiveProgress(connection, {
+        userId,
+        levelNo,
+        amountCents: lockedAmountCents
+      });
+
+      processed.push({
+        contributionId: `locked_release_${userId}_${levelNo}`,
+        sourceUserId: null,
+        beneficiaryUserId: userId,
+        beneficiaryUserCode: user.user_code,
+        levelNo,
+        amountCents: lockedAmountCents,
+        side: 'unknown',
+        settlementMode: 'released_locked_receive',
+        ledgerTransactionId: ledgerTxnId,
+        txUuid,
+        sourceProgress: null,
+        beneficiaryProgress
+      });
+    }
+  }
+
+  return { processed, skipped };
 }
 
 async function processV2HelpContributionCascade(connection, {
@@ -3337,7 +3601,9 @@ async function processV2HelpContributionCascade(connection, {
   idempotencyKey,
   eventKey,
   helpExpenseAccount,
-  settlementAccount
+  settlementAccount,
+  safetyPoolAccount,
+  qualificationContext
 }) {
   const queue = [];
   const queued = new Set();
@@ -3381,6 +3647,23 @@ async function processV2HelpContributionCascade(connection, {
         continue;
       }
 
+      const claimed = await claimPendingContributionForProcessing(connection, {
+        pendingContributionId: pendingContribution.id,
+        claimToken: `${eventKey}:${sourceUserId}`
+      });
+      if (!claimed) {
+        skipped.push({
+          contributionId: Number(pendingContribution.id),
+          sourceUserId,
+          beneficiaryUserId: Number(pendingContribution.beneficiary_user_id),
+          levelNo,
+          amountCents,
+          side: String(pendingContribution.side || 'unknown'),
+          reason: 'claim_conflict'
+        });
+        continue;
+      }
+
       const settlement = await applyV2HelpContributionSettlement(connection, {
         pendingContribution,
         actorUserId,
@@ -3388,6 +3671,8 @@ async function processV2HelpContributionCascade(connection, {
         eventKey,
         helpExpenseAccount,
         settlementAccount,
+        safetyPoolAccount,
+        qualificationContext,
         usersById
       });
 
@@ -3707,10 +3992,16 @@ async function processV2HelpEvent({
       accountType: 'EXPENSE'
     });
     const settlementAccount = await loadSystemGlAccountForUpdate(connection, {
-      accountCode: 'SYS_CASH_OR_SETTLEMENT',
+      accountCode: V2_HELP_SETTLEMENT_ACCOUNT_CODE,
       accountName: 'System cash or settlement',
       accountType: 'ASSET'
     });
+    const safetyPoolAccount = await loadSystemGlAccountForUpdate(connection, {
+      accountCode: V2_HELP_SAFETY_POOL_ACCOUNT_CODE,
+      accountName: 'System help safety pool',
+      accountType: 'LIABILITY'
+    });
+    const qualificationContext = await loadLegacyHelpQualificationContext(connection);
 
     const processedContributions = [];
     const skippedContributions = [];
@@ -3818,12 +4109,29 @@ async function processV2HelpEvent({
         idempotencyKey,
         eventKey,
         helpExpenseAccount,
-        settlementAccount
+        settlementAccount,
+        safetyPoolAccount,
+        qualificationContext
       });
 
       processedContributions.push(...cascadeResult.processed);
       skippedContributions.push(...cascadeResult.skipped);
     }
+
+    const releaseResult = await releaseV2QualifiedLockedReceiveBalances(connection, {
+      candidateUserIds: [
+        Number(sourceUser.id),
+        ...Array.from(beneficiariesByCode.values()).map((row) => Number(row.id || 0))
+      ],
+      usersById,
+      actorUserId: actor.id,
+      idempotencyKey,
+      eventKey,
+      settlementAccount,
+      qualificationContext
+    });
+    processedContributions.push(...releaseResult.processed);
+    skippedContributions.push(...releaseResult.skipped);
 
     const [pendingCountRows] = await connection.execute(
       `SELECT COUNT(*) AS pending_count

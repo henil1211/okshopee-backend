@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
+    "test": "node --test tests/**/*.test.js",
     "check": "node --check server.js",
     "verify:wallet:file": "node scripts/verify-wallet-ledger-resync.cjs",
     "verify:wallet:mysql": "node scripts/verify-wallet-ledger-resync.cjs --mysql",
