@@ -31,6 +31,8 @@ const SAFE_DB_NAME_PATTERN = /(test|sandbox|qa|staging|dev|local|clone)/i;
 const SMOKE_ALLOW_REAL_USERS = String(process.env.SMOKE_ALLOW_REAL_USERS || '').trim().toLowerCase() === 'true';
 const SMOKE_ALLOW_AUTO_PICK = String(process.env.SMOKE_ALLOW_AUTO_PICK || '').trim().toLowerCase() === 'true';
 const SMOKE_DUMMY_PREFIX = String(process.env.SMOKE_DUMMY_PREFIX || '99').trim();
+const SMOKE_HTTP_RETRY_ATTEMPTS = Math.max(1, Number(process.env.SMOKE_HTTP_RETRY_ATTEMPTS || 3));
+const SMOKE_DB_RETRY_ATTEMPTS = Math.max(1, Number(process.env.SMOKE_DB_RETRY_ATTEMPTS || 3));
 
 function failSafety(message) {
   throw new Error(`SAFETY_BLOCK: ${message}`);
@@ -95,35 +97,85 @@ function normalizeUserCode(value) {
   return String(value || '').trim();
 }
 
-async function callHelpEvent({ actorUserCode, sourceUserCode, newMemberUserCode, sourceRef, idempotencyKey }) {
-  const response = await fetch(`${BACKEND_URL}/api/v2/help-events`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${actorUserCode}`,
-      'X-System-Version': 'v2',
-      'Idempotency-Key': idempotencyKey,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      sourceUserCode,
-      newMemberUserCode,
-      sourceRef,
-      eventType: HELP_EVENT_TYPE,
-      description: 'phase3-smoke'
-    })
-  });
+function getErrorCode(error) {
+  const code = error?.code || error?.cause?.code;
+  return typeof code === 'string' ? code : '';
+}
 
-  const bodyText = await response.text();
-  const bodyJson = safeParseJSON(bodyText, null);
-  return {
-    status: response.status,
-    ok: response.ok,
-    body: bodyJson || { raw: bodyText }
-  };
+function isRetryableConnectionError(error) {
+  const code = getErrorCode(error).toUpperCase();
+  if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'PROTOCOL_CONNECTION_LOST', 'UND_ERR_SOCKET'].includes(code)) {
+    return true;
+  }
+  const message = String(error?.message || '').toUpperCase();
+  return message.includes('ECONNRESET')
+    || message.includes('SOCKET')
+    || message.includes('CONNECTION')
+    || message.includes('PROTOCOL_CONNECTION_LOST');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function executeSqlWithRetry(pool, sql, params, label) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= SMOKE_DB_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await pool.execute(sql, params);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableConnectionError(error) || attempt >= SMOKE_DB_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      await sleep(150 * attempt);
+    }
+  }
+  throw lastError || new Error(`${label || 'sql'} failed`);
+}
+
+async function callHelpEvent({ actorUserCode, sourceUserCode, newMemberUserCode, sourceRef, idempotencyKey }) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= SMOKE_HTTP_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/v2/help-events`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${actorUserCode}`,
+          'X-System-Version': 'v2',
+          'Idempotency-Key': idempotencyKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          sourceUserCode,
+          newMemberUserCode,
+          sourceRef,
+          eventType: HELP_EVENT_TYPE,
+          description: 'phase3-smoke'
+        })
+      });
+
+      const bodyText = await response.text();
+      const bodyJson = safeParseJSON(bodyText, null);
+      return {
+        status: response.status,
+        ok: response.ok,
+        body: bodyJson || { raw: bodyText }
+      };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableConnectionError(error) || attempt >= SMOKE_HTTP_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      await sleep(200 * attempt);
+    }
+  }
+
+  throw lastError || new Error('Failed to call /api/v2/help-events');
 }
 
 async function ensureV2HelpSettlementTables(connection) {
-  await connection.execute(
+  await executeSqlWithRetry(connection,
     `CREATE TABLE IF NOT EXISTS v2_help_level_state (
        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
        user_id BIGINT UNSIGNED NOT NULL,
@@ -142,21 +194,27 @@ async function ensureV2HelpSettlementTables(connection) {
        UNIQUE KEY uq_v2_help_level_state_user_level (user_id, level_no),
        KEY idx_v2_help_level_state_level (level_no),
        CONSTRAINT fk_v2_help_level_state_user FOREIGN KEY (user_id) REFERENCES v2_users(id)
-     ) ENGINE=InnoDB`
+     ) ENGINE=InnoDB`,
+    [],
+    'ensure v2_help_level_state'
   );
 
-  await connection.execute(
+  await executeSqlWithRetry(connection,
     `ALTER TABLE v2_help_level_state
      ADD COLUMN IF NOT EXISTS locked_qualification_cents BIGINT UNSIGNED NOT NULL DEFAULT 0
-     AFTER locked_first_two_cents`
+     AFTER locked_first_two_cents`,
+    [],
+    'alter v2_help_level_state locked_qualification_cents'
   );
-  await connection.execute(
+  await executeSqlWithRetry(connection,
     `ALTER TABLE v2_help_level_state
      ADD COLUMN IF NOT EXISTS safety_deducted_cents BIGINT UNSIGNED NOT NULL DEFAULT 0
-     AFTER locked_qualification_cents`
+     AFTER locked_qualification_cents`,
+    [],
+    'alter v2_help_level_state safety_deducted_cents'
   );
 
-  await connection.execute(
+  await executeSqlWithRetry(connection,
     `CREATE TABLE IF NOT EXISTS v2_help_pending_contributions (
        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
        source_event_key VARCHAR(180) NOT NULL,
@@ -176,7 +234,9 @@ async function ensureV2HelpSettlementTables(connection) {
        CONSTRAINT fk_v2_help_pending_source FOREIGN KEY (source_user_id) REFERENCES v2_users(id),
        CONSTRAINT fk_v2_help_pending_beneficiary FOREIGN KEY (beneficiary_user_id) REFERENCES v2_users(id),
        CONSTRAINT fk_v2_help_pending_txn FOREIGN KEY (processed_txn_id) REFERENCES v2_ledger_transactions(id)
-     ) ENGINE=InnoDB`
+     ) ENGINE=InnoDB`,
+    [],
+    'ensure v2_help_pending_contributions'
   );
 }
 
@@ -205,10 +265,12 @@ async function main() {
 
     await ensureV2HelpSettlementTables(pool);
 
-    const [stateRows] = await pool.execute(
+    const [stateRows] = await executeSqlWithRetry(pool,
       `SELECT state_key, state_value
        FROM state_store
-       WHERE state_key IN ('mlm_matrix', 'mlm_users', 'mlm_settings')`
+       WHERE state_key IN ('mlm_matrix', 'mlm_users', 'mlm_settings')`,
+      [],
+      'load state_store keys'
     );
     const stateByKey = new Map((Array.isArray(stateRows) ? stateRows : []).map((row) => [row.state_key, row.state_value]));
     const matrix = safeParseJSON(stateByKey.get('mlm_matrix'), []);
@@ -222,10 +284,12 @@ async function main() {
     const directCountByUserCode = buildLegacyDirectCountMap(Array.isArray(legacyUsers) ? legacyUsers : []);
     const incrementalRequirements = extractIncrementalDirectRequirementsFromLegacySettings(legacySettings, 10);
 
-    const [activeRows] = await pool.execute(
+    const [activeRows] = await executeSqlWithRetry(pool,
       `SELECT id, user_code, status
        FROM v2_users
-       WHERE status = 'active'`
+       WHERE status = 'active'`,
+      [],
+      'load active v2 users'
     );
     const activeByCode = new Map((Array.isArray(activeRows) ? activeRows : []).map((row) => [String(row.user_code), row]));
 
@@ -318,7 +382,7 @@ async function main() {
       throw new Error('Failed to resolve beneficiary ids in v2_users');
     }
 
-    await pool.execute(
+    await executeSqlWithRetry(pool,
       `INSERT INTO v2_help_level_state
         (user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
          locked_qualification_cents, safety_deducted_cents,
@@ -327,15 +391,17 @@ async function main() {
         (?, ?, 3, 1500, 1000, ?, 0, 0, 0, 0, 1)
        ON DUPLICATE KEY UPDATE
         locked_qualification_cents = VALUES(locked_qualification_cents)`,
-      [releaseBeneficiaryId, Number(candidate.releaseLevelNo), HELP_AMOUNT_CENTS]
+      [releaseBeneficiaryId, Number(candidate.releaseLevelNo), HELP_AMOUNT_CENTS],
+      'seed level state for qualification release'
     );
 
-    const [walletBeforeRows] = await pool.execute(
+    const [walletBeforeRows] = await executeSqlWithRetry(pool,
       `SELECT current_amount_cents
        FROM v2_wallet_accounts
        WHERE user_id = ? AND wallet_type = 'income'
        LIMIT 1`,
-      [releaseBeneficiaryId]
+      [releaseBeneficiaryId],
+      'read wallet before scenario1'
     );
     const walletBefore = Number(Array.isArray(walletBeforeRows) && walletBeforeRows[0]
       ? walletBeforeRows[0].current_amount_cents
@@ -349,23 +415,25 @@ async function main() {
       idempotencyKey: `smoke-qrel-${Date.now()}-1`
     });
 
-    const [stateAfterRows] = await pool.execute(
+    const [stateAfterRows] = await executeSqlWithRetry(pool,
       `SELECT locked_qualification_cents
        FROM v2_help_level_state
        WHERE user_id = ? AND level_no = ?
        LIMIT 1`,
-      [releaseBeneficiaryId, Number(candidate.releaseLevelNo)]
+      [releaseBeneficiaryId, Number(candidate.releaseLevelNo)],
+      'read level state after scenario1'
     );
     const lockedAfter = Number(Array.isArray(stateAfterRows) && stateAfterRows[0]
       ? stateAfterRows[0].locked_qualification_cents
       : 0);
 
-    const [walletAfterRows] = await pool.execute(
+    const [walletAfterRows] = await executeSqlWithRetry(pool,
       `SELECT current_amount_cents
        FROM v2_wallet_accounts
        WHERE user_id = ? AND wallet_type = 'income'
        LIMIT 1`,
-      [releaseBeneficiaryId]
+      [releaseBeneficiaryId],
+      'read wallet after scenario1'
     );
     const walletAfter = Number(Array.isArray(walletAfterRows) && walletAfterRows[0]
       ? walletAfterRows[0].current_amount_cents
@@ -390,7 +458,7 @@ async function main() {
       releasedEntry
     };
 
-    await pool.execute(
+    await executeSqlWithRetry(pool,
       `INSERT INTO v2_help_level_state
         (user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
          locked_qualification_cents, safety_deducted_cents,
@@ -400,7 +468,8 @@ async function main() {
        ON DUPLICATE KEY UPDATE
         receive_count = 4,
         safety_deducted_cents = 0`,
-      [level1BeneficiaryId]
+      [level1BeneficiaryId],
+      'seed level state for fifth-help diversion'
     );
 
     const scenario2 = await callHelpEvent({
@@ -418,14 +487,15 @@ async function main() {
 
     let safetyPoolCreditCount = 0;
     if (fifthEntry?.ledgerTransactionId) {
-      const [safetyRows] = await pool.execute(
+      const [safetyRows] = await executeSqlWithRetry(pool,
         `SELECT COUNT(*) AS c
          FROM v2_ledger_entries e
          INNER JOIN v2_gl_accounts g ON g.id = e.gl_account_id
          WHERE e.ledger_txn_id = ?
            AND e.entry_side = 'credit'
            AND g.account_code = 'SYS_HELP_SAFETY_POOL'`,
-        [Number(fifthEntry.ledgerTransactionId)]
+        [Number(fifthEntry.ledgerTransactionId)],
+        'read safety pool credit count'
       );
       safetyPoolCreditCount = Number(Array.isArray(safetyRows) && safetyRows[0] ? safetyRows[0].c : 0);
     }
@@ -459,20 +529,22 @@ async function main() {
     const [concurrentA, concurrentB] = await Promise.all([reqA, reqB]);
     const eventKey = String(concurrentA.body?.eventKey || concurrentB.body?.eventKey || '');
 
-    const [queueRows] = await pool.execute(
+    const [queueRows] = await executeSqlWithRetry(pool,
       `SELECT COUNT(*) AS c
        FROM v2_help_events_queue
        WHERE event_key = ?`,
-      [eventKey]
+      [eventKey],
+      'read help event queue count'
     );
     const queueCount = Number(Array.isArray(queueRows) && queueRows[0] ? queueRows[0].c : 0);
 
     const refPrefix = `${eventKey.slice(0, 60)}:%`;
-    const [txnRows1] = await pool.execute(
+    const [txnRows1] = await executeSqlWithRetry(pool,
       `SELECT COUNT(*) AS c
        FROM v2_ledger_transactions
        WHERE reference_type = 'help_event' AND reference_id LIKE ?`,
-      [refPrefix]
+      [refPrefix],
+      'read txn count after concurrent requests'
     );
     const txnCountAfterConcurrent = Number(Array.isArray(txnRows1) && txnRows1[0] ? txnRows1[0].c : 0);
 
@@ -484,11 +556,12 @@ async function main() {
       idempotencyKey: `${concurrentSourceRef}-c`
     });
 
-    const [txnRows2] = await pool.execute(
+    const [txnRows2] = await executeSqlWithRetry(pool,
       `SELECT COUNT(*) AS c
        FROM v2_ledger_transactions
        WHERE reference_type = 'help_event' AND reference_id LIKE ?`,
-      [refPrefix]
+      [refPrefix],
+      'read txn count after replay'
     );
     const txnCountAfterReplay = Number(Array.isArray(txnRows2) && txnRows2[0] ? txnRows2[0].c : 0);
 
@@ -518,6 +591,18 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`SMOKE_ERROR: ${error instanceof Error ? error.message : String(error)}`);
+  const message = error instanceof Error ? error.message : String(error);
+  const code = getErrorCode(error);
+  const causeCode = getErrorCode(error?.cause);
+  console.error(`SMOKE_ERROR: ${message}`);
+  if (code) {
+    console.error(`SMOKE_ERROR_CODE: ${code}`);
+  }
+  if (causeCode) {
+    console.error(`SMOKE_ERROR_CAUSE_CODE: ${causeCode}`);
+  }
+  if (error?.stack) {
+    console.error(error.stack);
+  }
   process.exit(1);
 });
