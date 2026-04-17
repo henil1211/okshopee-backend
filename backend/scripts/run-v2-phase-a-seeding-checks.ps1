@@ -20,9 +20,21 @@ if (-not (Test-Path $sqlPath)) {
 
 $mysqlCmd = Get-Command mysql -ErrorAction SilentlyContinue
 if (-not $mysqlCmd) {
-  Write-Host 'ERROR: mysql command not found in PATH.' -ForegroundColor Red
-  Write-Host 'Install MySQL client or run this from a machine where mysql CLI is available.' -ForegroundColor Yellow
-  exit 1
+  $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $nodeCmd) {
+    Write-Host 'ERROR: mysql command not found in PATH, and node is also unavailable.' -ForegroundColor Red
+    Write-Host 'Install MySQL client or Node.js on this machine.' -ForegroundColor Yellow
+    exit 1
+  }
+
+  Write-Host 'mysql command not found in PATH. Falling back to Node/mysql2 runner...' -ForegroundColor Yellow
+  & $nodeCmd.Source (Join-Path $scriptDir 'run-v2-phase-a-seeding-checks.cjs') `
+    --host "$DbHost" `
+    --port "$Port" `
+    --user "$User" `
+    --database "$Database" `
+    --label "$Label"
+  exit $LASTEXITCODE
 }
 
 $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
