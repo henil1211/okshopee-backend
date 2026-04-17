@@ -293,7 +293,9 @@ async function connectMySQL() {
     connectionLimit: 10,
     queueLimit: 0,
     charset: 'utf8mb4',
-    connectTimeout: 30000
+    connectTimeout: 30000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0
   });
 
   // Create the state_store table if it doesn't exist
@@ -396,14 +398,21 @@ function getErrorMessage(error, fallback = 'Unknown error') {
 
 function isMySQLConnectivityError(error) {
   if (!error || typeof error !== 'object') return false;
-  const code = error.code || '';
+  const code = String(error.code || '').toUpperCase();
   const message = getErrorMessage(error, '').toLowerCase();
   return (
     code === 'ECONNREFUSED' ||
+    code === 'ECONNRESET' ||
+    code === 'ECONNABORTED' ||
+    code === 'ETIMEDOUT' ||
     code === 'ENOTFOUND' ||
+    code === 'EPIPE' ||
     code === 'PROTOCOL_CONNECTION_LOST' ||
+    code === 'UND_ERR_SOCKET' ||
     code === 'ER_ACCESS_DENIED_ERROR' ||
     message.includes('connection') ||
+    message.includes('econnreset') ||
+    message.includes('socket') ||
     message.includes('timed out') ||
     message.includes('econnrefused')
   );
@@ -1230,7 +1239,8 @@ function isRetryableV2TransactionError(error) {
   return code === 'ER_LOCK_DEADLOCK'
     || code === 'ER_LOCK_WAIT_TIMEOUT'
     || errno === 1213
-    || errno === 1205;
+    || errno === 1205
+    || isMySQLConnectivityError(error);
 }
 
 function computeV2TxRetryDelayMs(attemptNo) {
@@ -1250,6 +1260,7 @@ function waitMs(durationMs) {
 async function executeV2TransactionWithRetry(executor, operationName) {
   let attempt = 0;
   let lastError = null;
+  let retryReason = 'db_lock_contention';
 
   while (attempt < V2_TX_RETRY_MAX_ATTEMPTS) {
     attempt += 1;
@@ -1257,11 +1268,14 @@ async function executeV2TransactionWithRetry(executor, operationName) {
       const result = await executor();
       if (result && typeof result === 'object' && result.payload && attempt > 1) {
         result.payload.retryAttemptsUsed = attempt - 1;
-        result.payload.retryReason = 'db_lock_contention';
+        result.payload.retryReason = retryReason;
       }
       return result;
     } catch (error) {
       lastError = error;
+      if (isMySQLConnectivityError(error)) {
+        retryReason = 'db_connectivity';
+      }
 
       if (!isRetryableV2TransactionError(error)) {
         throw error;
@@ -1275,6 +1289,7 @@ async function executeV2TransactionWithRetry(executor, operationName) {
         );
         exhaustedError.causeCode = error?.code || null;
         exhaustedError.causeErrno = Number(error?.errno || 0) || null;
+        exhaustedError.retryReason = retryReason;
         throw exhaustedError;
       }
 
@@ -6134,7 +6149,8 @@ const server = createServer(async (req, res) => {
 
       sendJson(res, result.status, result.payload);
     } catch (error) {
-      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const status = Number(error?.status)
+        || (error instanceof SyntaxError ? 400 : getHttpStatusForRequestError(error));
       const message = getErrorMessage(error, 'Failed to process help event');
       sendJson(res, status, {
         ok: false,
