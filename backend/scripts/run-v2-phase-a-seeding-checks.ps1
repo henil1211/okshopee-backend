@@ -1,5 +1,6 @@
 param(
-  [string]$Host = '127.0.0.1',
+  [Alias('Host')]
+  [string]$DbHost = '127.0.0.1',
   [int]$Port = 3306,
   [string]$User = 'root',
   [string]$Database = 'okshopee24',
@@ -35,7 +36,7 @@ $metaFile = Join-Path $evidenceDir 'phase-a-run-meta.txt'
 
 @(
   "StartedAt: $(Get-Date -Format o)",
-  "Host: $Host",
+  "Host: $DbHost",
   "Port: $Port",
   "User: $User",
   "Database: $Database",
@@ -51,7 +52,7 @@ Write-Host 'You will be prompted for MySQL password now.' -ForegroundColor Yello
 $sqlText = Get-Content -Path $sqlPath -Raw
 
 $mysqlArgs = @(
-  "--host=$Host",
+  "--host=$DbHost",
   "--port=$Port",
   "--user=$User",
   "--database=$Database",
