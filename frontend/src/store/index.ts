@@ -27,6 +27,83 @@ function normalizeRemoteRebuildError(payload: Record<string, unknown>, fallback:
       : fallback;
 }
 
+function generateClientIdempotencyKey(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `idem_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function generateClientRequestId(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeV2ApiErrorMessage(status: number, payload: Record<string, unknown>, fallback: string): string {
+  const code = typeof payload?.code === 'string' ? payload.code : '';
+  const backendMessage = typeof payload?.error === 'string'
+    ? payload.error
+    : typeof payload?.message === 'string'
+      ? payload.message
+      : '';
+
+  if (status === 409) {
+    if (code === 'IDEMPOTENCY_IN_PROGRESS') {
+      return 'This request is already being processed. Please wait a moment and refresh.';
+    }
+    if (code === 'IDEMPOTENCY_PAYLOAD_MISMATCH') {
+      return 'Request conflict detected. Please retry the action from the form.';
+    }
+    if (code === 'INSUFFICIENT_FUNDS') {
+      return backendMessage || 'Insufficient wallet balance for this action.';
+    }
+    return backendMessage || 'Request conflict. Please retry once.';
+  }
+
+  if (status === 400) {
+    return backendMessage || 'Invalid request payload. Please review the form values.';
+  }
+
+  if (status === 401 || status === 403) {
+    return backendMessage || 'Authentication session expired. Please login again.';
+  }
+
+  return backendMessage || `${fallback} (HTTP ${status})`;
+}
+
+function resolveV2RequestHeaders(params: {
+  idempotencyKey: string;
+  requestId: string;
+  impersonationReason: string;
+}): { headers: Record<string, string> } | { message: string } {
+  const authState = useAuthStore.getState();
+  const subjectUser = authState.user;
+  const impersonatedUser = authState.impersonatedUser;
+
+  if (!subjectUser) {
+    return { message: 'Authentication session expired. Please login again.' };
+  }
+
+  const savedAuthSession = Database.getV2AuthSession();
+  const bearerToken = (savedAuthSession?.accessToken || '').trim() || String(subjectUser.userId || '').trim();
+  if (!bearerToken) {
+    return { message: 'Missing V2 auth token. Please login again.' };
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${bearerToken}`,
+    'Idempotency-Key': params.idempotencyKey,
+    'X-System-Version': 'v2',
+    'X-Request-Id': params.requestId
+  };
+
+  if (impersonatedUser && subjectUser.isAdmin) {
+    headers['X-Impersonate-User-Code'] = impersonatedUser.userId;
+    headers['X-Impersonation-Reason'] = params.impersonationReason;
+  }
+
+  return { headers };
+}
+
 function resolveCanonicalUserForWalletActions(userRef: string): User | undefined {
   const resolved = Database.getUserById(userRef) || Database.getUserByUserId(userRef);
   if (!resolved) return undefined;
@@ -999,7 +1076,7 @@ interface WalletState {
   refreshTransactions: (userId: string) => void;
 }
 
-export const useWalletStore = create<WalletState>((set, get) => ({
+export const useWalletStore = create<WalletState>((set) => ({
   wallet: null,
   transactions: [],
 
@@ -1103,40 +1180,22 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       return { success: false, message: 'Invalid or expired OTP' };
     }
 
-    const authState = useAuthStore.getState();
-    const subjectUser = authState.user;
-    const impersonatedUser = authState.impersonatedUser;
-    if (!subjectUser) {
-      return { success: false, message: 'Authentication session expired. Please login again.' };
-    }
-
-    const savedAuthSession = Database.getV2AuthSession();
-    const bearerToken = (savedAuthSession?.accessToken || '').trim() || String(subjectUser.userId || '').trim();
-    if (!bearerToken) {
-      return { success: false, message: 'Missing V2 auth token. Please login again.' };
-    }
-
-    const idempotencyKey = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `idem_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const idempotencyKey = generateClientIdempotencyKey();
+    const requestId = generateClientRequestId('fund_transfer');
     const amountCents = Math.round(amount * 100);
     if (!Number.isInteger(amountCents) || amountCents <= 0) {
       return { success: false, message: 'Invalid transfer amount' };
     }
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${bearerToken}`,
-      'Idempotency-Key': idempotencyKey,
-      'X-System-Version': 'v2',
-      'X-Request-Id': requestId
-    };
-
-    if (impersonatedUser && subjectUser.isAdmin) {
-      headers['X-Impersonate-User-Code'] = impersonatedUser.userId;
-      headers['X-Impersonation-Reason'] = 'admin_support_fund_transfer';
+    const resolvedHeaders = resolveV2RequestHeaders({
+      idempotencyKey,
+      requestId,
+      impersonationReason: 'admin_support_fund_transfer'
+    });
+    if (!('headers' in resolvedHeaders)) {
+      return { success: false, message: resolvedHeaders.message };
     }
+    const headers = resolvedHeaders.headers;
 
     const response = await fetch(`${getBackendApiBase()}/api/v2/fund-transfers`, {
       method: 'POST',
@@ -1152,11 +1211,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
     const payload = await response.json().catch(() => ({} as Record<string, unknown>));
     if (!response.ok || payload?.ok === false) {
-      const errorMessage = typeof payload?.error === 'string'
-        ? payload.error
-        : typeof payload?.message === 'string'
-          ? payload.message
-          : `Transfer failed (HTTP ${response.status})`;
+      const errorMessage = normalizeV2ApiErrorMessage(response.status, payload, 'Transfer failed');
       return { success: false, message: errorMessage };
     }
 
@@ -1194,9 +1249,10 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         return { success: false, message: withdrawalGate.message };
       }
 
-      const settings = Database.getSettings();
-      const wallet = Database.getWallet(userId);
-      const user = Database.getUserById(userId);
+      const canonicalUser = resolveCanonicalUserForWalletActions(userId);
+      const effectiveUserId = canonicalUser?.id || userId;
+      const wallet = Database.getWallet(effectiveUserId);
+      const user = canonicalUser || Database.getUserById(effectiveUserId);
 
       if (!wallet || !user) {
         return { success: false, message: 'User not found' };
@@ -1226,49 +1282,65 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         return { success: false, message: 'Insufficient withdrawable balance (some amount is locked for give-help)' };
       }
 
-      const fee = amount * (settings.withdrawalFeePercent / 100);
-      const netAmount = amount - fee;
+      const idempotencyKey = generateClientIdempotencyKey();
+      const requestId = generateClientRequestId('withdrawal');
+      const resolvedHeaders = resolveV2RequestHeaders({
+        idempotencyKey,
+        requestId,
+        impersonationReason: 'admin_support_withdrawal'
+      });
+      if (!('headers' in resolvedHeaders)) {
+        return { success: false, message: resolvedHeaders.message };
+      }
 
-      await Database.runWithLocalStateTransaction(async () => {
-        const now = new Date().toISOString();
-        const baseNow = Date.now();
+      const amountCents = Math.round(amount * 100);
+      if (!Number.isInteger(amountCents) || amountCents <= 0) {
+        return { success: false, message: 'Invalid withdrawal amount' };
+      }
 
-        // Deduct from wallet immediately and keep request pending until admin verifies.
-        // If rejected, amount will be refunded by admin action.
-        Database.updateWallet(userId, {
-          incomeWallet: wallet.incomeWallet - amount
-        });
-
-        Database.createTransaction({
-          id: `tx_${baseNow}_withdraw`,
-          userId,
-          type: 'withdrawal',
-          amount: -amount,
-          status: 'pending',
-          description: 'Withdrawal request submitted. It will be processed within 72 hours.',
-          walletAddress: resolvedWalletAddress,
-          ...(resolvedPayoutQrCode ? { payoutQrCode: resolvedPayoutQrCode } : {}),
-          requesterUserId: user.userId,
-          requesterName: user.fullName,
-          fee,
-          netAmount,
-          createdAt: now
-        });
-      }, {
-        syncOnCommit: true,
-        syncOptions: {
-          full: false,
-          force: true,
-          timeoutMs: 60000,
-          maxAttempts: 3,
-          retryDelayMs: 1500
-        }
+      const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals`, {
+        method: 'POST',
+        headers: resolvedHeaders.headers,
+        body: JSON.stringify({
+          amountCents,
+          destinationType: 'wallet',
+          destinationRef: resolvedWalletAddress,
+          referenceId: `ui_withdrawal_${requestId}`,
+          description: resolvedPayoutQrCode
+            ? `Withdrawal to wallet with QR submitted by ${user.userId}`
+            : `Withdrawal to wallet submitted by ${user.userId}`
+        })
       });
 
-      get().loadWallet(userId);
-      get().refreshTransactions(userId);
+      const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+      if (!response.ok || payload?.ok === false) {
+        const errorMessage = normalizeV2ApiErrorMessage(response.status, payload, 'Withdrawal failed');
+        return { success: false, message: errorMessage };
+      }
 
-      return { success: true, message: `Withdrawal request submitted for $${netAmount.toFixed(2)} after fee. Processing time: up to 72 hours.` };
+      try {
+        await Database.hydrateFromServer({
+          keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
+          strict: true,
+          maxAttempts: 3,
+          timeoutMs: 20000,
+          retryDelayMs: 1000
+        });
+      } catch {
+        // Best-effort refresh. The withdrawal has already been committed server-side.
+      }
+
+      set({
+        wallet: Database.getWallet(effectiveUserId),
+        transactions: Database.getUserTransactions(effectiveUserId)
+      });
+
+      return {
+        success: true,
+        message: typeof payload?.idempotentReplay === 'boolean' && payload.idempotentReplay
+          ? 'Withdrawal already processed (idempotent replay).'
+          : 'Withdrawal submitted successfully.'
+      };
     } catch (error) {
       return {
         success: false,
@@ -1441,8 +1513,11 @@ export const usePinStore = create<PinState>((set, get) => ({
     }
     const paidFromWallet = options?.paidFromWallet === true;
 
-    if (paidFromWallet && wallet.depositWallet < amount) {
-      return { success: false, message: 'Insufficient fund wallet balance' };
+    if (paidFromWallet) {
+      return {
+        success: false,
+        message: 'Paid-from-wallet PIN request is disabled. Use Buy Now to purchase directly via V2.'
+      };
     }
     if (!paidFromWallet && !options?.paymentProof) {
       return { success: false, message: 'Payment screenshot is required for manual verification' };
@@ -1521,6 +1596,10 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     const walletOwner = resolveCanonicalUserForWalletActions(userId);
     const effectiveUserId = walletOwner?.id || userId;
+    const buyerUser = walletOwner || Database.getUserById(effectiveUserId);
+    if (!buyerUser) {
+      return { success: false, message: 'User not found' };
+    }
     const settings = Database.getSettings();
     const amount = quantity * settings.pinAmount;
     Database.repairFundWalletConsistency(effectiveUserId);
@@ -1533,77 +1612,67 @@ export const usePinStore = create<PinState>((set, get) => ({
     }
 
     try {
-      await Database.commitCriticalAction(() => {
-        const freshWallet = Database.getWallet(effectiveUserId);
-        if (!freshWallet || freshWallet.depositWallet < amount) {
-          throw new Error('Insufficient fund wallet balance for direct buy');
-        }
-
-        const now = new Date().toISOString();
-        const adminUser = Database.getUsers().find(u => u.isAdmin);
-        const processedBy = adminUser?.id || effectiveUserId;
-
-        Database.updateWallet(effectiveUserId, {
-          depositWallet: freshWallet.depositWallet - amount
-        });
-
-        const pins = Database.generatePins(quantity, effectiveUserId, processedBy);
-
-        Database.createTransaction({
-          id: `tx_${Date.now()}_pin_direct_buy`,
-          userId: effectiveUserId,
-          type: 'pin_purchase',
-          amount: -amount,
-          status: 'completed',
-          description: `Direct PIN buy from fund wallet (${quantity} PINs)`,
-          createdAt: now,
-          completedAt: now
-        });
-
-        Database.createPinPurchaseRequest({
-          id: `ppr_${Date.now()}_direct`,
-          userId: effectiveUserId,
-          quantity,
-          amount,
-          status: 'completed',
-          purchaseType: 'direct',
-          paidFromWallet: true,
-          adminNotes: 'Auto-approved direct buy from fund wallet',
-          createdAt: now,
-          processedAt: now,
-          processedBy,
-          pinsGenerated: pins.map(p => p.pinCode)
-        });
-
-        Database.createNotification({
-          id: `notif_${Date.now()}_direct_pin`,
-          userId: effectiveUserId,
-          title: 'PIN Purchase Successful',
-          message: `${quantity} PIN(s) purchased instantly from fund wallet.`,
-          type: 'success',
-          isRead: false,
-          createdAt: now
-        });
-
-        return true;
-      }, {
-        full: true,
-        timeoutMs: 90000,
-        maxAttempts: 3,
-        retryDelayMs: 1500
+      const idempotencyKey = generateClientIdempotencyKey();
+      const requestId = generateClientRequestId('pin_buy');
+      const resolvedHeaders = resolveV2RequestHeaders({
+        idempotencyKey,
+        requestId,
+        impersonationReason: 'admin_support_pin_purchase'
       });
+      if (!('headers' in resolvedHeaders)) {
+        return { success: false, message: resolvedHeaders.message };
+      }
+
+      const pinPriceCents = Math.round(settings.pinAmount * 100);
+      if (!Number.isInteger(pinPriceCents) || pinPriceCents <= 0) {
+        return { success: false, message: 'Invalid PIN price configuration' };
+      }
+
+      const response = await fetch(`${getBackendApiBase()}/api/v2/pins/purchase`, {
+        method: 'POST',
+        headers: resolvedHeaders.headers,
+        body: JSON.stringify({
+          buyerUserCode: buyerUser.userId,
+          quantity,
+          pinPriceCents,
+          description: `Direct PIN buy from fund wallet (${quantity} PINs)`
+        })
+      });
+
+      const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+      if (!response.ok || payload?.ok === false) {
+        const errorMessage = normalizeV2ApiErrorMessage(response.status, payload, 'Direct PIN buy failed');
+        return { success: false, message: errorMessage };
+      }
+
+      try {
+        await Database.hydrateFromServer({
+          keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS, DB_KEYS.PINS, DB_KEYS.PIN_PURCHASE_REQUESTS],
+          strict: true,
+          maxAttempts: 3,
+          timeoutMs: 20000,
+          retryDelayMs: 1000
+        });
+      } catch {
+        // Best-effort refresh. Purchase has already been committed server-side.
+      }
+
+      get().loadPins(effectiveUserId);
+      get().loadPurchaseRequests(effectiveUserId);
+      useWalletStore.getState().loadWallet(effectiveUserId);
+
+      return {
+        success: true,
+        message: typeof payload?.idempotentReplay === 'boolean' && payload.idempotentReplay
+          ? 'PIN purchase already processed (idempotent replay).'
+          : `${quantity} PIN(s) purchased instantly`
+      };
     } catch (error) {
       return {
         success: false,
         message: error instanceof Error ? error.message : 'Direct PIN buy could not be saved. Please try again.'
       };
     }
-
-    get().loadPins(effectiveUserId);
-    get().loadPurchaseRequests(effectiveUserId);
-    useWalletStore.getState().loadWallet(effectiveUserId);
-
-    return { success: true, message: `${quantity} PIN(s) purchased instantly` };
   },
 
   loadPurchaseRequests: (userId: string) => {
