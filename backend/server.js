@@ -706,6 +706,10 @@ function normalizeV2UserCode(value) {
   return String(value || '').trim();
 }
 
+function isValidLegacyBearerUserCode(value) {
+  return /^\d{7}$/.test(String(value || '').trim());
+}
+
 function isValidV2WithdrawalDestinationType(value) {
   return value === 'bank' || value === 'upi' || value === 'wallet';
 }
@@ -1001,7 +1005,7 @@ async function resolveV2RequestAuthContext({
   let parsedAuth;
   if (rawBearerToken.includes('.')) {
     parsedAuth = parseSignedV2AccessToken(rawBearerToken);
-  } else if (V2_ALLOW_LEGACY_BEARER_USER_CODE && isValidV2UserCode(rawBearerToken)) {
+  } else if (V2_ALLOW_LEGACY_BEARER_USER_CODE && isValidLegacyBearerUserCode(rawBearerToken)) {
     parsedAuth = {
       authMode: 'legacy_user_code',
       subjectUserCode: normalizeV2UserCode(rawBearerToken),
