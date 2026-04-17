@@ -553,9 +553,13 @@ function formatMoney(v) {
 }
 
 async function main() {
-  const sourceArg = String(process.argv[2] || '').trim();
+  const rawArgs = process.argv.slice(2);
+  const failOnMismatch = rawArgs.includes('--fail-on-mismatch');
+  const args = rawArgs.filter((arg) => arg !== '--fail-on-mismatch');
+
+  const sourceArg = String(args[0] || '').trim();
   const isMySqlMode = sourceArg === '--mysql' || sourceArg === 'mysql';
-  const argUserRef = (isMySqlMode ? process.argv[3] : process.argv[3]) || '';
+  const argUserRef = (isMySqlMode ? args[1] : args[1]) || '';
 
   let sourceLabel = '';
   let data;
@@ -726,6 +730,14 @@ async function main() {
   }
 
   console.log(`Report saved to: ${outPath}`);
+
+  if (failOnMismatch) {
+    if (summary.mismatchCounts.usersWithAnyMismatch > 0) {
+      console.error('Gate failed: wallet/ledger mismatches detected.');
+      process.exit(3);
+    }
+    console.log('Gate passed: zero wallet/ledger mismatches detected.');
+  }
 }
 
 main().catch((error) => {
