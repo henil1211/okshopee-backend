@@ -33,26 +33,6 @@ function resolveCanonicalUserForWalletActions(userRef: string): User | undefined
   return Database.getUserByUserId(resolved.userId) || resolved;
 }
 
-async function verifyTransferPersistedOnServer(expectedTxIds: Array<string | null | undefined>): Promise<boolean> {
-  const txIds = expectedTxIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0);
-  if (txIds.length === 0) return true;
-
-  try {
-    await Database.hydrateFromServer({
-      keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
-      strict: true,
-      maxAttempts: 2,
-      timeoutMs: 15000,
-      retryDelayMs: 700
-    });
-  } catch {
-    return false;
-  }
-
-  const transactions = Database.getTransactions();
-  return txIds.every((id) => transactions.some((tx) => tx.id === id));
-}
-
 const WALLET_MAINTENANCE_INTERVAL_MS = 30_000;
 const AUTO_WALLET_MAINTENANCE_ENABLED = (() => {
   const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
@@ -379,9 +359,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return { success: false, message: backendAuth.message };
       }
 
+      Database.setV2AuthSession(backendAuth.v2Auth || null);
+
       const access = evaluateUserAccess(backendAuth.user);
       if (!access.allowed) {
         Database.setCurrentUser(null);
+        Database.setV2AuthSession(null);
         set({ user: null, isAuthenticated: false, impersonatedUser: null });
         return { success: false, message: access.message || 'Account is inactive. Contact admin.' };
       }
@@ -444,6 +427,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (user.password !== password) {
       return { success: false, message: 'Invalid password' };
     }
+    Database.setV2AuthSession(null);
     Database.setCurrentUser(user);
     set({ user: Database.getCurrentUser() || user, isAuthenticated: true });
     // Load deferred data in background
@@ -900,6 +884,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     } else {
       // Full logout
       Database.setCurrentUser(null);
+      Database.setV2AuthSession(null);
       set({ user: null, isAuthenticated: false });
     }
   },
@@ -1074,282 +1059,130 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
     const normalizedTarget = (toUserId || '').trim();
 
-    if (sourceWallet === 'royalty') {
-      const royaltyBalance = fromWallet.royaltyWallet || 0;
-      if (royaltyBalance < amount) {
-        return { success: false, message: 'Insufficient royalty wallet balance' };
-      }
-
-      let royaltySendTxId: string | null = null;
-      let royaltyReceiveTxId: string | null = null;
-
-      await Database.runWithLocalStateTransaction(async () => {
-        Database.updateWallet(effectiveFromUserId, {
-          royaltyWallet: royaltyBalance - amount,
-          incomeWallet: destinationWallet === 'income' ? fromWallet.incomeWallet + amount : fromWallet.incomeWallet,
-          depositWallet: destinationWallet === 'fund' ? fromWallet.depositWallet + amount : fromWallet.depositWallet
-        });
-
-        const now = new Date().toISOString();
-        const baseNow = Date.now();
-        royaltySendTxId = `tx_${baseNow}_royalty_send`;
-
-        Database.createTransaction({
-          id: royaltySendTxId,
-          userId: effectiveFromUserId,
-          type: 'royalty_transfer',
-          amount: -amount,
-          toUserId: effectiveFromUserId,
-          status: 'completed',
-          description: `Transferred from royalty wallet to your ${destinationWallet} wallet`,
-          createdAt: now,
-          completedAt: now
-        });
-
-        royaltyReceiveTxId = `tx_${baseNow}_royalty_recv_${destinationWallet}`;
-        Database.createTransaction({
-          id: royaltyReceiveTxId,
-          userId: effectiveFromUserId,
-          type: destinationWallet === 'income' ? 'royalty_transfer' : 'p2p_transfer',
-          amount,
-          fromUserId: effectiveFromUserId,
-          sourceTransferTxId: royaltySendTxId,
-          status: 'completed',
-          description: destinationWallet === 'income'
-            ? 'Income wallet credited from your royalty wallet transfer'
-            : 'Fund wallet credited from your royalty wallet transfer',
-          createdAt: now,
-          completedAt: now
-        });
-      }, {
-        syncOnCommit: true,
-        syncOptions: {
-          full: false,
-          force: true,
-          timeoutMs: 60000,
-          maxAttempts: 3,
-          retryDelayMs: 1500
-        }
-      });
-
-      const persisted = await verifyTransferPersistedOnServer([royaltySendTxId, royaltyReceiveTxId]);
-      if (!persisted) {
-        get().loadWallet(effectiveFromUserId);
-        return {
-          success: false,
-          message: 'Transfer was not persisted on server. Please retry. If it repeats, use the v2 financial API path and check backend sync logs.'
-        };
-      }
-
-      get().loadWallet(effectiveFromUserId);
+    if (sourceWallet !== 'fund') {
       return {
-        success: true,
-        message: destinationWallet === 'income'
-          ? 'Royalty transferred to your income wallet successfully'
-          : 'Royalty transferred to your fund wallet successfully'
+        success: false,
+        message: 'This transfer source is temporarily disabled until V2 endpoint migration is completed. Use Fund Wallet transfer.'
       };
     }
 
-    if (sourceWallet === 'income') {
-      if (fromWallet.incomeWallet < amount) {
-        return { success: false, message: 'Insufficient income wallet balance' };
-      }
-
-      const rawTargetUser = normalizedTarget ? Database.getUserByUserId(normalizedTarget) : fromUser;
-      const toUser = rawTargetUser ? (resolveCanonicalUserForWalletActions(rawTargetUser.id) || rawTargetUser) : fromUser;
-      const toWallet = toUser ? Database.getWallet(toUser.id) : null;
-      if (!toUser || !toWallet) {
-        return { success: false, message: 'Recipient not found' };
-      }
-
-      const isSelfTransfer = toUser.id === effectiveFromUserId;
-      if (!isSelfTransfer && !Database.isInSameChain(effectiveFromUserId, toUser.id)) {
-        return { success: false, message: 'Transfer allowed only to upline or downline' };
-      }
-      if (!isSelfTransfer) {
-        const txPassword = (security?.transactionPassword || '').trim();
-        if (!txPassword || fromUser.transactionPassword !== txPassword) {
-          return { success: false, message: 'Invalid transaction password' };
-        }
-        const otp = (security?.otp || '').trim();
-        if (!otp || !Database.verifyOtp(effectiveFromUserId, otp, 'transaction')) {
-          return { success: false, message: 'Invalid or expired OTP' };
-        }
-      }
-
-      let incomeSendTxId: string | null = null;
-      let incomeReceiveTxId: string | null = null;
-
-      await Database.runWithLocalStateTransaction(async () => {
-        Database.updateWallet(effectiveFromUserId, {
-          incomeWallet: fromWallet.incomeWallet - amount
-        });
-
-        Database.updateWallet(toUser.id, {
-          depositWallet: toWallet.depositWallet + amount
-        });
-
-        const now = new Date().toISOString();
-        const baseNow = Date.now();
-        incomeSendTxId = `tx_${baseNow}_income_send`;
-        Database.createTransaction({
-          id: incomeSendTxId,
-          userId: effectiveFromUserId,
-          type: 'income_transfer',
-          amount: -amount,
-          toUserId: toUser.id,
-          status: 'completed',
-          description: isSelfTransfer
-            ? 'Transferred from income wallet to your fund wallet'
-            : `Transferred from income wallet to fund wallet of ${toUser.fullName} (${toUser.userId})`,
-          createdAt: now,
-          completedAt: now
-        });
-
-        if (isSelfTransfer) {
-          incomeReceiveTxId = `tx_${baseNow}_fund_recv_self`;
-          Database.createTransaction({
-            id: incomeReceiveTxId,
-            userId: effectiveFromUserId,
-            type: 'p2p_transfer',
-            amount,
-            fromUserId: effectiveFromUserId,
-            sourceTransferTxId: incomeSendTxId,
-            status: 'completed',
-            description: 'Fund wallet credited from your income wallet transfer',
-            createdAt: now,
-            completedAt: now
-          });
-        } else {
-          incomeReceiveTxId = `tx_${baseNow}_income_recv`;
-          Database.createTransaction({
-            id: incomeReceiveTxId,
-            userId: toUser.id,
-            type: 'p2p_transfer',
-            amount,
-            fromUserId: effectiveFromUserId,
-            status: 'completed',
-            description: `Fund wallet received from ${fromUser.fullName} (${fromUser.userId}) via income wallet transfer`,
-            createdAt: now,
-            completedAt: now
-          });
-        }
-      }, {
-        syncOnCommit: true,
-        syncOptions: {
-          full: false,
-          force: true,
-          timeoutMs: 60000,
-          maxAttempts: 3,
-          retryDelayMs: 1500
-        }
-      });
-
-      const persisted = await verifyTransferPersistedOnServer([incomeSendTxId, incomeReceiveTxId]);
-      if (!persisted) {
-        get().loadWallet(effectiveFromUserId);
-        return {
-          success: false,
-          message: 'Transfer was not persisted on server. Please retry. If it repeats, use the v2 financial API path and check backend sync logs.'
-        };
-      }
-
-      get().loadWallet(effectiveFromUserId);
+    if (destinationWallet !== 'fund') {
       return {
-        success: true,
-        message: isSelfTransfer
-          ? 'Income transferred to your fund wallet successfully'
-          : 'Income transferred to recipient fund wallet successfully'
+        success: false,
+        message: 'Fund Wallet transfer currently supports destination wallet as fund only in V2.'
       };
     }
 
-    const rawTargetUser = Database.getUserByUserId(normalizedTarget);
-    const toUser = rawTargetUser ? (resolveCanonicalUserForWalletActions(rawTargetUser.id) || rawTargetUser) : undefined;
-    const toWallet = toUser ? Database.getWallet(toUser.id) : null;
-    if (!toUser || !toWallet) {
+    const rawTargetUserForV2 = Database.getUserByUserId(normalizedTarget);
+    const toUserForV2 = rawTargetUserForV2
+      ? (resolveCanonicalUserForWalletActions(rawTargetUserForV2.id) || rawTargetUserForV2)
+      : undefined;
+    if (!toUserForV2) {
       return { success: false, message: 'Recipient not found' };
     }
 
-    // Check if transfer is allowed (upline/downline chain only)
-    if (!Database.isInSameChain(effectiveFromUserId, toUser.id)) {
+    if (toUserForV2.id === effectiveFromUserId) {
+      return { success: false, message: 'Self transfer is not allowed for Fund Wallet transfer.' };
+    }
+
+    if (!Database.isInSameChain(effectiveFromUserId, toUserForV2.id)) {
       return { success: false, message: 'Transfer allowed only to upline or downline' };
     }
 
     if (fromWallet.depositWallet < amount) {
       return { success: false, message: 'Insufficient fund wallet balance' };
     }
-    const txPassword = (security?.transactionPassword || '').trim();
-    if (!txPassword || fromUser.transactionPassword !== txPassword) {
+
+    const txPasswordForV2 = (security?.transactionPassword || '').trim();
+    if (!txPasswordForV2 || fromUser.transactionPassword !== txPasswordForV2) {
       return { success: false, message: 'Invalid transaction password' };
     }
-    const otp = (security?.otp || '').trim();
-    if (!otp || !Database.verifyOtp(effectiveFromUserId, otp, 'transaction')) {
+
+    const otpForV2 = (security?.otp || '').trim();
+    if (!otpForV2 || !Database.verifyOtp(effectiveFromUserId, otpForV2, 'transaction')) {
       return { success: false, message: 'Invalid or expired OTP' };
     }
 
-    let fundSendTxId: string | null = null;
-    let fundReceiveTxId: string | null = null;
-
-    // Fund wallet P2P transfer (upline/downline only)
-    await Database.runWithLocalStateTransaction(async () => {
-      Database.updateWallet(effectiveFromUserId, {
-        depositWallet: fromWallet.depositWallet - amount
-      });
-
-      Database.updateWallet(toUser.id, {
-        depositWallet: toWallet.depositWallet + amount
-      });
-
-      const now = new Date().toISOString();
-      const baseNow = Date.now();
-      fundSendTxId = `tx_${baseNow}_send`;
-      Database.createTransaction({
-        id: fundSendTxId,
-        userId: effectiveFromUserId,
-        type: 'p2p_transfer',
-        amount: -amount,
-        toUserId: toUser.id,
-        status: 'completed',
-        description: `Fund wallet transfer to ${toUser.fullName} (${toUser.userId})`,
-        createdAt: now,
-        completedAt: now
-      });
-
-      fundReceiveTxId = `tx_${baseNow}_recv`;
-      Database.createTransaction({
-        id: fundReceiveTxId,
-        userId: toUser.id,
-        type: 'p2p_transfer',
-        amount,
-        fromUserId: effectiveFromUserId,
-        status: 'completed',
-        description: `Fund wallet transfer from ${fromUser.fullName} (${fromUser.userId})`,
-        createdAt: now,
-        completedAt: now
-      });
-    }, {
-      syncOnCommit: true,
-      syncOptions: {
-        full: false,
-        force: true,
-        timeoutMs: 60000,
-        maxAttempts: 3,
-        retryDelayMs: 1500
-      }
-    });
-
-    const persisted = await verifyTransferPersistedOnServer([fundSendTxId, fundReceiveTxId]);
-    if (!persisted) {
-      get().loadWallet(effectiveFromUserId);
-      return {
-        success: false,
-        message: 'Transfer was not persisted on server. Please retry. If it repeats, use the v2 financial API path and check backend sync logs.'
-      };
+    const authState = useAuthStore.getState();
+    const subjectUser = authState.user;
+    const impersonatedUser = authState.impersonatedUser;
+    if (!subjectUser) {
+      return { success: false, message: 'Authentication session expired. Please login again.' };
     }
 
-    get().loadWallet(effectiveFromUserId);
+    const savedAuthSession = Database.getV2AuthSession();
+    const bearerToken = (savedAuthSession?.accessToken || '').trim() || String(subjectUser.userId || '').trim();
+    if (!bearerToken) {
+      return { success: false, message: 'Missing V2 auth token. Please login again.' };
+    }
 
-    return { success: true, message: 'Transfer successful' };
+    const idempotencyKey = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `idem_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const amountCents = Math.round(amount * 100);
+    if (!Number.isInteger(amountCents) || amountCents <= 0) {
+      return { success: false, message: 'Invalid transfer amount' };
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${bearerToken}`,
+      'Idempotency-Key': idempotencyKey,
+      'X-System-Version': 'v2',
+      'X-Request-Id': requestId
+    };
+
+    if (impersonatedUser && subjectUser.isAdmin) {
+      headers['X-Impersonate-User-Code'] = impersonatedUser.userId;
+      headers['X-Impersonation-Reason'] = 'admin_support_fund_transfer';
+    }
+
+    const response = await fetch(`${getBackendApiBase()}/api/v2/fund-transfers`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        senderUserCode: fromUser.userId,
+        receiverUserCode: toUserForV2.userId,
+        amountCents,
+        referenceId: `ui_fund_transfer_${requestId}`,
+        description: `Fund wallet transfer from ${fromUser.userId} to ${toUserForV2.userId}`
+      })
+    });
+
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    if (!response.ok || payload?.ok === false) {
+      const errorMessage = typeof payload?.error === 'string'
+        ? payload.error
+        : typeof payload?.message === 'string'
+          ? payload.message
+          : `Transfer failed (HTTP ${response.status})`;
+      return { success: false, message: errorMessage };
+    }
+
+    try {
+      await Database.hydrateFromServer({
+        keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
+        strict: true,
+        maxAttempts: 3,
+        timeoutMs: 20000,
+        retryDelayMs: 1000
+      });
+    } catch {
+      // Best-effort refresh. The transfer has already been committed server-side.
+    }
+
+    set({
+      wallet: Database.getWallet(effectiveFromUserId),
+      transactions: Database.getUserTransactions(effectiveFromUserId)
+    });
+
+    return {
+      success: true,
+      message: typeof payload?.idempotentReplay === 'boolean' && payload.idempotentReplay
+        ? 'Transfer already processed (idempotent replay).'
+        : 'Transfer successful'
+    };
   },
 
   withdraw: async (userId: string, amount: number, walletAddress: string, payoutQrCode?: string) => {

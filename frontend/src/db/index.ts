@@ -424,6 +424,14 @@ export interface SensitiveActionSyncGate {
   status: RemoteSyncStatus;
 }
 
+export interface V2AuthSession {
+  tokenType: string;
+  accessToken: string | null;
+  issuer: string | null;
+  expiresAt: string | null;
+  note: string | null;
+}
+
 // Generic DB Operations
 class Database {
   private static readonly REMOTE_SYNC_BASE_URL = (() => {
@@ -10291,7 +10299,7 @@ class Database {
     await this.forceRemoteSyncNowWithOptions();
   }
 
-  static async authenticateUserViaBackend(userId: string, password: string): Promise<{ success: boolean; user?: User; message: string }> {
+  static async authenticateUserViaBackend(userId: string, password: string): Promise<{ success: boolean; user?: User; message: string; v2Auth?: V2AuthSession | null }> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') {
       return { success: false, message: 'Backend authentication is unavailable in this environment.' };
     }
@@ -10324,7 +10332,28 @@ class Database {
         return { success: false, message: 'Backend returned invalid user data.' };
       }
 
-      return { success: true, user, message: 'Login successful' };
+      const authPayload = payload?.v2Auth as Record<string, unknown> | undefined;
+      const v2Auth: V2AuthSession | null = authPayload && typeof authPayload === 'object'
+        ? {
+          tokenType: typeof authPayload.tokenType === 'string' && authPayload.tokenType.trim()
+            ? authPayload.tokenType.trim()
+            : 'Bearer',
+          accessToken: typeof authPayload.accessToken === 'string' && authPayload.accessToken.trim()
+            ? authPayload.accessToken.trim()
+            : null,
+          issuer: typeof authPayload.issuer === 'string' && authPayload.issuer.trim()
+            ? authPayload.issuer.trim()
+            : null,
+          expiresAt: typeof authPayload.expiresAt === 'string' && authPayload.expiresAt.trim()
+            ? authPayload.expiresAt.trim()
+            : null,
+          note: typeof authPayload.note === 'string' && authPayload.note.trim()
+            ? authPayload.note.trim()
+            : null
+        }
+        : null;
+
+      return { success: true, user, message: 'Login successful', v2Auth };
     } catch (error) {
       const message =
         error instanceof Error
@@ -12296,6 +12325,79 @@ class Database {
       this.setCurrentUser(fresh);
     }
     return fresh || (parsed?.id ? this.getUserById(parsed.id) : undefined) || parsed;
+  }
+
+  static setV2AuthSession(session: V2AuthSession | null): void {
+    const tabSession = this.getSessionStorage();
+    if (!session) {
+      if (tabSession) {
+        tabSession.removeItem(DB_KEYS.SESSION);
+      }
+      this.removeStorageItem(DB_KEYS.SESSION);
+      return;
+    }
+
+    const normalized: V2AuthSession = {
+      tokenType: typeof session.tokenType === 'string' && session.tokenType.trim()
+        ? session.tokenType.trim()
+        : 'Bearer',
+      accessToken: typeof session.accessToken === 'string' && session.accessToken.trim()
+        ? session.accessToken.trim()
+        : null,
+      issuer: typeof session.issuer === 'string' && session.issuer.trim()
+        ? session.issuer.trim()
+        : null,
+      expiresAt: typeof session.expiresAt === 'string' && session.expiresAt.trim()
+        ? session.expiresAt.trim()
+        : null,
+      note: typeof session.note === 'string' && session.note.trim()
+        ? session.note.trim()
+        : null
+    };
+
+    const serialized = JSON.stringify(normalized);
+    if (tabSession) {
+      tabSession.setItem(DB_KEYS.SESSION, serialized);
+    } else {
+      this.setStorageItem(DB_KEYS.SESSION, serialized);
+    }
+
+    // Keep auth session tab-scoped and avoid legacy local-storage fallback collisions.
+    this.removeStorageItem(DB_KEYS.SESSION);
+  }
+
+  static getV2AuthSession(): V2AuthSession | null {
+    const parseSession = (raw: string | null): V2AuthSession | null => {
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw) as Partial<V2AuthSession>;
+        return {
+          tokenType: typeof parsed?.tokenType === 'string' && parsed.tokenType.trim()
+            ? parsed.tokenType.trim()
+            : 'Bearer',
+          accessToken: typeof parsed?.accessToken === 'string' && parsed.accessToken.trim()
+            ? parsed.accessToken.trim()
+            : null,
+          issuer: typeof parsed?.issuer === 'string' && parsed.issuer.trim()
+            ? parsed.issuer.trim()
+            : null,
+          expiresAt: typeof parsed?.expiresAt === 'string' && parsed.expiresAt.trim()
+            ? parsed.expiresAt.trim()
+            : null,
+          note: typeof parsed?.note === 'string' && parsed.note.trim()
+            ? parsed.note.trim()
+            : null
+        };
+      } catch {
+        return null;
+      }
+    };
+
+    const tabSession = this.getSessionStorage();
+    const tabData = parseSession(tabSession?.getItem(DB_KEYS.SESSION) || null);
+    if (tabData) return tabData;
+
+    return parseSession(this.getStorageItem(DB_KEYS.SESSION));
   }
 
   // ==================== STATS ====================
