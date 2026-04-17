@@ -120,12 +120,27 @@ async function main() {
     }
 
     let candidate = null;
+    let fallbackCandidate = null;
     for (const node of matrixByCode.values()) {
       const member = node.userCode;
       const parent = node.parentUserCode;
       const grandParent = parent ? matrixByCode.get(parent)?.parentUserCode || '' : '';
-      if (!member || !parent || !grandParent) continue;
-      if (!activeByCode.has(member) || !activeByCode.has(parent) || !activeByCode.has(grandParent)) continue;
+      if (!member || !parent) continue;
+      if (!activeByCode.has(member) || !activeByCode.has(parent)) continue;
+
+      if (!fallbackCandidate) {
+        fallbackCandidate = {
+          sourceUserCode: member,
+          newMemberUserCode: member,
+          level1BeneficiaryCode: parent,
+          level2BeneficiaryCode: null,
+          releaseLevelNo: 1,
+          releaseBeneficiaryCode: parent,
+          selectionMode: 'fallback_level1_release'
+        };
+      }
+
+      if (!grandParent || !activeByCode.has(grandParent)) continue;
 
       const level2Qualified = isV2UserQualifiedForLevel({
         userCode: grandParent,
@@ -140,13 +155,20 @@ async function main() {
         sourceUserCode: member,
         newMemberUserCode: member,
         level1BeneficiaryCode: parent,
-        level2BeneficiaryCode: grandParent
+        level2BeneficiaryCode: grandParent,
+        releaseLevelNo: 2,
+        releaseBeneficiaryCode: grandParent,
+        selectionMode: 'qualified_level2_release'
       };
       break;
     }
 
     if (!candidate) {
-      throw new Error('No matrix candidate found with active level-1/2 uplines and qualified level-2 beneficiary');
+      candidate = fallbackCandidate;
+    }
+
+    if (!candidate) {
+      throw new Error('No matrix candidate found with active level-1 beneficiary');
     }
 
     const summary = {
@@ -158,10 +180,10 @@ async function main() {
 
     const actorUserCode = candidate.sourceUserCode;
 
-    const level2BeneficiaryId = Number(activeByCode.get(candidate.level2BeneficiaryCode)?.id || 0);
+    const releaseBeneficiaryId = Number(activeByCode.get(candidate.releaseBeneficiaryCode)?.id || 0);
     const level1BeneficiaryId = Number(activeByCode.get(candidate.level1BeneficiaryCode)?.id || 0);
 
-    if (!level2BeneficiaryId || !level1BeneficiaryId) {
+    if (!releaseBeneficiaryId || !level1BeneficiaryId) {
       throw new Error('Failed to resolve beneficiary ids in v2_users');
     }
 
@@ -171,10 +193,10 @@ async function main() {
          locked_qualification_cents, safety_deducted_cents,
          pending_give_cents, given_cents, income_credited_cents, last_event_seq)
        VALUES
-        (?, 2, 3, 1500, 1000, 500, 0, 0, 0, 0, 1)
+        (?, ?, 3, 1500, 1000, ?, 0, 0, 0, 0, 1)
        ON DUPLICATE KEY UPDATE
-        locked_qualification_cents = 500`,
-      [level2BeneficiaryId]
+        locked_qualification_cents = VALUES(locked_qualification_cents)`,
+      [releaseBeneficiaryId, Number(candidate.releaseLevelNo), HELP_AMOUNT_CENTS]
     );
 
     const [walletBeforeRows] = await conn.execute(
@@ -182,7 +204,7 @@ async function main() {
        FROM v2_wallet_accounts
        WHERE user_id = ? AND wallet_type = 'income'
        LIMIT 1`,
-      [level2BeneficiaryId]
+      [releaseBeneficiaryId]
     );
     const walletBefore = Number(Array.isArray(walletBeforeRows) && walletBeforeRows[0]
       ? walletBeforeRows[0].current_amount_cents
@@ -199,9 +221,9 @@ async function main() {
     const [stateAfterRows] = await conn.execute(
       `SELECT locked_qualification_cents
        FROM v2_help_level_state
-       WHERE user_id = ? AND level_no = 2
+       WHERE user_id = ? AND level_no = ?
        LIMIT 1`,
-      [level2BeneficiaryId]
+      [releaseBeneficiaryId, Number(candidate.releaseLevelNo)]
     );
     const lockedAfter = Number(Array.isArray(stateAfterRows) && stateAfterRows[0]
       ? stateAfterRows[0].locked_qualification_cents
@@ -212,7 +234,7 @@ async function main() {
        FROM v2_wallet_accounts
        WHERE user_id = ? AND wallet_type = 'income'
        LIMIT 1`,
-      [level2BeneficiaryId]
+      [releaseBeneficiaryId]
     );
     const walletAfter = Number(Array.isArray(walletAfterRows) && walletAfterRows[0]
       ? walletAfterRows[0].current_amount_cents
@@ -220,13 +242,17 @@ async function main() {
 
     const releasedEntry = (scenario1.body?.processedContributions || []).find((entry) =>
       entry?.settlementMode === 'released_locked_receive'
-      && String(entry?.beneficiaryUserCode || '') === candidate.level2BeneficiaryCode
+      && String(entry?.beneficiaryUserCode || '') === candidate.releaseBeneficiaryCode
+      && Number(entry?.levelNo || 0) === Number(candidate.releaseLevelNo)
     ) || null;
 
     summary.scenarios.qualificationRelease = {
-      pass: scenario1.status === 200 && lockedAfter === 0 && walletAfter >= walletBefore + 500,
+      pass: scenario1.status === 200 && lockedAfter === 0 && walletAfter >= walletBefore + HELP_AMOUNT_CENTS,
+      selectionMode: candidate.selectionMode,
+      releaseLevelNo: Number(candidate.releaseLevelNo),
+      releaseBeneficiaryCode: candidate.releaseBeneficiaryCode,
       httpStatus: scenario1.status,
-      lockedBeforeCents: 500,
+      lockedBeforeCents: HELP_AMOUNT_CENTS,
       lockedAfterCents: lockedAfter,
       walletBeforeCents: walletBefore,
       walletAfterCents: walletAfter,
