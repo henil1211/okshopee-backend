@@ -122,6 +122,64 @@ async function callHelpEvent({ actorUserCode, sourceUserCode, newMemberUserCode,
   };
 }
 
+async function ensureV2HelpSettlementTables(connection) {
+  await connection.execute(
+    `CREATE TABLE IF NOT EXISTS v2_help_level_state (
+       id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+       user_id BIGINT UNSIGNED NOT NULL,
+       level_no SMALLINT UNSIGNED NOT NULL,
+       receive_count INT UNSIGNED NOT NULL DEFAULT 0,
+       receive_total_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       locked_first_two_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       locked_qualification_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       safety_deducted_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       pending_give_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       given_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       income_credited_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       last_event_seq BIGINT UNSIGNED NOT NULL DEFAULT 0,
+       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+       UNIQUE KEY uq_v2_help_level_state_user_level (user_id, level_no),
+       KEY idx_v2_help_level_state_level (level_no),
+       CONSTRAINT fk_v2_help_level_state_user FOREIGN KEY (user_id) REFERENCES v2_users(id)
+     ) ENGINE=InnoDB`
+  );
+
+  await connection.execute(
+    `ALTER TABLE v2_help_level_state
+     ADD COLUMN IF NOT EXISTS locked_qualification_cents BIGINT UNSIGNED NOT NULL DEFAULT 0
+     AFTER locked_first_two_cents`
+  );
+  await connection.execute(
+    `ALTER TABLE v2_help_level_state
+     ADD COLUMN IF NOT EXISTS safety_deducted_cents BIGINT UNSIGNED NOT NULL DEFAULT 0
+     AFTER locked_qualification_cents`
+  );
+
+  await connection.execute(
+    `CREATE TABLE IF NOT EXISTS v2_help_pending_contributions (
+       id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+       source_event_key VARCHAR(180) NOT NULL,
+       source_user_id BIGINT UNSIGNED NOT NULL,
+       beneficiary_user_id BIGINT UNSIGNED NOT NULL,
+       level_no SMALLINT UNSIGNED NOT NULL,
+       side ENUM('left','right','unknown') NOT NULL DEFAULT 'unknown',
+       amount_cents BIGINT UNSIGNED NOT NULL,
+       status ENUM('pending','processed','skipped','failed') NOT NULL DEFAULT 'pending',
+       processed_txn_id BIGINT UNSIGNED NULL,
+       reason VARCHAR(190) NULL,
+       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       processed_at DATETIME(3) NULL,
+       UNIQUE KEY uq_v2_help_pending_dedupe (source_event_key, source_user_id, beneficiary_user_id, level_no, side),
+       KEY idx_v2_help_pending_source_status (source_user_id, status, level_no, id),
+       KEY idx_v2_help_pending_beneficiary_status (beneficiary_user_id, status, level_no, id),
+       CONSTRAINT fk_v2_help_pending_source FOREIGN KEY (source_user_id) REFERENCES v2_users(id),
+       CONSTRAINT fk_v2_help_pending_beneficiary FOREIGN KEY (beneficiary_user_id) REFERENCES v2_users(id),
+       CONSTRAINT fk_v2_help_pending_txn FOREIGN KEY (processed_txn_id) REFERENCES v2_ledger_transactions(id)
+     ) ENGINE=InnoDB`
+  );
+}
+
 async function main() {
   const conn = await mysql.createConnection({
     host: process.env.MYSQL_HOST || '127.0.0.1',
@@ -141,6 +199,8 @@ async function main() {
     if (!healthResponse || !healthResponse.ok) {
       throw new Error(`Backend health check failed at ${BACKEND_URL}/api/health`);
     }
+
+    await ensureV2HelpSettlementTables(conn);
 
     const [stateRows] = await conn.execute(
       `SELECT state_key, state_value
