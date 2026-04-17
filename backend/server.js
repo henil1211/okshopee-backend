@@ -1432,6 +1432,7 @@ async function processV2FundTransfer({
   senderUserCode,
   receiverUserCode,
   amountCents,
+  allowInactiveActor = false,
   helpProgressUpdates,
   referenceId,
   description
@@ -1478,7 +1479,7 @@ async function processV2FundTransfer({
     if (!actor) {
       throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
     }
-    if (actor.status !== 'active') {
+    if (actor.status !== 'active' && !allowInactiveActor) {
       throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
     }
 
@@ -1556,7 +1557,8 @@ async function processV2FundTransfer({
     if (!senderWallet || !receiverWallet) {
       throw createApiError(404, 'Sender or receiver fund wallet is not provisioned in v2', 'V2_WALLET_NOT_FOUND');
     }
-    if (senderWallet.user_status !== 'active' || receiverWallet.user_status !== 'active') {
+    const senderStatusAllowed = senderWallet.user_status === 'active' || (allowInactiveActor && senderWallet.user_code === actorUserCode);
+    if (!senderStatusAllowed || receiverWallet.user_status !== 'active') {
       throw createApiError(403, 'Sender or receiver account is not active', 'USER_NOT_ACTIVE');
     }
     if (Number(senderWallet.current_amount_cents) < amountCents) {
@@ -1696,6 +1698,7 @@ async function processV2FundTransfer({
 async function processV2WithdrawalDebit({
   idempotencyKey,
   actorUserCode,
+  allowInactiveActor = false,
   amountCents,
   destinationType,
   destinationRef,
@@ -1743,7 +1746,7 @@ async function processV2WithdrawalDebit({
     if (!actor) {
       throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
     }
-    if (actor.status !== 'active') {
+    if (actor.status !== 'active' && !allowInactiveActor) {
       throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
     }
 
@@ -1814,7 +1817,7 @@ async function processV2WithdrawalDebit({
     if (!actorIncomeWallet) {
       throw createApiError(404, 'Income wallet is not provisioned in v2', 'V2_INCOME_WALLET_NOT_FOUND');
     }
-    if (actorIncomeWallet.user_status !== 'active') {
+    if (actorIncomeWallet.user_status !== 'active' && !allowInactiveActor) {
       throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
     }
     if (Number(actorIncomeWallet.current_amount_cents) < amountCents) {
@@ -1944,6 +1947,7 @@ async function processV2PinPurchase({
   idempotencyKey,
   actorUserCode,
   buyerUserCode,
+  allowInactiveActor = false,
   quantity,
   pinPriceCents,
   expiresAt,
@@ -1999,7 +2003,7 @@ async function processV2PinPurchase({
     if (!actor) {
       throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
     }
-    if (actor.status !== 'active') {
+    if (actor.status !== 'active' && !allowInactiveActor) {
       throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
     }
     if (actorUserCode !== buyerUserCode) {
@@ -2073,7 +2077,7 @@ async function processV2PinPurchase({
     if (!buyerFundWallet) {
       throw createApiError(404, 'Fund wallet is not provisioned in v2', 'V2_FUND_WALLET_NOT_FOUND');
     }
-    if (buyerFundWallet.user_status !== 'active') {
+    if (buyerFundWallet.user_status !== 'active' && !allowInactiveActor) {
       throw createApiError(403, 'Buyer user is not active', 'BUYER_NOT_ACTIVE');
     }
     if (Number(buyerFundWallet.current_amount_cents) < totalAmountCents) {
@@ -2236,6 +2240,7 @@ async function processV2ReferralCredit({
   actorUserCode,
   sourceUserCode,
   beneficiaryUserCode,
+  allowInactiveActor = false,
   sourceTxnId,
   eventType,
   levelNo,
@@ -2293,7 +2298,7 @@ async function processV2ReferralCredit({
     if (!actor) {
       throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
     }
-    if (actor.status !== 'active') {
+    if (actor.status !== 'active' && !allowInactiveActor) {
       throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
     }
     if (actorUserCode !== sourceUserCode) {
@@ -2365,7 +2370,8 @@ async function processV2ReferralCredit({
     if (!sourceUser || !beneficiaryUser) {
       throw createApiError(404, 'Source or beneficiary user is not provisioned in v2_users', 'V2_USER_NOT_FOUND');
     }
-    if (sourceUser.status !== 'active' || beneficiaryUser.status !== 'active') {
+    const sourceStatusAllowed = sourceUser.status === 'active' || (allowInactiveActor && sourceUser.user_code === actorUserCode);
+    if (!sourceStatusAllowed || beneficiaryUser.status !== 'active') {
       throw createApiError(403, 'Source or beneficiary user is not active', 'USER_NOT_ACTIVE');
     }
 
@@ -4048,6 +4054,7 @@ const server = createServer(async (req, res) => {
         requiredRole: 'user',
         allowImpersonation: true
       });
+      const allowInactiveActor = authContext.authSubjectIsAdmin && authContext.isImpersonated;
       const actorUserCode = authContext.actorUserCode;
       const senderUserCode = normalizeV2UserCode(parsed?.senderUserCode);
       const receiverUserCode = normalizeV2UserCode(parsed?.receiverUserCode);
@@ -4106,6 +4113,7 @@ const server = createServer(async (req, res) => {
           senderUserCode,
           receiverUserCode,
           amountCents,
+          allowInactiveActor,
           helpProgressUpdates: normalizedProgress.updates,
           referenceId,
           description
@@ -4136,6 +4144,7 @@ const server = createServer(async (req, res) => {
         requiredRole: 'user',
         allowImpersonation: true
       });
+      const allowInactiveActor = authContext.authSubjectIsAdmin && authContext.isImpersonated;
       const actorUserCode = authContext.actorUserCode;
       const amountCentsRaw = Number(parsed?.amountCents);
       const amountCents = Number.isFinite(amountCentsRaw) ? Math.trunc(amountCentsRaw) : NaN;
@@ -4166,6 +4175,7 @@ const server = createServer(async (req, res) => {
         () => processV2WithdrawalDebit({
           idempotencyKey,
           actorUserCode,
+          allowInactiveActor,
           amountCents,
           destinationType,
           destinationRef,
@@ -4198,6 +4208,7 @@ const server = createServer(async (req, res) => {
         requiredRole: 'user',
         allowImpersonation: true
       });
+      const allowInactiveActor = authContext.authSubjectIsAdmin && authContext.isImpersonated;
       const actorUserCode = authContext.actorUserCode;
       const buyerUserCode = normalizeV2UserCode(parsed?.buyerUserCode || actorUserCode);
       const quantityRaw = Number(parsed?.quantity);
@@ -4252,6 +4263,7 @@ const server = createServer(async (req, res) => {
           idempotencyKey,
           actorUserCode,
           buyerUserCode,
+          allowInactiveActor,
           quantity,
           pinPriceCents,
           expiresAt,
@@ -4283,6 +4295,7 @@ const server = createServer(async (req, res) => {
         requiredRole: 'user',
         allowImpersonation: true
       });
+      const allowInactiveActor = authContext.authSubjectIsAdmin && authContext.isImpersonated;
       const actorUserCode = authContext.actorUserCode;
       const sourceUserCode = normalizeV2UserCode(parsed?.sourceUserCode);
       const beneficiaryUserCode = normalizeV2UserCode(parsed?.beneficiaryUserCode);
@@ -4347,6 +4360,7 @@ const server = createServer(async (req, res) => {
           actorUserCode,
           sourceUserCode,
           beneficiaryUserCode,
+          allowInactiveActor,
           sourceTxnId,
           eventType,
           levelNo,
