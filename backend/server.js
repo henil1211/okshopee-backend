@@ -159,6 +159,9 @@ const V2_PIN_PURCHASE_ENDPOINT_NAME = 'v2_pin_purchase';
 const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
 const V2_HELP_EVENT_ENDPOINT_NAME = 'v2_help_event';
 const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
+const V2_WALLET_READ_ENDPOINT_NAME = 'v2_wallet_read';
+const V2_TRANSACTIONS_READ_ENDPOINT_NAME = 'v2_transactions_read';
+const V2_STATE_SYNC_ENDPOINT_NAME = 'v2_state_sync';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 const V2_REFERRAL_MAX_LEVEL = 100;
 const V2_REFERRAL_SOURCE_REF_MAX_LENGTH = 120;
@@ -217,6 +220,49 @@ const V2_PIN_CODE_MAX_RETRIES_PER_PIN = Number.isFinite(V2_PIN_CODE_MAX_RETRIES_
   : 12;
 const V2_REQUEST_ID_MAX_LENGTH = 100;
 const V2_IMPERSONATION_REASON_MAX_LENGTH = 255;
+const V2_STATE_WRITE_ALLOWLIST_USER = new Set([
+  'mlm_notifications',
+  'mlm_support_tickets',
+  'mlm_otp_records',
+  'mlm_email_logs',
+  'mlm_marketplace_invoices',
+  'mlm_marketplace_redemptions'
+]);
+const V2_STATE_WRITE_ALLOWLIST_ADMIN = new Set([
+  'mlm_users',
+  'mlm_matrix',
+  'mlm_grace_periods',
+  'mlm_reentries',
+  'mlm_notifications',
+  'mlm_announcements',
+  'mlm_settings',
+  'mlm_payment_methods',
+  'mlm_support_tickets',
+  'mlm_otp_records',
+  'mlm_email_logs',
+  'mlm_impersonation',
+  'mlm_ghost_help_repair_log',
+  'mlm_marketplace_categories',
+  'mlm_marketplace_retailers',
+  'mlm_marketplace_banners',
+  'mlm_marketplace_deals',
+  'mlm_marketplace_invoices',
+  'mlm_marketplace_redemptions'
+]);
+const QUALIFICATION_LOCKED_USER_FIELDS = Object.freeze([
+  'sponsorId',
+  'parentId',
+  'directCount',
+  'isActive',
+  'accountStatus',
+  'deactivationReason',
+  'activatedAt',
+  'reactivatedAt',
+  'blockedAt',
+  'blockedUntil',
+  'blockedReason',
+  'isAdmin'
+]);
 
 // ─── MySQL connection pool ───────────────────────────────────────────
 let pool;
@@ -686,6 +732,116 @@ function getIncomingFinancialStateKeys(incomingState) {
     }
   }
   return keys;
+}
+
+function getV2StateWriteAllowlistForActor(isAdmin) {
+  return isAdmin ? V2_STATE_WRITE_ALLOWLIST_ADMIN : V2_STATE_WRITE_ALLOWLIST_USER;
+}
+
+function getIncomingDisallowedStateKeys(incomingState, allowlist) {
+  if (!incomingState || typeof incomingState !== 'object') return [];
+  const disallowed = [];
+  for (const key of Object.keys(incomingState)) {
+    if (typeof incomingState[key] !== 'string') continue;
+    if (!allowlist.has(key)) {
+      disallowed.push(key);
+    }
+  }
+  return disallowed;
+}
+
+function parseStateJsonObject(raw, fallback = null) {
+  if (typeof raw !== 'string') return fallback;
+  const parsed = safeParseJSON(raw);
+  if (!parsed || typeof parsed !== 'object') return fallback;
+  return parsed;
+}
+
+function normalizeQualificationDerivedStateForWrite(incomingState, currentState) {
+  if (!incomingState || typeof incomingState !== 'object') {
+    return incomingState;
+  }
+
+  const normalizedState = { ...incomingState };
+
+  if (typeof incomingState.mlm_users === 'string') {
+    const incomingUsers = safeParseJSON(incomingState.mlm_users);
+    const currentUsers = safeParseJSON(currentState?.mlm_users);
+
+    if (Array.isArray(incomingUsers)) {
+      const currentByPublicUserId = new Map();
+      const currentByInternalId = new Map();
+      if (Array.isArray(currentUsers)) {
+        for (const user of currentUsers) {
+          const publicUserId = normalizeV2UserCode(user?.userId);
+          const internalId = String(user?.id || '').trim();
+          if (publicUserId) currentByPublicUserId.set(publicUserId, user);
+          if (internalId) currentByInternalId.set(internalId, user);
+        }
+      }
+
+      const lockedUsers = incomingUsers.map((incomingUser) => {
+        if (!incomingUser || typeof incomingUser !== 'object') return incomingUser;
+
+        const publicUserId = normalizeV2UserCode(incomingUser?.userId);
+        const internalId = String(incomingUser?.id || '').trim();
+        const existingUser = (
+          (publicUserId && currentByPublicUserId.get(publicUserId))
+          || (internalId && currentByInternalId.get(internalId))
+          || null
+        );
+
+        if (!existingUser) {
+          const nextUser = { ...incomingUser };
+          const directCount = Number(nextUser.directCount);
+          nextUser.directCount = Number.isFinite(directCount) && directCount > 0
+            ? Math.trunc(directCount)
+            : 0;
+          nextUser.isAdmin = false;
+          return nextUser;
+        }
+
+        const nextUser = { ...incomingUser };
+        for (const field of QUALIFICATION_LOCKED_USER_FIELDS) {
+          nextUser[field] = existingUser[field];
+        }
+        return nextUser;
+      });
+
+      normalizedState.mlm_users = JSON.stringify(lockedUsers);
+    }
+  }
+
+  if (typeof incomingState.mlm_settings === 'string') {
+    const incomingSettings = parseStateJsonObject(incomingState.mlm_settings, null);
+    const currentSettings = parseStateJsonObject(currentState?.mlm_settings, null);
+    if (incomingSettings && currentSettings) {
+      const incomingTable = Array.isArray(incomingSettings.helpDistributionTable)
+        ? incomingSettings.helpDistributionTable
+        : null;
+      const currentTable = Array.isArray(currentSettings.helpDistributionTable)
+        ? currentSettings.helpDistributionTable
+        : null;
+
+      if (incomingTable && currentTable) {
+        const mergedTable = incomingTable.map((row, index) => {
+          const sourceRow = currentTable[index];
+          if (!row || typeof row !== 'object') return row;
+          if (!sourceRow || typeof sourceRow !== 'object') return row;
+          return {
+            ...row,
+            directRequired: sourceRow.directRequired
+          };
+        });
+        normalizedState.mlm_settings = JSON.stringify({
+          ...incomingSettings,
+          helpDistributionTable: mergedTable
+        });
+      }
+    }
+  }
+
+  return normalizedState;
 }
 
 function getSingleHeaderValue(req, headerName) {
@@ -1491,6 +1647,136 @@ async function applyV2HelpProgressUpdates({ connection, helpProgressUpdates, all
   }
 
   return appliedUpdates;
+}
+
+function normalizeV2ReadLimit(value, fallback = 100, max = 300) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const normalized = Math.trunc(parsed);
+  if (normalized < 1) return fallback;
+  return Math.min(max, normalized);
+}
+
+function normalizeV2LedgerEntrySignedAmountCents(entrySide, amountCents) {
+  const normalizedAmount = Number.isFinite(Number(amountCents)) ? Math.trunc(Number(amountCents)) : 0;
+  if (String(entrySide || '').toLowerCase() === 'debit') {
+    return -Math.abs(normalizedAmount);
+  }
+  return Math.abs(normalizedAmount);
+}
+
+function normalizeV2LedgerEntryStatus(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'posted') return 'completed';
+  if (normalized === 'reversed') return 'reversed';
+  if (normalized === 'void') return 'cancelled';
+  return 'pending';
+}
+
+async function resolveV2UserForReadByCode(userCode) {
+  const normalizedUserCode = normalizeV2UserCode(userCode);
+  if (!isValidV2UserCode(normalizedUserCode)) {
+    throw createApiError(400, 'userCode is required and must be 3-20 chars [a-zA-Z0-9_-]', 'INVALID_USER_CODE');
+  }
+
+  const usersByCode = await loadV2UsersByCodes([normalizedUserCode]);
+  const user = usersByCode.get(normalizedUserCode) || null;
+  if (!user) {
+    throw createApiError(404, 'Requested user was not found in v2_users', 'V2_USER_NOT_FOUND');
+  }
+
+  return {
+    userId: Number(user.id),
+    userCode: normalizedUserCode
+  };
+}
+
+async function readV2WalletSnapshotByUserId(userId) {
+  const [walletRows] = await pool.execute(
+    `SELECT wallet_type, current_amount_cents, updated_at
+       FROM v2_wallet_accounts
+      WHERE user_id = ?`,
+    [userId]
+  );
+
+  const balancesCents = {
+    fund: 0,
+    income: 0,
+    royalty: 0
+  };
+  let latestUpdatedAt = null;
+
+  for (const row of Array.isArray(walletRows) ? walletRows : []) {
+    const walletType = String(row?.wallet_type || '').toLowerCase();
+    if (walletType === 'fund' || walletType === 'income' || walletType === 'royalty') {
+      balancesCents[walletType] = Number.isFinite(Number(row?.current_amount_cents))
+        ? Math.trunc(Number(row.current_amount_cents))
+        : 0;
+    }
+    if (row?.updated_at) {
+      const iso = new Date(row.updated_at).toISOString();
+      if (!latestUpdatedAt || iso > latestUpdatedAt) latestUpdatedAt = iso;
+    }
+  }
+
+  return {
+    balancesCents,
+    updatedAt: latestUpdatedAt
+  };
+}
+
+async function readV2LedgerEntriesByUserId(userId, limit = 100) {
+  const safeLimit = normalizeV2ReadLimit(limit, 100, 300);
+  const [rows] = await pool.execute(
+    `SELECT
+       le.id AS ledger_entry_id,
+       le.wallet_type,
+       le.entry_side,
+       le.amount_cents,
+       lt.id AS ledger_txn_id,
+       lt.tx_uuid,
+       lt.tx_type,
+       lt.status AS ledger_status,
+       lt.description,
+       lt.reference_id,
+       lt.created_at,
+       lt.posted_at,
+       cp.user_code AS counterparty_user_code
+     FROM v2_ledger_entries le
+     INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
+     LEFT JOIN v2_ledger_entries cp_le
+       ON cp_le.ledger_txn_id = le.ledger_txn_id
+      AND cp_le.id <> le.id
+      AND cp_le.user_id IS NOT NULL
+     LEFT JOIN v2_users cp ON cp.id = cp_le.user_id
+     WHERE le.user_id = ?
+     ORDER BY lt.id DESC, le.id DESC
+     LIMIT ?`,
+    [userId, safeLimit]
+  );
+
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const signedAmountCents = normalizeV2LedgerEntrySignedAmountCents(row?.entry_side, row?.amount_cents);
+    const createdAt = row?.created_at ? new Date(row.created_at).toISOString() : null;
+    const postedAt = row?.posted_at ? new Date(row.posted_at).toISOString() : createdAt;
+
+    return {
+      id: String(row?.ledger_entry_id || ''),
+      ledgerTransactionId: Number(row?.ledger_txn_id || 0),
+      txUuid: String(row?.tx_uuid || ''),
+      txType: String(row?.tx_type || ''),
+      walletType: String(row?.wallet_type || ''),
+      entrySide: String(row?.entry_side || '').toLowerCase(),
+      amountCents: Math.abs(Number(signedAmountCents || 0)),
+      signedAmountCents,
+      status: normalizeV2LedgerEntryStatus(row?.ledger_status),
+      description: typeof row?.description === 'string' ? row.description : null,
+      referenceId: typeof row?.reference_id === 'string' ? row.reference_id : null,
+      counterpartyUserCode: typeof row?.counterparty_user_code === 'string' ? row.counterparty_user_code : null,
+      createdAt,
+      postedAt
+    };
+  });
 }
 
 async function processV2FundTransfer({
@@ -5726,6 +6012,133 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/v2/wallet') {
+    try {
+      if (STORAGE_MODE !== 'mysql') {
+        sendJson(res, 503, { ok: false, error: 'V2 financial APIs require STORAGE_MODE=mysql', code: 'V2_REQUIRES_MYSQL' });
+        return;
+      }
+      if (FINANCE_ENGINE_MODE !== 'v2') {
+        sendJson(res, 409, { ok: false, error: 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/wallet', code: 'FINANCE_MODE_MISMATCH' });
+        return;
+      }
+      if (!pool) {
+        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+        return;
+      }
+
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_WALLET_READ_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+
+      const requestedUserCode = normalizeV2UserCode(url.searchParams.get('userCode') || authContext.actorUserCode);
+      if (!isValidV2UserCode(requestedUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'userCode is required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (requestedUserCode !== authContext.actorUserCode) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Actor is only allowed to read their effective userCode wallet snapshot',
+          code: 'ACTOR_USER_MISMATCH'
+        });
+        return;
+      }
+
+      const user = await resolveV2UserForReadByCode(requestedUserCode);
+      const walletSnapshot = await readV2WalletSnapshotByUserId(user.userId);
+
+      sendJson(res, 200, {
+        ok: true,
+        userCode: user.userCode,
+        wallet: {
+          fundCents: walletSnapshot.balancesCents.fund,
+          incomeCents: walletSnapshot.balancesCents.income,
+          royaltyCents: walletSnapshot.balancesCents.royalty,
+          updatedAt: walletSnapshot.updatedAt
+        }
+      });
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : getHttpStatusForRequestError(error));
+      const message = getErrorMessage(error, 'Failed to read V2 wallet snapshot');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_WALLET_READ_FAILED'
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/v2/transactions') {
+    try {
+      if (STORAGE_MODE !== 'mysql') {
+        sendJson(res, 503, { ok: false, error: 'V2 financial APIs require STORAGE_MODE=mysql', code: 'V2_REQUIRES_MYSQL' });
+        return;
+      }
+      if (FINANCE_ENGINE_MODE !== 'v2') {
+        sendJson(res, 409, { ok: false, error: 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/transactions', code: 'FINANCE_MODE_MISMATCH' });
+        return;
+      }
+      if (!pool) {
+        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+        return;
+      }
+
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_TRANSACTIONS_READ_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+
+      const requestedUserCode = normalizeV2UserCode(url.searchParams.get('userCode') || authContext.actorUserCode);
+      if (!isValidV2UserCode(requestedUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'userCode is required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (requestedUserCode !== authContext.actorUserCode) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Actor is only allowed to read their effective userCode transactions',
+          code: 'ACTOR_USER_MISMATCH'
+        });
+        return;
+      }
+
+      const user = await resolveV2UserForReadByCode(requestedUserCode);
+      const limit = normalizeV2ReadLimit(url.searchParams.get('limit'), 100, 300);
+      const transactions = await readV2LedgerEntriesByUserId(user.userId, limit);
+
+      sendJson(res, 200, {
+        ok: true,
+        userCode: user.userCode,
+        count: transactions.length,
+        transactions
+      });
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : getHttpStatusForRequestError(error));
+      const message = getErrorMessage(error, 'Failed to read V2 transactions');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_TRANSACTIONS_READ_FAILED'
+      });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/v2/fund-transfers') {
     try {
       const body = await getRequestBody(req);
@@ -6280,7 +6693,45 @@ const server = createServer(async (req, res) => {
     try {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
-      const incomingState = sanitizeIncomingState(parsed?.state);
+      const forceWrite = url.searchParams.get('force') === '1';
+      const isChunked = url.searchParams.get('chunk') === '1';
+      let stateActorContext = null;
+
+      if (FINANCE_ENGINE_MODE === 'v2') {
+        stateActorContext = await resolveV2RequestAuthContext({
+          req,
+          endpointName: V2_STATE_SYNC_ENDPOINT_NAME,
+          requiredRole: 'user',
+          allowImpersonation: false
+        });
+      }
+
+      const incomingStateRaw = sanitizeIncomingState(parsed?.state);
+      const incomingState = { ...incomingStateRaw };
+      if (FINANCE_ENGINE_MODE === 'v2') {
+        const allowlist = getV2StateWriteAllowlistForActor(!!stateActorContext?.authSubjectIsAdmin);
+        const disallowedKeys = getIncomingDisallowedStateKeys(incomingState, allowlist);
+        if (disallowedKeys.length > 0) {
+          sendJson(res, 403, {
+            ok: false,
+            error: 'State write rejected by role allowlist while FINANCE_ENGINE_MODE=v2',
+            code: 'STATE_KEY_ROLE_FORBIDDEN',
+            actorRole: stateActorContext?.authSubjectIsAdmin ? 'admin' : 'user',
+            disallowedKeys
+          });
+          return;
+        }
+
+        if (forceWrite && !stateActorContext?.authSubjectIsAdmin) {
+          sendJson(res, 403, {
+            ok: false,
+            error: 'force=1 state writes require admin role while FINANCE_ENGINE_MODE=v2',
+            code: 'STATE_FORCE_ADMIN_REQUIRED'
+          });
+          return;
+        }
+      }
+
       const blockedFinancialKeys = getIncomingFinancialStateKeys(incomingState);
       if (FINANCE_ENGINE_MODE === 'v2' && !LEGACY_FINANCIAL_WRITES_ENABLED && blockedFinancialKeys.length > 0) {
         sendJson(res, 403, {
@@ -6294,8 +6745,6 @@ const server = createServer(async (req, res) => {
 
       const incomingBaseUpdatedAt = typeof parsed?.baseUpdatedAt === 'string' ? parsed.baseUpdatedAt : null;
       const incomingUsersCount = getStateArrayLength(incomingState, 'mlm_users');
-      const forceWrite = url.searchParams.get('force') === '1';
-      const isChunked = url.searchParams.get('chunk') === '1';
 
       const currentSnapshot = await getStateSnapshotCached();
       const currentUpdatedAt = typeof currentSnapshot?.updatedAt === 'string' ? currentSnapshot.updatedAt : null;
@@ -6327,12 +6776,20 @@ const server = createServer(async (req, res) => {
         }
       }
 
-      const replaceMissing = isChunked ? false : hasFullStateSnapshot(incomingState);
-      const saved = await writeStateToDB(incomingState, replaceMissing);
+      let normalizedIncomingState = incomingState;
+      if (FINANCE_ENGINE_MODE === 'v2') {
+        normalizedIncomingState = normalizeQualificationDerivedStateForWrite(
+          incomingState,
+          currentSnapshot?.state || {}
+        );
+      }
+
+      const replaceMissing = isChunked ? false : hasFullStateSnapshot(normalizedIncomingState);
+      const saved = await writeStateToDB(normalizedIncomingState, replaceMissing);
       sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt });
     } catch (error) {
       const message = getErrorMessage(error, 'Failed to persist state');
-      const status = getHttpStatusForRequestError(error);
+      const status = Number(error?.status) || getHttpStatusForRequestError(error);
       console.error(`[POST /api/state] ${message}`);
       sendJson(res, status, { ok: false, error: message });
     }

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { useEffect, useRef, useState } from 'react';
 import type {
-  User, Wallet, Transaction, MatrixNode, Notification,
+  User, Wallet, Transaction, TransactionStatus, TransactionType, MatrixNode, Notification,
   AdminSettings, DashboardStats, Pin, PinTransfer, PinPurchaseRequest, RegisterData, PaymentMethodType,
   MarketplaceCategory, MarketplaceRetailer, MarketplaceBanner, MarketplaceDeal,
   MarketplaceInvoice, RewardRedemption
@@ -102,6 +102,171 @@ function resolveV2RequestHeaders(params: {
   }
 
   return { headers };
+}
+
+function resolveV2ReadRequestHeaders(params: {
+  requestId: string;
+  impersonationReason: string;
+}): { headers: Record<string, string> } | { message: string } {
+  const authState = useAuthStore.getState();
+  const subjectUser = authState.user;
+  const impersonatedUser = authState.impersonatedUser;
+
+  if (!subjectUser) {
+    return { message: 'Authentication session expired. Please login again.' };
+  }
+
+  const savedAuthSession = Database.getV2AuthSession();
+  const bearerToken = (savedAuthSession?.accessToken || '').trim() || String(subjectUser.userId || '').trim();
+  if (!bearerToken) {
+    return { message: 'Missing V2 auth token. Please login again.' };
+  }
+
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${bearerToken}`,
+    'X-System-Version': 'v2',
+    'X-Request-Id': params.requestId
+  };
+
+  if (impersonatedUser && subjectUser.isAdmin) {
+    headers['X-Impersonate-User-Code'] = impersonatedUser.userId;
+    headers['X-Impersonation-Reason'] = params.impersonationReason;
+  }
+
+  return { headers };
+}
+
+function buildWalletDefaultsForV2Read(userId: string, existingWallet?: Wallet | null): Wallet {
+  return {
+    userId,
+    depositWallet: Number(existingWallet?.depositWallet || 0),
+    fundRecoveryDue: Number(existingWallet?.fundRecoveryDue || 0),
+    fundRecoveryRecoveredTotal: Number(existingWallet?.fundRecoveryRecoveredTotal || 0),
+    fundRecoveryReason: existingWallet?.fundRecoveryReason || null,
+    pinWallet: Number(existingWallet?.pinWallet || 0),
+    incomeWallet: Number(existingWallet?.incomeWallet || 0),
+    royaltyWallet: Number(existingWallet?.royaltyWallet || 0),
+    matrixWallet: Number(existingWallet?.matrixWallet || 0),
+    lockedIncomeWallet: Number(existingWallet?.lockedIncomeWallet || 0),
+    giveHelpLocked: Number(existingWallet?.giveHelpLocked || 0),
+    totalReceived: Number(existingWallet?.totalReceived || 0),
+    totalGiven: Number(existingWallet?.totalGiven || 0),
+    pendingSystemFee: Number(existingWallet?.pendingSystemFee || 0),
+    lastSystemFeeDate: existingWallet?.lastSystemFeeDate || null,
+    rewardPoints: Number(existingWallet?.rewardPoints || 0),
+    totalRewardPointsEarned: Number(existingWallet?.totalRewardPointsEarned || 0),
+    totalRewardPointsRedeemed: Number(existingWallet?.totalRewardPointsRedeemed || 0)
+  };
+}
+
+function mapV2ReadStatusToTransactionStatus(status: unknown): TransactionStatus {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'completed') return 'completed';
+  if (normalized === 'reversed') return 'reversed';
+  if (normalized === 'cancelled') return 'cancelled';
+  return 'pending';
+}
+
+function mapV2ReadTypeToTransactionType(txType: unknown, walletType: unknown, signedAmountCents: number): TransactionType {
+  const normalizedTxType = String(txType || '').toLowerCase();
+  const normalizedWalletType = String(walletType || '').toLowerCase();
+
+  if (normalizedTxType === 'fund_transfer') return 'p2p_transfer';
+  if (normalizedTxType === 'withdrawal_debit') return 'withdrawal';
+  if (normalizedTxType === 'pin_purchase') return 'pin_purchase';
+  if (normalizedTxType === 'referral_credit') {
+    return signedAmountCents >= 0 ? 'direct_income' : 'income_transfer';
+  }
+  if (normalizedTxType === 'admin_adjustment') {
+    if (signedAmountCents >= 0 && normalizedWalletType === 'royalty') return 'royalty_income';
+    return signedAmountCents >= 0 ? 'admin_credit' : 'admin_debit';
+  }
+
+  return signedAmountCents >= 0 ? 'admin_credit' : 'admin_debit';
+}
+
+async function fetchV2WalletAndTransactionsSnapshotForUser(user: User): Promise<{ wallet: Wallet; transactions: Transaction[] } | null> {
+  const userCode = String(user?.userId || '').trim();
+  const internalUserId = String(user?.id || '').trim();
+  if (!userCode || !internalUserId) return null;
+
+  const requestId = generateClientRequestId('v2_wallet_read');
+  const resolvedHeaders = resolveV2ReadRequestHeaders({
+    requestId,
+    impersonationReason: 'wallet_read_refresh'
+  });
+  if (!('headers' in resolvedHeaders)) {
+    return null;
+  }
+
+  const headers = resolvedHeaders.headers;
+  const walletUrl = `${getBackendApiBase()}/api/v2/wallet?userCode=${encodeURIComponent(userCode)}`;
+  const transactionsUrl = `${getBackendApiBase()}/api/v2/transactions?userCode=${encodeURIComponent(userCode)}&limit=200`;
+
+  const [walletResponse, transactionsResponse] = await Promise.all([
+    fetch(walletUrl, { method: 'GET', headers }),
+    fetch(transactionsUrl, { method: 'GET', headers })
+  ]);
+
+  if (!walletResponse.ok || !transactionsResponse.ok) {
+    return null;
+  }
+
+  const walletPayload = await walletResponse.json().catch(() => ({} as Record<string, unknown>));
+  const transactionsPayload = await transactionsResponse.json().catch(() => ({} as Record<string, unknown>));
+
+  const walletData = walletPayload && typeof walletPayload === 'object'
+    ? (walletPayload as { wallet?: Record<string, unknown>; ok?: boolean }).wallet
+    : undefined;
+  const txRows = Array.isArray((transactionsPayload as { transactions?: unknown[] })?.transactions)
+    ? ((transactionsPayload as { transactions?: unknown[] }).transactions as Array<Record<string, unknown>>)
+    : [];
+
+  if (!(walletPayload as { ok?: boolean })?.ok || !walletData || typeof walletData !== 'object') {
+    return null;
+  }
+  if (!(transactionsPayload as { ok?: boolean })?.ok) {
+    return null;
+  }
+
+  const existingWallet = Database.getWallet(internalUserId);
+  const wallet = buildWalletDefaultsForV2Read(internalUserId, existingWallet);
+  wallet.depositWallet = Number(walletData.fundCents || 0) / 100;
+  wallet.incomeWallet = Number(walletData.incomeCents || 0) / 100;
+  wallet.royaltyWallet = Number(walletData.royaltyCents || 0) / 100;
+
+  const transactions = txRows.map((row, index) => {
+    const signedAmountCents = Number(row.signedAmountCents || 0);
+    const counterpartyCode = String(row.counterpartyUserCode || '').trim();
+    const counterpartyUser = counterpartyCode
+      ? (resolveCanonicalUserForWalletActions(counterpartyCode) || Database.getUserByUserId(counterpartyCode))
+      : undefined;
+    const counterpartyRef = counterpartyUser?.id || counterpartyCode || undefined;
+
+    const createdAt = typeof row.postedAt === 'string' && row.postedAt
+      ? row.postedAt
+      : typeof row.createdAt === 'string' && row.createdAt
+        ? row.createdAt
+        : new Date().toISOString();
+
+    const txType = mapV2ReadTypeToTransactionType(row.txType, row.walletType, signedAmountCents);
+    const fallbackDescription = `${String(row.txType || 'transaction').replace(/_/g, ' ')} (${String(row.walletType || 'wallet')})`;
+
+    return {
+      id: `v2_${String(row.txUuid || 'txn')}_${String(row.id || index)}`,
+      userId: internalUserId,
+      type: txType,
+      amount: signedAmountCents / 100,
+      ...(signedAmountCents >= 0 ? { fromUserId: counterpartyRef } : {}),
+      ...(signedAmountCents < 0 ? { toUserId: counterpartyRef } : {}),
+      status: mapV2ReadStatusToTransactionStatus(row.status),
+      description: typeof row.description === 'string' && row.description.trim() ? row.description : fallbackDescription,
+      createdAt,
+      completedAt: mapV2ReadStatusToTransactionStatus(row.status) === 'completed' ? createdAt : undefined
+    } satisfies Transaction;
+  }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  return { wallet, transactions };
 }
 
 async function submitV2ReferralCreditBySourceRef(params: {
@@ -1272,31 +1437,42 @@ interface WalletState {
   refreshTransactions: (userId: string) => void;
 }
 
-export const useWalletStore = create<WalletState>((set) => ({
+export const useWalletStore = create<WalletState>((set, get) => ({
   wallet: null,
   transactions: [],
 
   loadWallet: (userId: string) => {
-    const canonicalUser = resolveCanonicalUserForWalletActions(userId);
-    const resolvedUser = canonicalUser
-      || Database.getUserById(userId)
-      || Database.getUserByUserId(userId);
-    const effectiveUserId = resolvedUser?.id || userId;
-    if (AUTO_WALLET_MAINTENANCE_ENABLED && resolvedUser && shouldRunWalletMaintenance(effectiveUserId)) {
-      Database.recoverMissingReferralIncomeForUser(effectiveUserId);
-      Database.repairLockedIncomeTrackerFromTransactions(effectiveUserId);
-      Database.repairIncomeWalletConsistency(effectiveUserId);
-      Database.repairFundWalletConsistency(effectiveUserId);
-      Database.repairRoyaltyWalletConsistency(effectiveUserId);
-      Database.syncLockedIncomeWallet(effectiveUserId);
-    }
-    // Process monthly system fee if due
-    Database.processMonthlySystemFee(effectiveUserId);
-    // Check direct referral deadline auto-deactivation
-    Database.checkDirectReferralDeadline(effectiveUserId);
-    const wallet = Database.getWallet(effectiveUserId);
-    const transactions = Database.getUserTransactions(effectiveUserId);
-    set({ wallet, transactions });
+    void (async () => {
+      const canonicalUser = resolveCanonicalUserForWalletActions(userId);
+      const resolvedUser = canonicalUser
+        || Database.getUserById(userId)
+        || Database.getUserByUserId(userId);
+      const effectiveUserId = resolvedUser?.id || userId;
+
+      if (resolvedUser) {
+        const v2Snapshot = await fetchV2WalletAndTransactionsSnapshotForUser(resolvedUser).catch(() => null);
+        if (v2Snapshot) {
+          set({ wallet: v2Snapshot.wallet, transactions: v2Snapshot.transactions });
+          return;
+        }
+      }
+
+      if (AUTO_WALLET_MAINTENANCE_ENABLED && resolvedUser && shouldRunWalletMaintenance(effectiveUserId)) {
+        Database.recoverMissingReferralIncomeForUser(effectiveUserId);
+        Database.repairLockedIncomeTrackerFromTransactions(effectiveUserId);
+        Database.repairIncomeWalletConsistency(effectiveUserId);
+        Database.repairFundWalletConsistency(effectiveUserId);
+        Database.repairRoyaltyWalletConsistency(effectiveUserId);
+        Database.syncLockedIncomeWallet(effectiveUserId);
+      }
+      // Process monthly system fee if due
+      Database.processMonthlySystemFee(effectiveUserId);
+      // Check direct referral deadline auto-deactivation
+      Database.checkDirectReferralDeadline(effectiveUserId);
+      const wallet = Database.getWallet(effectiveUserId);
+      const transactions = Database.getUserTransactions(effectiveUserId);
+      set({ wallet, transactions });
+    })();
   },
 
   transferFunds: async (
@@ -1324,9 +1500,13 @@ export const useWalletStore = create<WalletState>((set) => ({
     const canonicalSender = resolveCanonicalUserForWalletActions(fromUserId);
     const effectiveFromUserId = canonicalSender?.id || fromUserId;
     const fromWallet = Database.getWallet(effectiveFromUserId);
+    const inMemoryWallet = get().wallet;
+    const liveFundWallet = inMemoryWallet && inMemoryWallet.userId === effectiveFromUserId
+      ? inMemoryWallet
+      : fromWallet;
     const fromUser = canonicalSender || Database.getUserById(effectiveFromUserId);
 
-    if (!fromWallet || !fromUser) {
+    if (!liveFundWallet || !fromUser) {
       return { success: false, message: 'Sender wallet not found' };
     }
 
@@ -1362,7 +1542,7 @@ export const useWalletStore = create<WalletState>((set) => ({
       return { success: false, message: 'Transfer allowed only to upline or downline' };
     }
 
-    if (fromWallet.depositWallet < amount) {
+    if (liveFundWallet.depositWallet < amount) {
       return { success: false, message: 'Insufficient fund wallet balance' };
     }
 
@@ -1411,22 +1591,30 @@ export const useWalletStore = create<WalletState>((set) => ({
       return { success: false, message: errorMessage };
     }
 
-    try {
-      await Database.hydrateFromServer({
-        keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
-        strict: true,
-        maxAttempts: 3,
-        timeoutMs: 20000,
-        retryDelayMs: 1000
+    const refreshedSnapshot = await fetchV2WalletAndTransactionsSnapshotForUser(fromUser).catch(() => null);
+    if (refreshedSnapshot) {
+      set({
+        wallet: refreshedSnapshot.wallet,
+        transactions: refreshedSnapshot.transactions
       });
-    } catch {
-      // Best-effort refresh. The transfer has already been committed server-side.
-    }
+    } else {
+      try {
+        await Database.hydrateFromServer({
+          keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
+          strict: true,
+          maxAttempts: 3,
+          timeoutMs: 20000,
+          retryDelayMs: 1000
+        });
+      } catch {
+        // Best-effort fallback refresh.
+      }
 
-    set({
-      wallet: Database.getWallet(effectiveFromUserId),
-      transactions: Database.getUserTransactions(effectiveFromUserId)
-    });
+      set({
+        wallet: Database.getWallet(effectiveFromUserId),
+        transactions: Database.getUserTransactions(effectiveFromUserId)
+      });
+    }
 
     return {
       success: true,
@@ -1447,7 +1635,11 @@ export const useWalletStore = create<WalletState>((set) => ({
 
       const canonicalUser = resolveCanonicalUserForWalletActions(userId);
       const effectiveUserId = canonicalUser?.id || userId;
-      const wallet = Database.getWallet(effectiveUserId);
+      const dbWallet = Database.getWallet(effectiveUserId);
+      const inMemoryWallet = get().wallet;
+      const wallet = inMemoryWallet && inMemoryWallet.userId === effectiveUserId
+        ? inMemoryWallet
+        : dbWallet;
       const user = canonicalUser || Database.getUserById(effectiveUserId);
 
       if (!wallet || !user) {
@@ -1514,22 +1706,30 @@ export const useWalletStore = create<WalletState>((set) => ({
         return { success: false, message: errorMessage };
       }
 
-      try {
-        await Database.hydrateFromServer({
-          keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
-          strict: true,
-          maxAttempts: 3,
-          timeoutMs: 20000,
-          retryDelayMs: 1000
+      const refreshedSnapshot = await fetchV2WalletAndTransactionsSnapshotForUser(user).catch(() => null);
+      if (refreshedSnapshot) {
+        set({
+          wallet: refreshedSnapshot.wallet,
+          transactions: refreshedSnapshot.transactions
         });
-      } catch {
-        // Best-effort refresh. The withdrawal has already been committed server-side.
-      }
+      } else {
+        try {
+          await Database.hydrateFromServer({
+            keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
+            strict: true,
+            maxAttempts: 3,
+            timeoutMs: 20000,
+            retryDelayMs: 1000
+          });
+        } catch {
+          // Best-effort fallback refresh.
+        }
 
-      set({
-        wallet: Database.getWallet(effectiveUserId),
-        transactions: Database.getUserTransactions(effectiveUserId)
-      });
+        set({
+          wallet: Database.getWallet(effectiveUserId),
+          transactions: Database.getUserTransactions(effectiveUserId)
+        });
+      }
 
       return {
         success: true,
@@ -1548,8 +1748,23 @@ export const useWalletStore = create<WalletState>((set) => ({
   },
 
   refreshTransactions: (userId: string) => {
-    const transactions = Database.getUserTransactions(userId);
-    set({ transactions });
+    void (async () => {
+      const canonicalUser = resolveCanonicalUserForWalletActions(userId);
+      const resolvedUser = canonicalUser
+        || Database.getUserById(userId)
+        || Database.getUserByUserId(userId);
+
+      if (resolvedUser) {
+        const v2Snapshot = await fetchV2WalletAndTransactionsSnapshotForUser(resolvedUser).catch(() => null);
+        if (v2Snapshot) {
+          set({ wallet: v2Snapshot.wallet, transactions: v2Snapshot.transactions });
+          return;
+        }
+      }
+
+      const transactions = Database.getUserTransactions(userId);
+      set({ transactions });
+    })();
   }
 }));
 

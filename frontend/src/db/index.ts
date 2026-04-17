@@ -772,6 +772,16 @@ class Database {
     return qs ? `${base}?${qs}` : base;
   }
 
+  private static getRemoteSyncRequestHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const session = this.getV2AuthSession();
+    if (session?.accessToken) {
+      const tokenType = session.tokenType && session.tokenType.trim() ? session.tokenType.trim() : 'Bearer';
+      headers.Authorization = `${tokenType} ${session.accessToken}`;
+    }
+    return headers;
+  }
+
   private static getPersistedSnapshot(keys?: Iterable<string>): Record<string, string> {
     const state: Record<string, string> = {};
     const keysToRead = keys || this.REMOTE_SYNC_KEYS;
@@ -994,7 +1004,7 @@ class Database {
       try {
         response = await fetch(this.getRemoteSyncWriteEndpoint(), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: this.getRemoteSyncRequestHeaders(),
           body: JSON.stringify(requestBody),
           signal: controller?.signal
         });
@@ -10531,7 +10541,7 @@ class Database {
           try {
             response = await fetch(finalEndpoint, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: this.getRemoteSyncRequestHeaders(),
               body: JSON.stringify(payload),
               signal: controller?.signal
             });
@@ -10642,7 +10652,7 @@ class Database {
           try {
             response = await fetch(finalEndpoint, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: this.getRemoteSyncRequestHeaders(),
               body: JSON.stringify(payload),
               signal: controller?.signal
             });
