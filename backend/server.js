@@ -150,10 +150,13 @@ const V2_FUND_TRANSFER_ENDPOINT_NAME = 'v2_fund_transfer';
 const V2_WITHDRAWAL_ENDPOINT_NAME = 'v2_withdrawal';
 const V2_PIN_PURCHASE_ENDPOINT_NAME = 'v2_pin_purchase';
 const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
+const V2_HELP_EVENT_ENDPOINT_NAME = 'v2_help_event';
 const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 const V2_REFERRAL_MAX_LEVEL = 100;
 const V2_REFERRAL_SOURCE_REF_MAX_LENGTH = 120;
+const V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH = 120;
+const V2_HELP_EVENT_TYPE_ACTIVATION_JOIN = 'activation_join';
 const V2_HELP_STAGE_CODE_MAX_LENGTH = 40;
 const V2_FUND_TRANSFER_MAX_PROGRESS_UPDATES = 2;
 const V2_ADMIN_ADJUSTMENT_ENABLED = process.env.V2_ADMIN_ADJUSTMENT_ENABLED === 'true';
@@ -719,10 +722,21 @@ function isValidV2ReferralEventType(value) {
   return value === 'direct_referral' || value === 'level_referral';
 }
 
+function isValidV2HelpEventType(value) {
+  return value === V2_HELP_EVENT_TYPE_ACTIVATION_JOIN;
+}
+
 function isValidV2ReferralSourceRef(value) {
   const normalized = String(value || '').trim();
   if (!normalized) return false;
   if (normalized.length > V2_REFERRAL_SOURCE_REF_MAX_LENGTH) return false;
+  return /^[a-zA-Z0-9:_-]+$/.test(normalized);
+}
+
+function isValidV2HelpEventSourceRef(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return false;
+  if (normalized.length > V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH) return false;
   return /^[a-zA-Z0-9:_-]+$/.test(normalized);
 }
 
@@ -745,6 +759,10 @@ function buildV2ReferralEventKey({ sourceTxnId, beneficiaryUserCode, levelNo, ev
 
 function buildV2ReferralEventKeyFromRef({ sourceRef, beneficiaryUserCode, levelNo, eventType }) {
   return `REFKEY:${sourceRef}:${beneficiaryUserCode}:${levelNo}:${eventType}`;
+}
+
+function buildV2HelpEventKey({ sourceRef, sourceUserCode, newMemberUserCode, eventType }) {
+  return `HELP:${sourceRef}:${sourceUserCode}:${newMemberUserCode}:${eventType}`;
 }
 
 function generateV2PinCode() {
@@ -2640,6 +2658,254 @@ async function processV2ReferralCredit({
   }
 }
 
+async function processV2HelpEvent({
+  idempotencyKey,
+  actorUserCode,
+  sourceUserCode,
+  newMemberUserCode,
+  sourceRef,
+  eventType,
+  allowInactiveActor = false,
+  description
+}) {
+  if (STORAGE_MODE !== 'mysql') {
+    throw createApiError(503, 'V2 financial APIs require STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
+  }
+
+  if (FINANCE_ENGINE_MODE !== 'v2') {
+    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/help-events', 'FINANCE_MODE_MISMATCH');
+  }
+
+  if (!pool) {
+    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
+  }
+
+  const normalizedSourceRef = String(sourceRef || '').trim();
+  if (!isValidV2HelpEventSourceRef(normalizedSourceRef)) {
+    throw createApiError(400, `sourceRef must be 1-${V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH} chars [a-zA-Z0-9:_-]`, 'INVALID_SOURCE_REF');
+  }
+
+  const eventKey = buildV2HelpEventKey({
+    sourceRef: normalizedSourceRef,
+    sourceUserCode,
+    newMemberUserCode,
+    eventType
+  }).slice(0, 180);
+
+  const requestHash = buildV2RequestHash({
+    endpoint: V2_HELP_EVENT_ENDPOINT_NAME,
+    actorUserCode,
+    sourceUserCode,
+    newMemberUserCode,
+    eventType,
+    sourceRef: normalizedSourceRef,
+    eventKey,
+    description
+  });
+
+  const connection = await pool.getConnection();
+  let transactionOpen = false;
+
+  try {
+    await connection.beginTransaction();
+    transactionOpen = true;
+
+    const [actorRows] = await connection.execute(
+      `SELECT id, user_code, status
+       FROM v2_users
+       WHERE user_code = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [actorUserCode]
+    );
+    const actor = Array.isArray(actorRows) ? actorRows[0] : null;
+    if (!actor) {
+      throw createApiError(401, 'Actor user is not provisioned in v2_users', 'ACTOR_NOT_FOUND_IN_V2');
+    }
+    if (actor.status !== 'active' && !allowInactiveActor) {
+      throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
+    }
+    if (actorUserCode !== sourceUserCode) {
+      throw createApiError(403, 'Actor is only allowed to submit help events from their own sourceUserCode', 'ACTOR_SOURCE_MISMATCH');
+    }
+
+    const [idemRows] = await connection.execute(
+      `SELECT idempotency_key, request_hash, status, response_code, response_body, locked_until
+       FROM v2_idempotency_keys
+       WHERE idempotency_key = ?
+       FOR UPDATE`,
+      [idempotencyKey]
+    );
+    const existingIdem = Array.isArray(idemRows) && idemRows.length > 0 ? idemRows[0] : null;
+
+    if (existingIdem) {
+      if (existingIdem.request_hash !== requestHash) {
+        throw createApiError(409, 'Idempotency key reused with different payload', 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+      }
+
+      if (existingIdem.status === 'completed') {
+        const replayPayload = parseIdempotencyResponseBody(existingIdem.response_body) || { ok: true };
+        await connection.commit();
+        transactionOpen = false;
+        return {
+          status: Number(existingIdem.response_code) || 200,
+          payload: { ...replayPayload, idempotentReplay: true }
+        };
+      }
+
+      const lockExpiresAt = existingIdem.locked_until ? new Date(existingIdem.locked_until).getTime() : 0;
+      if (existingIdem.status === 'processing' && Number.isFinite(lockExpiresAt) && lockExpiresAt > Date.now()) {
+        throw createApiError(409, 'Request with this Idempotency-Key is already processing', 'IDEMPOTENCY_IN_PROGRESS');
+      }
+
+      await connection.execute(
+        `UPDATE v2_idempotency_keys
+         SET endpoint_name = ?, actor_user_id = ?, request_hash = ?, status = 'processing',
+             locked_until = DATE_ADD(NOW(3), INTERVAL ? SECOND), error_code = NULL,
+             updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [V2_HELP_EVENT_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS, idempotencyKey]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_idempotency_keys
+          (idempotency_key, endpoint_name, actor_user_id, request_hash, status, locked_until)
+         VALUES
+          (?, ?, ?, ?, 'processing', DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
+        [idempotencyKey, V2_HELP_EVENT_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
+      );
+    }
+
+    const [userRows] = await connection.execute(
+      `SELECT id, user_code, status
+       FROM v2_users
+       WHERE user_code IN (?, ?)
+       ORDER BY id
+       FOR UPDATE`,
+      [sourceUserCode, newMemberUserCode]
+    );
+    const sourceUser = Array.isArray(userRows)
+      ? userRows.find((row) => row.user_code === sourceUserCode)
+      : null;
+    const newMemberUser = Array.isArray(userRows)
+      ? userRows.find((row) => row.user_code === newMemberUserCode)
+      : null;
+
+    if (!sourceUser || !newMemberUser) {
+      throw createApiError(404, 'Source user or new member user is not provisioned in v2_users', 'V2_USER_NOT_FOUND');
+    }
+
+    const sourceStatusAllowed = sourceUser.status === 'active' || (allowInactiveActor && sourceUser.user_code === actorUserCode);
+    if (!sourceStatusAllowed || newMemberUser.status !== 'active') {
+      throw createApiError(403, 'Source user or new member user is not active', 'USER_NOT_ACTIVE');
+    }
+
+    await connection.execute(
+      `CREATE TABLE IF NOT EXISTS v2_help_events_queue (
+         id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+         event_key VARCHAR(180) NOT NULL,
+         event_type VARCHAR(40) NOT NULL,
+         source_ref VARCHAR(120) NOT NULL,
+         actor_user_id BIGINT UNSIGNED NOT NULL,
+         source_user_id BIGINT UNSIGNED NOT NULL,
+         new_member_user_id BIGINT UNSIGNED NOT NULL,
+         status ENUM('queued','processed','failed') NOT NULL DEFAULT 'queued',
+         payload_json JSON NULL,
+         created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+         processed_at DATETIME(3) NULL,
+         UNIQUE KEY uq_v2_help_events_event_key (event_key),
+         KEY idx_v2_help_events_status_created (status, created_at),
+         CONSTRAINT fk_v2_help_events_actor FOREIGN KEY (actor_user_id) REFERENCES v2_users(id),
+         CONSTRAINT fk_v2_help_events_source FOREIGN KEY (source_user_id) REFERENCES v2_users(id),
+         CONSTRAINT fk_v2_help_events_member FOREIGN KEY (new_member_user_id) REFERENCES v2_users(id)
+       ) ENGINE=InnoDB`
+    );
+
+    const payloadJson = JSON.stringify({
+      sourceUserCode,
+      newMemberUserCode,
+      sourceRef: normalizedSourceRef,
+      eventType,
+      description: description || null
+    });
+
+    await connection.execute(
+      `INSERT INTO v2_help_events_queue
+        (event_key, event_type, source_ref, actor_user_id, source_user_id, new_member_user_id, status, payload_json)
+       VALUES
+        (?, ?, ?, ?, ?, ?, 'queued', ?)
+       ON DUPLICATE KEY UPDATE id = id`,
+      [eventKey, eventType, normalizedSourceRef, actor.id, sourceUser.id, newMemberUser.id, payloadJson]
+    );
+
+    const [eventRows] = await connection.execute(
+      `SELECT id, event_key, status, created_at, processed_at
+       FROM v2_help_events_queue
+       WHERE event_key = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [eventKey]
+    );
+    const helpEvent = Array.isArray(eventRows) ? eventRows[0] : null;
+    if (!helpEvent) {
+      throw createApiError(500, 'Failed to queue help event', 'HELP_EVENT_QUEUE_FAILED');
+    }
+
+    const responsePayload = {
+      ok: true,
+      queued: true,
+      queueEventId: Number(helpEvent.id),
+      eventKey,
+      eventType,
+      sourceRef: normalizedSourceRef,
+      sourceUserCode,
+      newMemberUserCode,
+      queueStatus: String(helpEvent.status || 'queued'),
+      queuedAt: helpEvent.created_at ? new Date(helpEvent.created_at).toISOString() : new Date().toISOString(),
+      processedAt: helpEvent.processed_at ? new Date(helpEvent.processed_at).toISOString() : null
+    };
+
+    await connection.execute(
+      `UPDATE v2_idempotency_keys
+       SET status = 'completed', response_code = ?, response_body = ?,
+           locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+       WHERE idempotency_key = ?`,
+      [200, JSON.stringify(responsePayload), idempotencyKey]
+    );
+
+    await connection.commit();
+    transactionOpen = false;
+    return { status: 200, payload: responsePayload };
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        await connection.rollback();
+      } catch {
+        // Ignore rollback secondary errors.
+      }
+    }
+
+    const shouldMarkFailed = !!idempotencyKey && !!pool;
+    if (shouldMarkFailed) {
+      try {
+        await pool.execute(
+          `UPDATE v2_idempotency_keys
+           SET status = 'failed', error_code = ?, locked_until = NULL,
+               updated_at = NOW(3), last_seen_at = NOW(3)
+           WHERE idempotency_key = ?`,
+          [String(error?.code || 'UNKNOWN_V2_ERROR').slice(0, 80), idempotencyKey]
+        );
+      } catch {
+        // Keep the primary error as source of truth.
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function processV2AdminAdjustment({
   idempotencyKey,
   actorUserCode,
@@ -4436,6 +4702,81 @@ const server = createServer(async (req, res) => {
         ok: false,
         error: message,
         code: error?.code || (typeof error === 'object' && error.code) || 'V2_REFERRAL_CREDIT_FAILED'
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v2/help-events') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_HELP_EVENT_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: false
+      });
+      const allowInactiveActor = false;
+      const actorUserCode = authContext.actorUserCode;
+      const sourceUserCode = normalizeV2UserCode(parsed?.sourceUserCode);
+      const newMemberUserCode = normalizeV2UserCode(parsed?.newMemberUserCode);
+      const eventType = String(parsed?.eventType || '').trim().toLowerCase();
+      const sourceRef = typeof parsed?.sourceRef === 'string' ? parsed.sourceRef.trim() : '';
+      const description = typeof parsed?.description === 'string' ? parsed.description.trim().slice(0, 255) : null;
+      const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
+
+      if (!isValidV2UserCode(sourceUserCode) || !isValidV2UserCode(newMemberUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'sourceUserCode and newMemberUserCode are required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (!isValidV2HelpEventType(eventType)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `eventType must be ${V2_HELP_EVENT_TYPE_ACTIVATION_JOIN}`,
+          code: 'INVALID_EVENT_TYPE'
+        });
+        return;
+      }
+      if (!isValidV2HelpEventSourceRef(sourceRef)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: `sourceRef must be 1-${V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH} chars [a-zA-Z0-9:_-]`,
+          code: 'INVALID_SOURCE_REF'
+        });
+        return;
+      }
+      if (!idempotencyKey) {
+        sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
+        return;
+      }
+
+      const result = await executeV2TransactionWithRetry(
+        () => processV2HelpEvent({
+          idempotencyKey,
+          actorUserCode,
+          sourceUserCode,
+          newMemberUserCode,
+          sourceRef,
+          eventType,
+          allowInactiveActor,
+          description
+        }),
+        V2_HELP_EVENT_ENDPOINT_NAME
+      );
+
+      sendJson(res, result.status, result.payload);
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to process help event');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_HELP_EVENT_FAILED'
       });
     }
     return;

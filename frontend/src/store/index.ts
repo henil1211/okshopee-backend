@@ -169,6 +169,62 @@ async function submitV2ReferralCreditBySourceRef(params: {
   };
 }
 
+async function submitV2HelpEventBySourceRef(params: {
+  sourceUserCode: string;
+  newMemberUserCode: string;
+  sourceRef: string;
+  eventType?: 'activation_join';
+  description?: string;
+}): Promise<{ success: boolean; message: string; idempotentReplay?: boolean }> {
+  const sourceUserCode = String(params.sourceUserCode || '').trim();
+  const newMemberUserCode = String(params.newMemberUserCode || '').trim();
+  const sourceRef = String(params.sourceRef || '').trim();
+  const eventType = params.eventType || 'activation_join';
+
+  if (!sourceUserCode || !newMemberUserCode || !sourceRef) {
+    return { success: false, message: 'Missing help-event parameters' };
+  }
+
+  const sourceRefToken = sourceRef
+    .replace(/[^a-zA-Z0-9:_-]+/g, '_')
+    .slice(0, 64);
+  const idempotencyKey = `help_${sourceUserCode}_${newMemberUserCode}_${sourceRefToken}`.slice(0, 120);
+  const requestId = generateClientRequestId('help_event');
+
+  const response = await fetch(`${getBackendApiBase()}/api/v2/help-events`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${sourceUserCode}`,
+      'Idempotency-Key': idempotencyKey,
+      'X-System-Version': 'v2',
+      'X-Request-Id': requestId
+    },
+    body: JSON.stringify({
+      sourceUserCode,
+      newMemberUserCode,
+      sourceRef,
+      eventType,
+      description: String(params.description || '').trim() || undefined
+    })
+  });
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false) {
+    return {
+      success: false,
+      message: normalizeV2ApiErrorMessage(response.status, payload, 'Help event failed')
+    };
+  }
+
+  const idempotentReplay = typeof payload?.idempotentReplay === 'boolean' ? payload.idempotentReplay : false;
+  return {
+    success: true,
+    message: idempotentReplay ? 'Help event already queued (idempotent replay).' : 'Help event queued.',
+    idempotentReplay
+  };
+}
+
 function resolveCanonicalUserForWalletActions(userRef: string): User | undefined {
   const resolved = Database.getUserById(userRef) || Database.getUserByUserId(userRef);
   if (!resolved) return undefined;
@@ -713,6 +769,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     let newUser: User;
     let newUserId = '';
     let referralBeneficiaryUserCode: string | null = null;
+    let helpEventSourceUserCode: string | null = null;
     try {
       const result = await Database.runWithLocalStateTransaction(() => {
         // Generate unique 7-digit ID
@@ -849,8 +906,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         // Admin fee to safety pool
         Database.addToSafetyPool(adminFee, createdUser.id, 'Admin fee');
 
-        // Process matrix-level help payouts (binary tree event tracking, give-help/receive-help)
-        Database.processMatrixHelpForNewMember(generatedUserId, createdUser.id);
+        // Queue help/give processing to backend V2 help-event flow.
+        helpEventSourceUserCode = createdUser.userId;
 
         // Send welcome notification
         Database.createNotification({
@@ -1011,6 +1068,53 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
     }
 
+    let helpEventWarning: string | null = null;
+    if (helpEventSourceUserCode) {
+      const sourceUserCode = String(helpEventSourceUserCode || '').trim();
+      const newMemberUserCode = String(newUser.userId || '').trim();
+      const sourceRef = `reg_help_${sourceUserCode}_${newMemberUserCode}`;
+
+      let helpEventResult = await submitV2HelpEventBySourceRef({
+        sourceUserCode,
+        newMemberUserCode,
+        sourceRef,
+        eventType: 'activation_join',
+        description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+      });
+
+      if (!helpEventResult.success) {
+        try {
+          await Database.forceRemoteSyncNowWithOptions({
+            full: false,
+            force: true,
+            timeoutMs: 30000,
+            maxAttempts: 2,
+            retryDelayMs: 1000
+          });
+          await Database.hydrateFromServer({
+            keys: [DB_KEYS.USERS, DB_KEYS.MATRIX],
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 15000,
+            retryDelayMs: 800
+          });
+          helpEventResult = await submitV2HelpEventBySourceRef({
+            sourceUserCode,
+            newMemberUserCode,
+            sourceRef,
+            eventType: 'activation_join',
+            description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+          });
+        } catch {
+          // best-effort retry only
+        }
+      }
+
+      if (!helpEventResult.success) {
+        helpEventWarning = `Help event is pending backend processing (${helpEventResult.message}).`;
+      }
+    }
+
     const welcomeSubject = 'Welcome To ReferNex';
     const welcomeBody = [
       `Hello ${newUser.fullName},`,
@@ -1038,8 +1142,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         userId: newUser.userId
       }
     });
-    const registrationMessage = referralCreditWarning
-      ? `Registration successful. Your ID is: ${newUserId}. ${referralCreditWarning}`
+    const warnings = [referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
+    const registrationMessage = warnings.length > 0
+      ? `Registration successful. Your ID is: ${newUserId}. ${warnings.join(' ')}`
       : `Registration successful. Your ID is: ${newUserId}`;
     return { success: true, message: registrationMessage, userId: newUserId };
   },
@@ -2546,6 +2651,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       amount: number;
       description: string;
     }> = [];
+    const deferredHelpEvents: Array<{
+      sourceUserCode: string;
+      newMemberUserCode: string;
+      sourceRef: string;
+      description: string;
+    }> = [];
 
     const settleDeferredReferralCredits = async (): Promise<{ failedCount: number; failedDetails: string[] }> => {
       if (deferredReferralCredits.length === 0) {
@@ -2582,6 +2693,46 @@ export const useAdminStore = create<AdminState>((set, get) => ({
             created: createdUserIds.length,
             failed: failed.length + failedCount,
             message: `Posting referral credits... (${index + 1}/${deferredReferralCredits.length})`
+          });
+        }
+      }
+
+      return { failedCount, failedDetails };
+    };
+
+    const settleDeferredHelpEvents = async (): Promise<{ failedCount: number; failedDetails: string[] }> => {
+      if (deferredHelpEvents.length === 0) {
+        return { failedCount: 0, failedDetails: [] };
+      }
+
+      let failedCount = 0;
+      const failedDetails: string[] = [];
+
+      for (let index = 0; index < deferredHelpEvents.length; index += 1) {
+        const event = deferredHelpEvents[index];
+        const result = await submitV2HelpEventBySourceRef({
+          sourceUserCode: event.sourceUserCode,
+          newMemberUserCode: event.newMemberUserCode,
+          sourceRef: event.sourceRef,
+          eventType: 'activation_join',
+          description: event.description
+        });
+
+        if (!result.success) {
+          failedCount += 1;
+          if (failedDetails.length < 10) {
+            failedDetails.push(`${event.sourceUserCode}: ${result.message}`);
+          }
+        }
+
+        if ((index + 1) % 10 === 0 || index + 1 === deferredHelpEvents.length) {
+          params.onProgress?.({
+            stage: 'syncing',
+            processed: quantity,
+            total: quantity,
+            created: createdUserIds.length,
+            failed: failed.length + failedCount,
+            message: `Queueing help events... (${index + 1}/${deferredHelpEvents.length})`
           });
         }
       }
@@ -2696,7 +2847,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           }
 
           Database.addToSafetyPool(adminFee, newUser.id, 'Admin fee');
-          Database.processMatrixHelpForNewMember(newUserId, newUser.id);
+          deferredHelpEvents.push({
+            sourceUserCode: newUser.userId,
+            newMemberUserCode: newUser.userId,
+            sourceRef: `bulk_help_${newUser.userId}`,
+            description: `Activation help event for ${newUser.fullName} (${newUser.userId})`
+          });
 
           deferredNotifications.push({
             id: `notif_${Date.now()}_bulk_admin_${i}`,
@@ -2811,7 +2967,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
             if (referralSettlement.failedDetails.length > 0) {
               failed.push(...referralSettlement.failedDetails);
             }
-            const totalFailedCount = baseFailedCount + referralSettlement.failedCount;
+            const helpSettlement = await settleDeferredHelpEvents();
+            if (helpSettlement.failedDetails.length > 0) {
+              failed.push(...helpSettlement.failedDetails);
+            }
+            const totalFailedCount = baseFailedCount + referralSettlement.failedCount + helpSettlement.failedCount;
             get().loadAllUsers();
             if (get().allTransactions.length > 0) {
               get().loadAllTransactions();
@@ -2870,7 +3030,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       if (referralSettlement.failedDetails.length > 0) {
         failed.push(...referralSettlement.failedDetails);
       }
-      const totalFailedCount = baseFailedCount + referralSettlement.failedCount;
+      const helpSettlement = await settleDeferredHelpEvents();
+      if (helpSettlement.failedDetails.length > 0) {
+        failed.push(...helpSettlement.failedDetails);
+      }
+      const totalFailedCount = baseFailedCount + referralSettlement.failedCount + helpSettlement.failedCount;
 
       const message = totalFailedCount > 0
         ? `Created ${createdUserIds.length} ID(s), failed ${totalFailedCount}`
