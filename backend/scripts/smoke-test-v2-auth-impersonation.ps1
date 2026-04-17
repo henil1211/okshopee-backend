@@ -44,17 +44,23 @@ function Invoke-JsonRequest {
     $responseBody = ''
     $parsedBody = $null
 
+    if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+      $responseBody = [string]$_.ErrorDetails.Message
+    }
+
     if ($_.Exception.Response) {
       try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { $statusCode = 0 }
-      try {
-        $stream = $_.Exception.Response.GetResponseStream()
-        if ($stream) {
-          $reader = New-Object System.IO.StreamReader($stream)
-          $responseBody = $reader.ReadToEnd()
-          $reader.Dispose()
+      if ([string]::IsNullOrWhiteSpace($responseBody)) {
+        try {
+          $stream = $_.Exception.Response.GetResponseStream()
+          if ($stream) {
+            $reader = New-Object System.IO.StreamReader($stream)
+            $responseBody = $reader.ReadToEnd()
+            $reader.Dispose()
+          }
+        } catch {
+          $responseBody = ''
         }
-      } catch {
-        $responseBody = ''
       }
     }
 
@@ -141,6 +147,11 @@ $commonHeaders = @{
   'X-System-Version' = 'v2'
 }
 
+$isAdminCaller = $false
+if ($loginResponse.body -and $loginResponse.body.user) {
+  $isAdminCaller = [bool]$loginResponse.body.user.isAdmin
+}
+
 $results = @()
 
 $invalidBearerHeaders = @{
@@ -178,17 +189,30 @@ $referralResponse = Invoke-JsonRequest -Method 'POST' -Url "$baseUrl/api/v2/refe
 }
 $results += Assert-Expected -Name 'referral-credit-actor-mismatch' -Response $referralResponse -ExpectedStatus 403 -ExpectedCode 'ACTOR_SOURCE_MISMATCH'
 
-$adminAdjustmentResponse = Invoke-JsonRequest -Method 'POST' -Url "$baseUrl/api/v2/admin/adjustments" -Headers (New-Headers -Base $commonHeaders -Extra @{ 'Idempotency-Key' = "auth-adj-$(Get-Date -Format 'yyyyMMddHHmmss')" }) -BodyObject @{
-  targetUserCode = $OtherUserCode
-  approverUserCode = $AdminApproverUserCode
-  walletType = 'income'
-  direction = 'credit'
-  amountCents = 500
-  reasonCode = 'MANUAL_FIX'
-  ticketId = 'AUTH-VERIFY-001'
-  note = 'Auth verification should block non-admin caller'
+if ($isAdminCaller) {
+  Write-Host 'Skipping admin-adjustment-admin-role-required check because login user is admin.' -ForegroundColor Yellow
+  $results += [PSCustomObject]@{
+    name = 'admin-adjustment-admin-role-required'
+    expectedStatus = 403
+    actualStatus = 'skipped'
+    expectedCode = 'ADMIN_ROLE_REQUIRED'
+    actualCode = 'SKIPPED_FOR_ADMIN_CALLER'
+    pass = $true
+    rawBody = ''
+  }
+} else {
+  $adminAdjustmentResponse = Invoke-JsonRequest -Method 'POST' -Url "$baseUrl/api/v2/admin/adjustments" -Headers (New-Headers -Base $commonHeaders -Extra @{ 'Idempotency-Key' = "auth-adj-$(Get-Date -Format 'yyyyMMddHHmmss')" }) -BodyObject @{
+    targetUserCode = $OtherUserCode
+    approverUserCode = $AdminApproverUserCode
+    walletType = 'income'
+    direction = 'credit'
+    amountCents = 500
+    reasonCode = 'MANUAL_FIX'
+    ticketId = 'AUTH-VERIFY-001'
+    note = 'Auth verification should block non-admin caller'
+  }
+  $results += Assert-Expected -Name 'admin-adjustment-admin-role-required' -Response $adminAdjustmentResponse -ExpectedStatus 403 -ExpectedCode 'ADMIN_ROLE_REQUIRED'
 }
-$results += Assert-Expected -Name 'admin-adjustment-admin-role-required' -Response $adminAdjustmentResponse -ExpectedStatus 403 -ExpectedCode 'ADMIN_ROLE_REQUIRED'
 
 Write-Host ''
 Write-Host 'Results:' -ForegroundColor Cyan
