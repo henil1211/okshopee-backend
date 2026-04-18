@@ -3086,8 +3086,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       otp?: string;
     }
   ) => {
-    await Database.ensureFreshData();
-
     const transferGate = Database.getSensitiveActionSyncGate();
     if (!transferGate.allowed) {
       return { success: false, message: transferGate.message };
