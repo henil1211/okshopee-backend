@@ -473,6 +473,7 @@ class Database {
   private static remoteSyncPending = false;
   private static remoteSyncDirtyKeys = new Set<string>();
   private static remoteSyncApplyingServerState = false;
+  private static remoteSyncWriteBlockedByPolicy = false;
   private static remoteSyncRetryTimer: ReturnType<typeof setInterval> | null = null;
   private static remoteSyncRetryBound = false;
   private static remoteStateUpdatedAt: string | null = null;
@@ -844,7 +845,7 @@ class Database {
   }
 
   private static markKeyDirtyForRemoteSync(key: string): void {
-    if (!this.shouldSyncKey(key) || this.remoteSyncApplyingServerState) return;
+    if (!this.shouldSyncKey(key) || this.remoteSyncApplyingServerState || this.remoteSyncWriteBlockedByPolicy) return;
     this.remoteSyncDirtyKeys.add(key);
     this.scheduleRemoteSync();
   }
@@ -979,6 +980,14 @@ class Database {
       return;
     }
 
+    if (this.remoteSyncWriteBlockedByPolicy) {
+      this.remoteSyncDirtyKeys.clear();
+      this.remoteSyncPending = false;
+      this.remoteSyncQueued = false;
+      this.markSynced('Server state write is restricted for this session. Continuing with API-backed reads.');
+      return;
+    }
+
     const keysToSync = options?.full
       ? new Set<string>(this.REMOTE_SYNC_KEYS)
       : new Set<string>(this.remoteSyncDirtyKeys);
@@ -1020,6 +1029,16 @@ class Database {
           this.markSyncing('Refreshing from server');
           void this.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 15000, retryDelayMs: 500 });
         }
+
+        if (response.status === 403) {
+          this.remoteSyncWriteBlockedByPolicy = true;
+          this.remoteSyncPending = false;
+          this.remoteSyncQueued = false;
+          this.remoteSyncDirtyKeys.clear();
+          this.markSynced('Server state write is restricted for this session. Continuing with API-backed reads.');
+          return;
+        }
+
         throw new Error(`Remote sync failed with HTTP ${response.status}`);
       }
       const payload = await response.json() as { updatedAt?: unknown };

@@ -51,7 +51,7 @@ function getRoyaltyExplanation(milestone: (typeof ROYALTY_MILESTONES)[number]) {
 export default function Dashboard() {
   const navigate = useNavigate();
   const { user, isAuthenticated, logout, impersonatedUser, endImpersonation, verifyTransactionPassword } = useAuthStore();
-  const { wallet, transactions, loadWallet, withdraw } = useWalletStore();
+  const { wallet, transactions, loadWallet, refreshTransactions, withdraw, v2ReadHealthy, v2ReadError } = useWalletStore();
   const { loadUserDownline, getDownlineStats, loadMatrix } = useMatrixStore();
   const { sendOtp, verifyOtp } = useOtpStore();
   const { unreadCount, loadNotifications } = useNotificationStore();
@@ -87,12 +87,13 @@ export default function Dashboard() {
 
     if (displayUser) {
       Database.syncUserAchievements(displayUser.id);
-      loadWallet(displayUser.id);
+      loadWallet(displayUser.id, { v2Only: true });
+      refreshTransactions(displayUser.id);
       loadMatrix();
       loadUserDownline(displayUser.userId);
       loadNotifications(displayUser.id);
     }
-  }, [isAuthenticated, displayUser, navigate, loadWallet, loadMatrix, loadUserDownline, loadNotifications, syncKey]);
+  }, [isAuthenticated, displayUser, navigate, loadWallet, refreshTransactions, loadMatrix, loadUserDownline, loadNotifications, syncKey]);
 
   const openWithdrawDialog = () => {
     const fallbackAddress = String(displayUser?.usdtAddress || '').trim();
@@ -113,6 +114,10 @@ export default function Dashboard() {
 
   const handleWithdraw = async () => {
     if (!displayUser) return;
+    if (!v2ReadHealthy) {
+      toast.error(v2ReadError || 'Live sync is unavailable. Please wait few minutes and logout and login again if the sync is unavailable after few minutes.');
+      return;
+    }
     const amount = parseFloat(withdrawData.amount);
     if (isNaN(amount) || amount <= 0) {
       toast.error('Invalid amount');
@@ -411,6 +416,11 @@ export default function Dashboard() {
   const getDisplayAmount = (tx: { amount: number; type: string }) =>
     `${isOutflowTransaction(tx) ? '-' : '+'}${formatCurrency(Math.abs(tx.amount))}`;
 
+  const showCurrency = (amount: number | undefined): string => {
+    if (!v2ReadHealthy) return '--';
+    return formatCurrency(amount || 0);
+  };
+
   if (!displayUser) return null;
 
   const familyNationalTourQualified = Database.isTourQualified(displayUser.id, 4);
@@ -522,6 +532,14 @@ export default function Dashboard() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        {!v2ReadHealthy && (
+          <div className="mb-6 rounded-xl border border-rose-500/40 bg-rose-500/10 p-4">
+            <p className="text-sm font-semibold text-rose-200">Live sync is unavailable, Please wait few minutes and logout and login again if the sync is unavailable after few minutes.</p>
+            <p className="text-xs text-rose-200/90 mt-1">
+              {v2ReadError || 'Live read failed: Cannot reach. Wait few Minutes https://api.refernex.com. Check internet, DNS, SSL, or CORS/proxy settings.'}
+            </p>
+          </div>
+        )}
         {/* Welcome Section */}
         <div className="mb-8">
           <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 dark:text-white mb-2">
@@ -684,7 +702,7 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-0 flex-1 flex flex-col justify-start">
-              <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.depositWallet || 0)}</p>
+              <p className="text-3xl font-bold text-white">{showCurrency(wallet?.depositWallet)}</p>
               <p className="text-xs text-white/50 mt-1">Add funds for PIN Requests and P2P Transfers.</p>
             </CardContent>
           </Card>
@@ -697,7 +715,7 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-0 flex-1 flex flex-col justify-start">
-              <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.totalReceived || 0)}</p>
+              <p className="text-3xl font-bold text-white">{showCurrency(wallet?.totalReceived)}</p>
               <p className="text-xs text-white/50 mt-1">Lifetime earnings credited to your account</p>
             </CardContent>
           </Card>
@@ -710,7 +728,7 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-0 flex-1 flex flex-col justify-start">
-              <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.incomeWallet || 0)}</p>
+              <p className="text-3xl font-bold text-white">{showCurrency(wallet?.incomeWallet)}</p>
               <p className="text-xs text-white/50 mt-1">Available amount for withdrawal and P2P Transfers.</p>
             </CardContent>
           </Card>
@@ -733,7 +751,7 @@ export default function Dashboard() {
               </div>
             </CardHeader>
             <CardContent className="pt-0 flex-1 flex flex-col justify-start">
-              <p className="text-3xl font-bold text-white">{formatCurrency(wallet?.lockedIncomeWallet || 0)}</p>
+              <p className="text-3xl font-bold text-white">{showCurrency(wallet?.lockedIncomeWallet)}</p>
               <p className="text-xs text-white/50 mt-1">Level income locked until direct referral qualification</p>
             </CardContent>
           </Card>

@@ -8,7 +8,7 @@ function parseBooleanFlag(value: string | boolean | undefined, fallback: boolean
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
 }
 
-export const AUTH_MAINTENANCE_ENABLED = parseBooleanFlag(env.VITE_AUTH_MAINTENANCE_ENABLED, true);
+export const AUTH_MAINTENANCE_ENABLED = parseBooleanFlag(env.VITE_AUTH_MAINTENANCE_ENABLED, false);
 export const AUTH_MAINTENANCE_MESSAGE =
   (typeof env.VITE_AUTH_MAINTENANCE_MESSAGE === 'string' && env.VITE_AUTH_MAINTENANCE_MESSAGE.trim())
     ? env.VITE_AUTH_MAINTENANCE_MESSAGE.trim()

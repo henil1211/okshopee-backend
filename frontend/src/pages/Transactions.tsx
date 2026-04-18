@@ -1,7 +1,8 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 /* eslint-disable react-hooks/preserve-manual-memoization */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useAuthStore, useSyncRefreshKey } from '@/store';
+import { useRef } from 'react';
+import { useAuthStore, useWalletStore } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -18,7 +19,11 @@ import { toast } from 'sonner';
 export default function Transactions() {
   const navigate = useNavigate();
   const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
-  const syncKey = useSyncRefreshKey();
+  const liveTransactions = useWalletStore((state) => state.transactions);
+  const refreshTransactions = useWalletStore((state) => state.refreshTransactions);
+  const v2ReadHealthy = useWalletStore((state) => state.v2ReadHealthy);
+  const v2ReadError = useWalletStore((state) => state.v2ReadError);
+  const forceRefreshDoneForUserRef = useRef<string | null>(null);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [filterType, setFilterType] = useState<'all' | 'help' | 'direct_income' | 'royalty_income' | 'fund_transfer' | 'deposit' | 'withdrawal'>('all');
@@ -28,44 +33,58 @@ export default function Transactions() {
     if (!activeUser) return null;
     return Database.getUserByUserId(activeUser.userId) || Database.getUserById(activeUser.id) || activeUser;
   }, [impersonatedUser, user]);
+  const displayUserId = displayUser?.id || null;
 
   const loadTransactions = useCallback(async (options?: { forceRefresh?: boolean }) => {
-    if (!displayUser) return;
+    if (!displayUserId) return;
 
     if (options?.forceRefresh) {
       setIsRefreshing(true);
       try {
         await Database.hydrateFromServer({
-          strict: true,
+          strict: false,
           maxAttempts: 2,
           timeoutMs: 12000,
           retryDelayMs: 800,
           keys: Database.getTransactionFreshDataKeys()
         });
       } catch {
-        // Fall back to locally available data if remote refresh fails.
-      } finally {
-        setIsRefreshing(false);
+        // Best-effort pre-hydration to reduce delayed legacy-rows appearance.
       }
+      refreshTransactions(displayUserId);
+      // Fallback guard in case transaction list is unchanged and no state event is fired.
+      window.setTimeout(() => setIsRefreshing(false), 1500);
+      return;
     }
 
-    const userTransactions = Database.getUserTransactions(displayUser.id);
-    setTransactions(userTransactions);
-  }, [displayUser]);
+    refreshTransactions(displayUserId);
+  }, [displayUserId, refreshTransactions]);
+
+  useEffect(() => {
+    if (!displayUser) return;
+
+    const scoped = liveTransactions.filter((tx) => tx.userId === displayUser.id);
+    setTransactions(scoped);
+
+    if (isRefreshing) {
+      setIsRefreshing(false);
+    }
+  }, [liveTransactions, displayUser, isRefreshing]);
 
   useEffect(() => {
     if (!isAuthenticated) {
       navigate('/login');
       return;
     }
+    if (!displayUserId) return;
 
-    void loadTransactions();
-  }, [isAuthenticated, navigate, loadTransactions, syncKey]);
+    const forceRefreshRequired = forceRefreshDoneForUserRef.current !== displayUserId;
+    if (forceRefreshRequired) {
+      forceRefreshDoneForUserRef.current = displayUserId;
+    }
 
-  useEffect(() => {
-    if (!isAuthenticated || !displayUser) return;
-    void loadTransactions({ forceRefresh: true });
-  }, [isAuthenticated, displayUser?.id, loadTransactions]);
+    void loadTransactions({ forceRefresh: forceRefreshRequired });
+  }, [isAuthenticated, navigate, displayUserId, loadTransactions]);
 
   const handleLogout = () => {
     logout();
@@ -521,6 +540,14 @@ export default function Transactions() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        {!v2ReadHealthy && (
+          <div className="mb-4 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3">
+            <p className="text-sm text-rose-200 font-medium">Transaction history requires live sync, Wait Few Minutes and logout and login again if the sync is unavailable after few minutes.</p>
+            <p className="text-xs text-rose-200/90 mt-1">
+              {v2ReadError || 'Live sync is unavailable. Transaction list is hidden to avoid wrong entries.'}
+            </p>
+          </div>
+        )}
         <Card className="glass border-white/10">
           <CardHeader className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <CardTitle className="text-white">Transaction History</CardTitle>

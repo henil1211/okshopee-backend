@@ -69,6 +69,27 @@ function normalizeV2ApiErrorMessage(status: number, payload: Record<string, unkn
   return backendMessage || `${fallback} (HTTP ${status})`;
 }
 
+const V2_TRANSFER_SYNC_REQUIRED_MESSAGE = 'Live V2 sync is unavailable. Transfer data may be stale. Please refresh and try again.';
+
+function resolveV2BearerTokenOrError(subjectUser: User): { token: string } | { message: string } {
+  const savedAuthSession = Database.getV2AuthSession();
+  const signedAccessToken = String(savedAuthSession?.accessToken || '').trim();
+  if (signedAccessToken) {
+    return { token: signedAccessToken };
+  }
+
+  const legacyNote = String(savedAuthSession?.note || '').toLowerCase();
+  const legacyFallbackAllowed = legacyNote.includes('legacy bearer usercode compatibility remains enabled');
+  if (legacyFallbackAllowed) {
+    const legacyToken = String(subjectUser.userId || '').trim();
+    if (legacyToken) {
+      return { token: legacyToken };
+    }
+  }
+
+  return { message: 'V2 session is missing or expired. Please logout and login again.' };
+}
+
 function resolveV2RequestHeaders(params: {
   idempotencyKey: string;
   requestId: string;
@@ -82,11 +103,11 @@ function resolveV2RequestHeaders(params: {
     return { message: 'Authentication session expired. Please login again.' };
   }
 
-  const savedAuthSession = Database.getV2AuthSession();
-  const bearerToken = (savedAuthSession?.accessToken || '').trim() || String(subjectUser.userId || '').trim();
-  if (!bearerToken) {
-    return { message: 'Missing V2 auth token. Please login again.' };
+  const bearerTokenResult = resolveV2BearerTokenOrError(subjectUser);
+  if (!('token' in bearerTokenResult)) {
+    return { message: bearerTokenResult.message };
   }
+  const bearerToken = bearerTokenResult.token;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -116,11 +137,11 @@ function resolveV2ReadRequestHeaders(params: {
     return { message: 'Authentication session expired. Please login again.' };
   }
 
-  const savedAuthSession = Database.getV2AuthSession();
-  const bearerToken = (savedAuthSession?.accessToken || '').trim() || String(subjectUser.userId || '').trim();
-  if (!bearerToken) {
-    return { message: 'Missing V2 auth token. Please login again.' };
+  const bearerTokenResult = resolveV2BearerTokenOrError(subjectUser);
+  if (!('token' in bearerTokenResult)) {
+    return { message: bearerTokenResult.message };
   }
+  const bearerToken = bearerTokenResult.token;
 
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${bearerToken}`,
@@ -171,7 +192,10 @@ function mapV2ReadTypeToTransactionType(txType: unknown, walletType: unknown, si
   const normalizedTxType = String(txType || '').toLowerCase();
   const normalizedWalletType = String(walletType || '').toLowerCase();
 
-  if (normalizedTxType === 'fund_transfer') return 'p2p_transfer';
+  if (normalizedTxType === 'fund_transfer') {
+    if (normalizedWalletType === 'income' && signedAmountCents < 0) return 'income_transfer';
+    return 'p2p_transfer';
+  }
   if (normalizedTxType === 'withdrawal_debit') return 'withdrawal';
   if (normalizedTxType === 'pin_purchase') return 'pin_purchase';
   if (normalizedTxType === 'referral_credit') {
@@ -185,10 +209,137 @@ function mapV2ReadTypeToTransactionType(txType: unknown, walletType: unknown, si
   return signedAmountCents >= 0 ? 'admin_credit' : 'admin_debit';
 }
 
-async function fetchV2WalletAndTransactionsSnapshotForUser(user: User): Promise<{ wallet: Wallet; transactions: Transaction[] } | null> {
+function getTransactionTimestampForDisplayMerge(tx: Transaction): number {
+  const createdAtTs = new Date(String(tx.createdAt || '')).getTime();
+  if (Number.isFinite(createdAtTs) && createdAtTs > 0) return createdAtTs;
+  const completedAtTs = new Date(String(tx.completedAt || '')).getTime();
+  if (Number.isFinite(completedAtTs) && completedAtTs > 0) return completedAtTs;
+  return 0;
+}
+
+function resolveUserLabelFromCode(userCode: string): string {
+  const normalized = String(userCode || '').trim();
+  if (!normalized) return '';
+  const resolved = resolveCanonicalUserForWalletActions(normalized) || Database.getUserByUserId(normalized);
+  if (resolved?.fullName) {
+    return `${resolved.fullName} (${resolved.userId})`;
+  }
+  return normalized;
+}
+
+function rewriteDescriptionUserCodes(description: string): string {
+  return String(description || '').replace(/(?<!\()\b\d{7}\b(?!\))/g, (code) => {
+    const label = resolveUserLabelFromCode(code);
+    return label || code;
+  });
+}
+
+function buildV2DisplayDescription(params: {
+  txType: unknown;
+  walletType: unknown;
+  signedAmountCents: number;
+  rawDescription: string;
+  counterpartyUserCode: string;
+}): string {
+  const txType = String(params.txType || '').toLowerCase();
+  const walletType = String(params.walletType || '').toLowerCase();
+  const counterpartyUserCode = String(params.counterpartyUserCode || '').trim();
+  const counterpartyLabel = resolveUserLabelFromCode(counterpartyUserCode);
+  const normalizedRawDescription = String(params.rawDescription || '').trim();
+
+  if (txType === 'fund_transfer' && counterpartyLabel) {
+    const direction = params.signedAmountCents < 0 ? 'to' : 'from';
+    const walletLabel = walletType === 'income'
+      ? 'Income wallet'
+      : walletType === 'royalty'
+        ? 'Royalty wallet'
+        : 'Fund wallet';
+    return `${walletLabel} transfer ${direction} ${counterpartyLabel}`;
+  }
+
+  if (txType === 'referral_credit' && params.signedAmountCents >= 0 && counterpartyLabel) {
+    if (!normalizedRawDescription || /referral\s+income\s+from/i.test(normalizedRawDescription)) {
+      return `Referral income from ${counterpartyLabel}`;
+    }
+  }
+
+  if (normalizedRawDescription) {
+    return rewriteDescriptionUserCodes(normalizedRawDescription);
+  }
+
+  return String(params.txType || 'transaction').replace(/_/g, ' ');
+}
+
+function buildTransactionSemanticMergeKey(tx: Transaction): string {
+  const ts = getTransactionTimestampForDisplayMerge(tx);
+  const tsSecondBucket = ts > 0 ? Math.floor(ts / 1000) : 0;
+  const counterparty = String(tx.fromUserId || tx.toUserId || '').trim();
+  const amountCents = Math.round(Number(tx.amount || 0) * 100);
+  const normalizedDescription = String(tx.description || '')
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, '')
+    .replace(/\b\d{7}\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+
+  return [
+    String(tx.userId || '').trim(),
+    String(tx.type || '').trim(),
+    String(amountCents),
+    String(counterparty),
+    String(tsSecondBucket),
+    normalizedDescription
+  ].join('|');
+}
+
+function mergeTransactionsForDisplay(params: {
+  legacyTransactions: Transaction[];
+  v2Transactions: Transaction[];
+}): Transaction[] {
+  const merged: Transaction[] = [];
+  const seenIds = new Set<string>();
+  const seenSemanticKeys = new Set<string>();
+
+  const pushIfUnique = (tx: Transaction) => {
+    if (!tx || typeof tx !== 'object') return;
+    const id = String(tx.id || '').trim();
+    if (!id || seenIds.has(id)) return;
+
+    const semanticKey = buildTransactionSemanticMergeKey(tx);
+    if (semanticKey && seenSemanticKeys.has(semanticKey)) return;
+
+    seenIds.add(id);
+    if (semanticKey) {
+      seenSemanticKeys.add(semanticKey);
+    }
+    merged.push(tx);
+  };
+
+  for (const tx of params.v2Transactions) pushIfUnique(tx);
+  for (const tx of params.legacyTransactions) pushIfUnique(tx);
+
+  return merged.sort((left, right) => getTransactionTimestampForDisplayMerge(right) - getTransactionTimestampForDisplayMerge(left));
+}
+
+type V2WalletReadOptions = {
+  includeLegacyTransactions?: boolean;
+};
+
+type V2WalletReadResult = {
+  snapshot: { wallet: Wallet; transactions: Transaction[] } | null;
+  errorMessage: string | null;
+};
+
+async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
+  user: User,
+  options?: V2WalletReadOptions
+): Promise<V2WalletReadResult> {
   const userCode = String(user?.userId || '').trim();
   const internalUserId = String(user?.id || '').trim();
-  if (!userCode || !internalUserId) return null;
+  if (!userCode || !internalUserId) {
+    return { snapshot: null, errorMessage: 'V2 read skipped: user identity is incomplete.' };
+  }
 
   const requestId = generateClientRequestId('v2_wallet_read');
   const resolvedHeaders = resolveV2ReadRequestHeaders({
@@ -196,20 +347,66 @@ async function fetchV2WalletAndTransactionsSnapshotForUser(user: User): Promise<
     impersonationReason: 'wallet_read_refresh'
   });
   if (!('headers' in resolvedHeaders)) {
-    return null;
+    return {
+      snapshot: null,
+      errorMessage: resolvedHeaders.message || 'Live read failed: auth headers could not be prepared.'
+    };
   }
 
   const headers = resolvedHeaders.headers;
   const walletUrl = `${getBackendApiBase()}/api/v2/wallet?userCode=${encodeURIComponent(userCode)}`;
   const transactionsUrl = `${getBackendApiBase()}/api/v2/transactions?userCode=${encodeURIComponent(userCode)}&limit=200`;
 
-  const [walletResponse, transactionsResponse] = await Promise.all([
-    fetch(walletUrl, { method: 'GET', headers }),
-    fetch(transactionsUrl, { method: 'GET', headers })
-  ]);
+  let walletResponse: Response;
+  let transactionsResponse: Response;
+  try {
+    [walletResponse, transactionsResponse] = await Promise.all([
+      fetch(walletUrl, { method: 'GET', headers }),
+      fetch(transactionsUrl, { method: 'GET', headers })
+    ]);
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : 'Network request error';
+    const normalizedMessage = /failed to fetch|networkerror|load failed|fetch failed/i.test(rawMessage)
+      ? `Cannot reach. Wait few Minutes ${getBackendApiBase()}. Check internet, DNS, SSL, or CORS/proxy settings.`
+      : rawMessage;
+    return {
+      snapshot: null,
+      errorMessage: `Live read failed: ${normalizedMessage}`
+    };
+  }
 
   if (!walletResponse.ok || !transactionsResponse.ok) {
-    return null;
+    const walletPayload = await walletResponse.clone().json().catch(() => ({} as Record<string, unknown>));
+    const txPayload = await transactionsResponse.clone().json().catch(() => ({} as Record<string, unknown>));
+    const walletStatus = walletResponse?.status || 0;
+    const txStatus = transactionsResponse?.status || 0;
+    const walletCode = typeof walletPayload?.code === 'string' ? walletPayload.code : '';
+    const txCode = typeof txPayload?.code === 'string' ? txPayload.code : '';
+    const walletError = typeof walletPayload?.error === 'string' ? walletPayload.error : '';
+    const txError = typeof txPayload?.error === 'string' ? txPayload.error : '';
+    const authRejected = walletStatus === 401 || txStatus === 401;
+    if (authRejected) {
+      Database.setV2AuthSession(null);
+    }
+
+    const detailParts = [
+      walletError ? `wallet ${walletError}` : `wallet HTTP ${walletStatus}`,
+      txError ? `transactions ${txError}` : `transactions HTTP ${txStatus}`
+    ];
+
+    const codeParts = [walletCode, txCode].filter(Boolean).join(',');
+    if (authRejected) {
+      const suffix = codeParts ? ` (${codeParts})` : '';
+      return {
+        snapshot: null,
+        errorMessage: `V2 session rejected (HTTP 401). Please logout and login again.${suffix}`
+      };
+    }
+
+    return {
+      snapshot: null,
+      errorMessage: `Live read failed: ${detailParts.join(', ')}${codeParts ? ` (${codeParts})` : ''}.`
+    };
   }
 
   const walletPayload = await walletResponse.json().catch(() => ({} as Record<string, unknown>));
@@ -223,10 +420,16 @@ async function fetchV2WalletAndTransactionsSnapshotForUser(user: User): Promise<
     : [];
 
   if (!(walletPayload as { ok?: boolean })?.ok || !walletData || typeof walletData !== 'object') {
-    return null;
+    return {
+      snapshot: null,
+      errorMessage: 'Live read failed: wallet payload is invalid.'
+    };
   }
   if (!(transactionsPayload as { ok?: boolean })?.ok) {
-    return null;
+    return {
+      snapshot: null,
+      errorMessage: 'Live read failed: transactions payload is invalid.'
+    };
   }
 
   const existingWallet = Database.getWallet(internalUserId);
@@ -235,7 +438,7 @@ async function fetchV2WalletAndTransactionsSnapshotForUser(user: User): Promise<
   wallet.incomeWallet = Number(walletData.incomeCents || 0) / 100;
   wallet.royaltyWallet = Number(walletData.royaltyCents || 0) / 100;
 
-  const transactions = txRows.map((row, index) => {
+  const v2Transactions = txRows.map((row, index) => {
     const signedAmountCents = Number(row.signedAmountCents || 0);
     const counterpartyCode = String(row.counterpartyUserCode || '').trim();
     const counterpartyUser = counterpartyCode
@@ -250,7 +453,13 @@ async function fetchV2WalletAndTransactionsSnapshotForUser(user: User): Promise<
         : new Date().toISOString();
 
     const txType = mapV2ReadTypeToTransactionType(row.txType, row.walletType, signedAmountCents);
-    const fallbackDescription = `${String(row.txType || 'transaction').replace(/_/g, ' ')} (${String(row.walletType || 'wallet')})`;
+    const description = buildV2DisplayDescription({
+      txType: row.txType,
+      walletType: row.walletType,
+      signedAmountCents,
+      rawDescription: typeof row.description === 'string' ? row.description : '',
+      counterpartyUserCode: counterpartyUser?.userId || counterpartyCode
+    });
 
     return {
       id: `v2_${String(row.txUuid || 'txn')}_${String(row.id || index)}`,
@@ -260,13 +469,31 @@ async function fetchV2WalletAndTransactionsSnapshotForUser(user: User): Promise<
       ...(signedAmountCents >= 0 ? { fromUserId: counterpartyRef } : {}),
       ...(signedAmountCents < 0 ? { toUserId: counterpartyRef } : {}),
       status: mapV2ReadStatusToTransactionStatus(row.status),
-      description: typeof row.description === 'string' && row.description.trim() ? row.description : fallbackDescription,
+      description,
       createdAt,
       completedAt: mapV2ReadStatusToTransactionStatus(row.status) === 'completed' ? createdAt : undefined
     } satisfies Transaction;
   }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-  return { wallet, transactions };
+  const transactions = options?.includeLegacyTransactions === false
+    ? v2Transactions
+    : mergeTransactionsForDisplay({
+      legacyTransactions: Database.getUserTransactions(internalUserId),
+      v2Transactions
+    });
+
+  return {
+    snapshot: { wallet, transactions },
+    errorMessage: null
+  };
+}
+
+async function fetchV2WalletAndTransactionsSnapshotForUser(
+  user: User,
+  options?: V2WalletReadOptions
+): Promise<{ wallet: Wallet; transactions: Transaction[] } | null> {
+  const result = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(user, options);
+  return result.snapshot;
 }
 
 async function submitV2ReferralCreditBySourceRef(params: {
@@ -388,6 +615,516 @@ async function submitV2HelpEventBySourceRef(params: {
     message: idempotentReplay ? 'Help event already queued (idempotent replay).' : 'Help event queued.',
     idempotentReplay
   };
+}
+
+async function submitV2AdminAdjustment(params: {
+  targetUserCode: string;
+  approverUserCode: string;
+  walletType: 'fund' | 'income' | 'royalty';
+  direction: 'credit' | 'debit';
+  amountCents: number;
+  reasonCode: string;
+  ticketId: string;
+  note: string;
+  description?: string;
+}): Promise<{ success: boolean; message: string; code?: string; idempotentReplay?: boolean }> {
+  const authState = useAuthStore.getState();
+  const subjectUser = authState.user;
+  if (!subjectUser?.isAdmin) {
+    return { success: false, message: 'Only admin can submit V2 admin adjustments' };
+  }
+
+  const bearerTokenResult = resolveV2BearerTokenOrError(subjectUser);
+  if (!('token' in bearerTokenResult)) {
+    return { success: false, message: bearerTokenResult.message };
+  }
+
+  const idempotencyKey = generateClientIdempotencyKey();
+  const requestId = generateClientRequestId('admin_adjustment');
+
+  let response: Response;
+  try {
+    response = await fetch(`${getBackendApiBase()}/api/v2/admin/adjustments`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${bearerTokenResult.token}`,
+        'Idempotency-Key': idempotencyKey,
+        'X-System-Version': 'v2',
+        'X-Request-Id': requestId
+      },
+      body: JSON.stringify({
+        targetUserCode: params.targetUserCode,
+        approverUserCode: params.approverUserCode,
+        walletType: params.walletType,
+        direction: params.direction,
+        amountCents: params.amountCents,
+        reasonCode: params.reasonCode,
+        ticketId: params.ticketId,
+        note: params.note,
+        description: String(params.description || '').trim() || undefined
+      })
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Network request error';
+    return { success: false, message: `V2 admin adjustment failed: ${message}` };
+  }
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false) {
+    return {
+      success: false,
+      message: normalizeV2ApiErrorMessage(response.status, payload, 'V2 admin adjustment failed'),
+      code: typeof payload?.code === 'string' ? payload.code : undefined
+    };
+  }
+
+  return {
+    success: true,
+    message: 'V2 admin adjustment posted.',
+    idempotentReplay: typeof payload?.idempotentReplay === 'boolean' ? payload.idempotentReplay : false
+  };
+}
+
+const POST_REGISTRATION_RETRY_QUEUE_STORAGE_KEY = 'v2_post_registration_retry_queue';
+const POST_REGISTRATION_RETRY_BASE_DELAY_MS = 30_000;
+const POST_REGISTRATION_RETRY_MAX_DELAY_MS = 15 * 60 * 1000;
+const POST_REGISTRATION_RETRY_TIMER_MS = 30_000;
+const POST_REGISTRATION_RETRY_BATCH_SIZE = 6;
+
+type PendingReferralRetryTask = {
+  kind: 'referral_credit';
+  key: string;
+  createdAt: string;
+  attempts: number;
+  nextAttemptAt: number;
+  lastError: string | null;
+  payload: {
+    sourceUserCode: string;
+    beneficiaryUserCode: string;
+    amount: number;
+    sourceRef: string;
+    description?: string;
+  };
+};
+
+type PendingHelpRetryTask = {
+  kind: 'help_event';
+  key: string;
+  createdAt: string;
+  attempts: number;
+  nextAttemptAt: number;
+  lastError: string | null;
+  payload: {
+    sourceUserCode: string;
+    newMemberUserCode: string;
+    sourceRef: string;
+    description?: string;
+  };
+};
+
+type PendingPostRegistrationRetryTask = PendingReferralRetryTask | PendingHelpRetryTask;
+
+export type PostRegistrationRetryQueueStatus = {
+  pendingCount: number;
+  oldestPendingAgeMs: number | null;
+  oldestCreatedAt: string | null;
+  nextAttemptAt: string | null;
+  nextAttemptInMs: number | null;
+};
+
+let postRegistrationRetryQueueRunning = false;
+let postRegistrationRetryQueueBound = false;
+let postRegistrationRetryQueueTimer: ReturnType<typeof setInterval> | null = null;
+
+function buildPendingReferralRetryKey(payload: {
+  sourceUserCode: string;
+  beneficiaryUserCode: string;
+  sourceRef: string;
+}): string {
+  return `referral:${payload.sourceRef}:${payload.sourceUserCode}:${payload.beneficiaryUserCode}`;
+}
+
+function buildPendingHelpRetryKey(payload: {
+  sourceUserCode: string;
+  newMemberUserCode: string;
+  sourceRef: string;
+}): string {
+  return `help:${payload.sourceRef}:${payload.sourceUserCode}:${payload.newMemberUserCode}`;
+}
+
+function normalizePendingRetryTask(rawTask: unknown): PendingPostRegistrationRetryTask | null {
+  if (!rawTask || typeof rawTask !== 'object') return null;
+
+  const task = rawTask as Record<string, unknown>;
+  const kind = task.kind;
+  const payload = task.payload && typeof task.payload === 'object'
+    ? task.payload as Record<string, unknown>
+    : null;
+  if (!payload) return null;
+
+  const createdAt = typeof task.createdAt === 'string' && task.createdAt.trim()
+    ? task.createdAt.trim()
+    : new Date().toISOString();
+  const attemptsRaw = Number(task.attempts);
+  const attempts = Number.isFinite(attemptsRaw) && attemptsRaw >= 0 ? Math.trunc(attemptsRaw) : 0;
+  const nextAttemptAtRaw = Number(task.nextAttemptAt);
+  const nextAttemptAt = Number.isFinite(nextAttemptAtRaw) && nextAttemptAtRaw > 0
+    ? Math.trunc(nextAttemptAtRaw)
+    : Date.now();
+  const lastError = typeof task.lastError === 'string' && task.lastError.trim()
+    ? task.lastError.trim().slice(0, 280)
+    : null;
+
+  if (kind === 'referral_credit') {
+    const sourceUserCode = String(payload.sourceUserCode || '').trim();
+    const beneficiaryUserCode = String(payload.beneficiaryUserCode || '').trim();
+    const sourceRef = String(payload.sourceRef || '').trim();
+    const amount = Number(payload.amount || 0);
+    if (!sourceUserCode || !beneficiaryUserCode || !sourceRef || !(amount > 0)) {
+      return null;
+    }
+    const description = typeof payload.description === 'string' && payload.description.trim()
+      ? payload.description.trim()
+      : undefined;
+    const key = typeof task.key === 'string' && task.key.trim()
+      ? task.key.trim()
+      : buildPendingReferralRetryKey({ sourceUserCode, beneficiaryUserCode, sourceRef });
+    return {
+      kind,
+      key,
+      createdAt,
+      attempts,
+      nextAttemptAt,
+      lastError,
+      payload: {
+        sourceUserCode,
+        beneficiaryUserCode,
+        sourceRef,
+        amount,
+        description
+      }
+    };
+  }
+
+  if (kind === 'help_event') {
+    const sourceUserCode = String(payload.sourceUserCode || '').trim();
+    const newMemberUserCode = String(payload.newMemberUserCode || '').trim();
+    const sourceRef = String(payload.sourceRef || '').trim();
+    if (!sourceUserCode || !newMemberUserCode || !sourceRef) {
+      return null;
+    }
+    const description = typeof payload.description === 'string' && payload.description.trim()
+      ? payload.description.trim()
+      : undefined;
+    const key = typeof task.key === 'string' && task.key.trim()
+      ? task.key.trim()
+      : buildPendingHelpRetryKey({ sourceUserCode, newMemberUserCode, sourceRef });
+    return {
+      kind,
+      key,
+      createdAt,
+      attempts,
+      nextAttemptAt,
+      lastError,
+      payload: {
+        sourceUserCode,
+        newMemberUserCode,
+        sourceRef,
+        description
+      }
+    };
+  }
+
+  return null;
+}
+
+function readPendingPostRegistrationRetryTasks(): PendingPostRegistrationRetryTask[] {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return [];
+  }
+
+  try {
+    const raw = localStorage.getItem(POST_REGISTRATION_RETRY_QUEUE_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .map((item) => normalizePendingRetryTask(item))
+      .filter((item): item is PendingPostRegistrationRetryTask => !!item)
+      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt);
+  } catch {
+    return [];
+  }
+}
+
+function writePendingPostRegistrationRetryTasks(tasks: PendingPostRegistrationRetryTask[]): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return;
+  }
+
+  try {
+    if (tasks.length === 0) {
+      localStorage.removeItem(POST_REGISTRATION_RETRY_QUEUE_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(POST_REGISTRATION_RETRY_QUEUE_STORAGE_KEY, JSON.stringify(tasks.slice(0, 500)));
+  } catch {
+    // Best-effort persistence only.
+  }
+}
+
+function upsertPendingPostRegistrationRetryTask(task: PendingPostRegistrationRetryTask): void {
+  const tasks = readPendingPostRegistrationRetryTasks();
+  const existingIndex = tasks.findIndex((entry) => entry.key === task.key);
+  if (existingIndex >= 0) {
+    const existingTask = tasks[existingIndex];
+    tasks[existingIndex] = {
+      ...task,
+      createdAt: existingTask.createdAt,
+      attempts: existingTask.attempts,
+      nextAttemptAt: Math.min(existingTask.nextAttemptAt, task.nextAttemptAt)
+    };
+  } else {
+    tasks.push(task);
+  }
+  writePendingPostRegistrationRetryTasks(tasks);
+}
+
+function enqueuePendingReferralCreditRetry(payload: {
+  sourceUserCode: string;
+  beneficiaryUserCode: string;
+  amount: number;
+  sourceRef: string;
+  description?: string;
+}): void {
+  const sourceUserCode = String(payload.sourceUserCode || '').trim();
+  const beneficiaryUserCode = String(payload.beneficiaryUserCode || '').trim();
+  const sourceRef = String(payload.sourceRef || '').trim();
+  const amount = Number(payload.amount || 0);
+  if (!sourceUserCode || !beneficiaryUserCode || !sourceRef || !(amount > 0)) {
+    return;
+  }
+
+  upsertPendingPostRegistrationRetryTask({
+    kind: 'referral_credit',
+    key: buildPendingReferralRetryKey({ sourceUserCode, beneficiaryUserCode, sourceRef }),
+    createdAt: new Date().toISOString(),
+    attempts: 0,
+    nextAttemptAt: Date.now(),
+    lastError: null,
+    payload: {
+      sourceUserCode,
+      beneficiaryUserCode,
+      amount,
+      sourceRef,
+      description: payload.description
+    }
+  });
+}
+
+function enqueuePendingHelpEventRetry(payload: {
+  sourceUserCode: string;
+  newMemberUserCode: string;
+  sourceRef: string;
+  description?: string;
+}): void {
+  const sourceUserCode = String(payload.sourceUserCode || '').trim();
+  const newMemberUserCode = String(payload.newMemberUserCode || '').trim();
+  const sourceRef = String(payload.sourceRef || '').trim();
+  if (!sourceUserCode || !newMemberUserCode || !sourceRef) {
+    return;
+  }
+
+  upsertPendingPostRegistrationRetryTask({
+    kind: 'help_event',
+    key: buildPendingHelpRetryKey({ sourceUserCode, newMemberUserCode, sourceRef }),
+    createdAt: new Date().toISOString(),
+    attempts: 0,
+    nextAttemptAt: Date.now(),
+    lastError: null,
+    payload: {
+      sourceUserCode,
+      newMemberUserCode,
+      sourceRef,
+      description: payload.description
+    }
+  });
+}
+
+function computePostRegistrationRetryDelayMs(nextAttemptNo: number): number {
+  const exponent = Math.max(0, Math.min(8, nextAttemptNo - 1));
+  const backoff = POST_REGISTRATION_RETRY_BASE_DELAY_MS * (2 ** exponent);
+  return Math.min(POST_REGISTRATION_RETRY_MAX_DELAY_MS, backoff);
+}
+
+async function processPendingPostRegistrationRetryQueue(options?: {
+  force?: boolean;
+  maxItems?: number;
+}): Promise<void> {
+  if (postRegistrationRetryQueueRunning) return;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+  const tasks = readPendingPostRegistrationRetryTasks();
+  if (tasks.length === 0) return;
+
+  const now = Date.now();
+  const maxItemsRaw = Number(options?.maxItems || POST_REGISTRATION_RETRY_BATCH_SIZE);
+  const maxItems = Number.isFinite(maxItemsRaw)
+    ? Math.max(1, Math.min(50, Math.trunc(maxItemsRaw)))
+    : POST_REGISTRATION_RETRY_BATCH_SIZE;
+
+  const dueTasks = tasks
+    .filter((task) => options?.force || task.nextAttemptAt <= now)
+    .slice(0, maxItems);
+  if (dueTasks.length === 0) return;
+
+  postRegistrationRetryQueueRunning = true;
+  try {
+    const nextTasks = new Map(tasks.map((task) => [task.key, task]));
+
+    for (const dueTask of dueTasks) {
+      const current = nextTasks.get(dueTask.key);
+      if (!current) continue;
+
+      let result: { success: boolean; message: string };
+      try {
+        if (current.kind === 'referral_credit') {
+          result = await submitV2ReferralCreditBySourceRef({
+            sourceUserCode: current.payload.sourceUserCode,
+            beneficiaryUserCode: current.payload.beneficiaryUserCode,
+            amount: current.payload.amount,
+            sourceRef: current.payload.sourceRef,
+            eventType: 'direct_referral',
+            levelNo: 1,
+            description: current.payload.description
+          });
+        } else {
+          result = await submitV2HelpEventBySourceRef({
+            sourceUserCode: current.payload.sourceUserCode,
+            newMemberUserCode: current.payload.newMemberUserCode,
+            sourceRef: current.payload.sourceRef,
+            eventType: 'activation_join',
+            description: current.payload.description
+          });
+        }
+      } catch (error) {
+        result = {
+          success: false,
+          message: error instanceof Error ? error.message : 'Retry request failed'
+        };
+      }
+
+      if (result.success) {
+        nextTasks.delete(current.key);
+        continue;
+      }
+
+      const nextAttemptNo = current.attempts + 1;
+      nextTasks.set(current.key, {
+        ...current,
+        attempts: nextAttemptNo,
+        lastError: String(result.message || 'Unknown retry failure').slice(0, 280),
+        nextAttemptAt: Date.now() + computePostRegistrationRetryDelayMs(nextAttemptNo)
+      });
+    }
+
+    writePendingPostRegistrationRetryTasks(
+      Array.from(nextTasks.values()).sort((a, b) => a.nextAttemptAt - b.nextAttemptAt)
+    );
+  } finally {
+    postRegistrationRetryQueueRunning = false;
+  }
+}
+
+function bindPostRegistrationRetryQueue(): void {
+  if (postRegistrationRetryQueueBound) return;
+  postRegistrationRetryQueueBound = true;
+
+  if (postRegistrationRetryQueueTimer) {
+    clearInterval(postRegistrationRetryQueueTimer);
+    postRegistrationRetryQueueTimer = null;
+  }
+
+  postRegistrationRetryQueueTimer = setInterval(() => {
+    void processPendingPostRegistrationRetryQueue().catch(() => {
+      // Best-effort background retry only.
+    });
+  }, POST_REGISTRATION_RETRY_TIMER_MS);
+
+  if (readPendingPostRegistrationRetryTasks().length > 0) {
+    void processPendingPostRegistrationRetryQueue({ force: true, maxItems: 2 }).catch(() => {
+      // Best-effort background retry only.
+    });
+  }
+}
+
+function getPostRegistrationRetryQueueStatusSnapshot(): PostRegistrationRetryQueueStatus {
+  const tasks = readPendingPostRegistrationRetryTasks();
+  if (tasks.length === 0) {
+    return {
+      pendingCount: 0,
+      oldestPendingAgeMs: null,
+      oldestCreatedAt: null,
+      nextAttemptAt: null,
+      nextAttemptInMs: null
+    };
+  }
+
+  const now = Date.now();
+  const oldestTask = [...tasks].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())[0];
+  const nextAttemptTask = [...tasks].sort((a, b) => a.nextAttemptAt - b.nextAttemptAt)[0];
+  const oldestCreatedAtMs = new Date(oldestTask.createdAt).getTime();
+  const oldestPendingAgeMs = Number.isFinite(oldestCreatedAtMs)
+    ? Math.max(0, now - oldestCreatedAtMs)
+    : null;
+  const nextAttemptInMs = Number.isFinite(nextAttemptTask.nextAttemptAt)
+    ? Math.max(0, nextAttemptTask.nextAttemptAt - now)
+    : null;
+
+  return {
+    pendingCount: tasks.length,
+    oldestPendingAgeMs,
+    oldestCreatedAt: oldestTask.createdAt,
+    nextAttemptAt: new Date(nextAttemptTask.nextAttemptAt).toISOString(),
+    nextAttemptInMs
+  };
+}
+
+export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 15000): PostRegistrationRetryQueueStatus {
+  const [status, setStatus] = useState<PostRegistrationRetryQueueStatus>(() => getPostRegistrationRetryQueueStatusSnapshot());
+
+  useEffect(() => {
+    const updateStatus = () => {
+      setStatus(getPostRegistrationRetryQueueStatusSnapshot());
+    };
+
+    updateStatus();
+    const intervalMs = Number.isFinite(pollIntervalMs)
+      ? Math.max(5000, Math.min(60000, Math.trunc(pollIntervalMs)))
+      : 15000;
+    const intervalId = setInterval(updateStatus, intervalMs);
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        updateStatus();
+      }
+    };
+
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      clearInterval(intervalId);
+      if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
+  }, [pollIntervalMs]);
+
+  return status;
 }
 
 function resolveCanonicalUserForWalletActions(userRef: string): User | undefined {
@@ -690,6 +1427,24 @@ function evaluateUserAccess(user: User): { allowed: boolean; user: User; message
   return { allowed: true, user: resolvedUser };
 }
 
+function resolveActiveImpersonatedUser(adminUser: User | null): User | null {
+  if (!adminUser?.isAdmin) return null;
+
+  const sessions = Database.getImpersonationSessions();
+  const activeSession = sessions
+    .filter((session) => {
+      if (!session?.isActive) return false;
+      return session.adminId === adminUser.id || session.adminUserId === adminUser.userId;
+    })
+    .sort((left, right) => new Date(right.startedAt).getTime() - new Date(left.startedAt).getTime())[0];
+
+  if (!activeSession) return null;
+
+  return Database.getUserById(activeSession.targetUserId)
+    || Database.getUserByUserId(activeSession.targetUserId)
+    || null;
+}
+
 const initialAuthUser = (() => {
   const sessionUser = Database.getCurrentUser();
   if (!sessionUser) return null;
@@ -704,11 +1459,13 @@ const initialAuthUser = (() => {
   return access.user;
 })();
 
+const initialImpersonatedUser = resolveActiveImpersonatedUser(initialAuthUser);
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: initialAuthUser,
   isAuthenticated: !!initialAuthUser,
   isLoading: false,
-  impersonatedUser: null,
+  impersonatedUser: initialImpersonatedUser,
 
   login: async (userId: string, password: string) => {
     const normalizedUserId = String(userId || '').replace(/\D/g, '').slice(0, 7);
@@ -734,6 +1491,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
       Database.setCurrentUser(access.user);
       set({ user: Database.getCurrentUser() || access.user, isAuthenticated: true, impersonatedUser: null });
+      void processPendingPostRegistrationRetryQueue({ force: true }).catch(() => {
+        // Best-effort background retry only.
+      });
       void Database.hydrateFromServerBatches(Database.getStartupRemoteSyncBatches(), {
         strict: true,
         maxAttempts: 3,
@@ -793,6 +1553,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     Database.setV2AuthSession(null);
     Database.setCurrentUser(user);
     set({ user: Database.getCurrentUser() || user, isAuthenticated: true });
+    void processPendingPostRegistrationRetryQueue({ force: true }).catch(() => {
+      // Best-effort background retry only.
+    });
     // Load deferred data in background
     void Database.hydrateFromServerBatches(Database.getStartupDeferredRemoteSyncBatches(), {
       strict: false, maxAttempts: 3, timeoutMs: 60000, retryDelayMs: 2000,
@@ -863,6 +1626,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       isActive: true
     });
 
+    // Push impersonation session quickly so backend-authenticated v2 requests can honor it immediately.
+    try {
+      await Database.forceRemoteSyncKeysNow([DB_KEYS.IMPERSONATION], {
+        force: true,
+        timeoutMs: 15000,
+        maxAttempts: 2,
+        retryDelayMs: 600
+      });
+    } catch {
+      // Best-effort only. Local impersonation state remains active.
+    }
+
     set({ impersonatedUser: canonicalTargetUser });
     return { success: true, message: `Now logged in as ${canonicalTargetUser.fullName}` };
   },
@@ -871,6 +1646,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const adminUser = get().user;
     if (adminUser) {
       Database.endImpersonation(adminUser.id);
+      // Persist end-session quickly so background hydration does not re-introduce stale active sessions.
+      void Database.forceRemoteSyncKeysNow([DB_KEYS.IMPERSONATION], {
+        force: true,
+        timeoutMs: 15000,
+        maxAttempts: 2,
+        retryDelayMs: 600
+      }).catch(() => {
+        // Best-effort sync only.
+      });
     }
     set({ impersonatedUser: null });
   },
@@ -1229,7 +2013,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
 
       if (!referralResult.success) {
-        referralCreditWarning = `Referral credit is pending backend processing (${referralResult.message}).`;
+        enqueuePendingReferralCreditRetry({
+          sourceUserCode,
+          beneficiaryUserCode,
+          amount: 5,
+          sourceRef,
+          description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
+        });
+        referralCreditWarning = `Referral credit is queued for auto-retry (${referralResult.message}).`;
       }
     }
 
@@ -1276,7 +2067,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
 
       if (!helpEventResult.success) {
-        helpEventWarning = `Help event is pending backend processing (${helpEventResult.message}).`;
+        enqueuePendingHelpEventRetry({
+          sourceUserCode,
+          newMemberUserCode,
+          sourceRef,
+          description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+        });
+        helpEventWarning = `Help event is queued for auto-retry (${helpEventResult.message}).`;
       }
     }
 
@@ -1311,6 +2108,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const registrationMessage = warnings.length > 0
       ? `Registration successful. Your ID is: ${newUserId}. ${warnings.join(' ')}`
       : `Registration successful. Your ID is: ${newUserId}`;
+
+    void processPendingPostRegistrationRetryQueue({ force: true }).catch(() => {
+      // Best-effort background retry only.
+    });
+
     return { success: true, message: registrationMessage, userId: newUserId };
   },
 
@@ -1361,6 +2163,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       userChanged = true;
     }
 
+    const activeImpersonationUser = resolveActiveImpersonatedUser(nextUser);
+
     if (impersonatedUser) {
       // Admin impersonation must stay active even if target account is inactive/blocked.
       if (!nextUser.isAdmin) {
@@ -1370,7 +2174,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return { active: true };
       }
 
-      const resolvedImpersonatedUser = Database.getUserByUserId(impersonatedUser.userId)
+      const resolvedImpersonatedUser = activeImpersonationUser
+        || Database.getUserByUserId(impersonatedUser.userId)
         || Database.getUserById(impersonatedUser.id)
         || impersonatedUser;
 
@@ -1378,6 +2183,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         Database.setCurrentUser(nextUser);
         set({ user: nextUser, isAuthenticated: true, impersonatedUser: resolvedImpersonatedUser });
       }
+      void processPendingPostRegistrationRetryQueue({ maxItems: 3 }).catch(() => {
+        // Best-effort background retry only.
+      });
       return { active: true };
     }
 
@@ -1385,6 +2193,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       Database.setCurrentUser(nextUser);
       set({ user: nextUser, isAuthenticated: true });
     }
+
+    void processPendingPostRegistrationRetryQueue({ maxItems: 3 }).catch(() => {
+      // Best-effort background retry only.
+    });
 
     return { active: true };
   },
@@ -1416,7 +2228,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 interface WalletState {
   wallet: Wallet | null;
   transactions: Transaction[];
-  loadWallet: (userId: string) => void;
+  v2ReadHealthy: boolean;
+  v2ReadError: string | null;
+  loadWallet: (userId: string, options?: { v2Only?: boolean }) => void;
   transferFunds: (
     fromUserId: string,
     toUserId: string,
@@ -1434,15 +2248,18 @@ interface WalletState {
     walletAddress: string,
     payoutQrCode?: string
   ) => Promise<{ success: boolean; message: string }>;
-  refreshTransactions: (userId: string) => void;
+  refreshTransactions: (userId: string, options?: { v2Only?: boolean }) => void;
 }
 
 export const useWalletStore = create<WalletState>((set, get) => ({
   wallet: null,
   transactions: [],
+  v2ReadHealthy: false,
+  v2ReadError: null,
 
-  loadWallet: (userId: string) => {
+  loadWallet: (userId: string, options?: { v2Only?: boolean }) => {
     void (async () => {
+      const v2Only = !!options?.v2Only;
       const canonicalUser = resolveCanonicalUserForWalletActions(userId);
       const resolvedUser = canonicalUser
         || Database.getUserById(userId)
@@ -1450,11 +2267,34 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       const effectiveUserId = resolvedUser?.id || userId;
 
       if (resolvedUser) {
-        const v2Snapshot = await fetchV2WalletAndTransactionsSnapshotForUser(resolvedUser).catch(() => null);
-        if (v2Snapshot) {
-          set({ wallet: v2Snapshot.wallet, transactions: v2Snapshot.transactions });
+        const v2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(resolvedUser, {
+          includeLegacyTransactions: !v2Only
+        }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
+        if (v2Read.snapshot) {
+          set({
+            wallet: v2Read.snapshot.wallet,
+            transactions: v2Read.snapshot.transactions,
+            v2ReadHealthy: true,
+            v2ReadError: null
+          });
           return;
         }
+
+        if (v2Only) {
+          set({
+            v2ReadHealthy: false,
+            v2ReadError: v2Read.errorMessage || V2_TRANSFER_SYNC_REQUIRED_MESSAGE
+          });
+          return;
+        }
+      }
+
+      if (v2Only) {
+        set({
+          v2ReadHealthy: false,
+          v2ReadError: V2_TRANSFER_SYNC_REQUIRED_MESSAGE
+        });
+        return;
       }
 
       if (AUTO_WALLET_MAINTENANCE_ENABLED && resolvedUser && shouldRunWalletMaintenance(effectiveUserId)) {
@@ -1471,7 +2311,12 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       Database.checkDirectReferralDeadline(effectiveUserId);
       const wallet = Database.getWallet(effectiveUserId);
       const transactions = Database.getUserTransactions(effectiveUserId);
-      set({ wallet, transactions });
+      set({
+        wallet,
+        transactions,
+        v2ReadHealthy: false,
+        v2ReadError: 'Live V2 sync unavailable. Showing cached local data.'
+      });
     })();
   },
 
@@ -1499,23 +2344,40 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
     const canonicalSender = resolveCanonicalUserForWalletActions(fromUserId);
     const effectiveFromUserId = canonicalSender?.id || fromUserId;
-    const fromWallet = Database.getWallet(effectiveFromUserId);
-    const inMemoryWallet = get().wallet;
-    const liveFundWallet = inMemoryWallet && inMemoryWallet.userId === effectiveFromUserId
-      ? inMemoryWallet
-      : fromWallet;
     const fromUser = canonicalSender || Database.getUserById(effectiveFromUserId);
 
-    if (!liveFundWallet || !fromUser) {
+    if (!fromUser) {
       return { success: false, message: 'Sender wallet not found' };
     }
 
-    const normalizedTarget = (toUserId || '').trim();
-
-    if (sourceWallet !== 'fund') {
+    const strictV2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(fromUser, {
+      includeLegacyTransactions: false
+    }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
+    if (!strictV2Read.snapshot) {
+      set({
+        v2ReadHealthy: false,
+        v2ReadError: strictV2Read.errorMessage || V2_TRANSFER_SYNC_REQUIRED_MESSAGE
+      });
       return {
         success: false,
-        message: 'This transfer source is temporarily disabled until V2 endpoint migration is completed. Use Fund Wallet transfer.'
+        message: strictV2Read.errorMessage || V2_TRANSFER_SYNC_REQUIRED_MESSAGE
+      };
+    }
+    const strictSnapshot = strictV2Read.snapshot;
+
+    set({
+      wallet: strictSnapshot.wallet,
+      transactions: strictSnapshot.transactions,
+      v2ReadHealthy: true,
+      v2ReadError: null
+    });
+
+    const normalizedTarget = (toUserId || '').trim();
+
+    if (sourceWallet !== 'fund' && sourceWallet !== 'income') {
+      return {
+        success: false,
+        message: 'This transfer source is not supported for member transfers.'
       };
     }
 
@@ -1524,6 +2386,10 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         success: false,
         message: 'Fund Wallet transfer currently supports destination wallet as fund only in V2.'
       };
+    }
+
+    if (!normalizedTarget) {
+      return { success: false, message: 'Recipient User ID is required' };
     }
 
     const rawTargetUserForV2 = Database.getUserByUserId(normalizedTarget);
@@ -1542,8 +2408,16 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       return { success: false, message: 'Transfer allowed only to upline or downline' };
     }
 
-    if (liveFundWallet.depositWallet < amount) {
-      return { success: false, message: 'Insufficient fund wallet balance' };
+    const sourceWalletBalance = sourceWallet === 'income'
+      ? Number(strictSnapshot.wallet.incomeWallet || 0)
+      : Number(strictSnapshot.wallet.depositWallet || 0);
+    if (sourceWalletBalance < amount) {
+      return {
+        success: false,
+        message: sourceWallet === 'income'
+          ? 'Insufficient income wallet balance'
+          : 'Insufficient fund wallet balance'
+      };
     }
 
     const txPasswordForV2 = (security?.transactionPassword || '').trim();
@@ -1579,9 +2453,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       body: JSON.stringify({
         senderUserCode: fromUser.userId,
         receiverUserCode: toUserForV2.userId,
+        sourceWallet,
+        destinationWallet,
         amountCents,
         referenceId: `ui_fund_transfer_${requestId}`,
-        description: `Fund wallet transfer from ${fromUser.userId} to ${toUserForV2.userId}`
+        description: `${sourceWallet === 'income' ? 'Income' : 'Fund'} wallet transfer from ${fromUser.userId} to ${toUserForV2.userId}`
       })
     });
 
@@ -1591,29 +2467,26 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       return { success: false, message: errorMessage };
     }
 
-    const refreshedSnapshot = await fetchV2WalletAndTransactionsSnapshotForUser(fromUser).catch(() => null);
-    if (refreshedSnapshot) {
+    const refreshedV2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(fromUser, {
+      includeLegacyTransactions: false
+    }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
+    if (refreshedV2Read.snapshot) {
       set({
-        wallet: refreshedSnapshot.wallet,
-        transactions: refreshedSnapshot.transactions
+        wallet: refreshedV2Read.snapshot.wallet,
+        transactions: refreshedV2Read.snapshot.transactions,
+        v2ReadHealthy: true,
+        v2ReadError: null
       });
     } else {
-      try {
-        await Database.hydrateFromServer({
-          keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
-          strict: true,
-          maxAttempts: 3,
-          timeoutMs: 20000,
-          retryDelayMs: 1000
-        });
-      } catch {
-        // Best-effort fallback refresh.
-      }
-
       set({
-        wallet: Database.getWallet(effectiveFromUserId),
-        transactions: Database.getUserTransactions(effectiveFromUserId)
+        v2ReadHealthy: false,
+        v2ReadError: refreshedV2Read.errorMessage || V2_TRANSFER_SYNC_REQUIRED_MESSAGE
       });
+
+      return {
+        success: true,
+        message: 'Transfer successful, but latest V2 sync failed. Please refresh to confirm updated balances.'
+      };
     }
 
     return {
@@ -1747,23 +2620,61 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
   },
 
-  refreshTransactions: (userId: string) => {
+  refreshTransactions: (userId: string, options?: { v2Only?: boolean }) => {
     void (async () => {
+      const v2Only = !!options?.v2Only;
       const canonicalUser = resolveCanonicalUserForWalletActions(userId);
       const resolvedUser = canonicalUser
         || Database.getUserById(userId)
         || Database.getUserByUserId(userId);
 
       if (resolvedUser) {
-        const v2Snapshot = await fetchV2WalletAndTransactionsSnapshotForUser(resolvedUser).catch(() => null);
-        if (v2Snapshot) {
-          set({ wallet: v2Snapshot.wallet, transactions: v2Snapshot.transactions });
+        const v2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(resolvedUser, {
+          includeLegacyTransactions: !v2Only
+        }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
+        if (v2Read.snapshot) {
+          set({
+            wallet: v2Read.snapshot.wallet,
+            transactions: v2Read.snapshot.transactions,
+            v2ReadHealthy: true,
+            v2ReadError: null
+          });
           return;
         }
+
+        if (v2Only) {
+          set({
+            transactions: [],
+            v2ReadHealthy: false,
+            v2ReadError: v2Read.errorMessage || V2_TRANSFER_SYNC_REQUIRED_MESSAGE
+          });
+          return;
+        }
+
+        const transactions = Database.getUserTransactions(userId);
+        set({
+          transactions,
+          v2ReadHealthy: false,
+          v2ReadError: v2Read.errorMessage || 'Live V2 sync unavailable. Showing cached local transactions.'
+        });
+        return;
+      }
+
+      if (v2Only) {
+        set({
+          transactions: [],
+          v2ReadHealthy: false,
+          v2ReadError: V2_TRANSFER_SYNC_REQUIRED_MESSAGE
+        });
+        return;
       }
 
       const transactions = Database.getUserTransactions(userId);
-      set({ transactions });
+      set({
+        transactions,
+        v2ReadHealthy: false,
+        v2ReadError: 'Live V2 sync unavailable. Showing cached local transactions.'
+      });
     })();
   }
 }));
@@ -2541,67 +3452,44 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const walletActionLabel = walletType === 'royalty'
       ? 'Royalty payout'
       : `${walletType === 'deposit' ? 'Deposit' : 'Income'} wallet transfer`;
-    const txDescription = walletType === 'royalty'
-      ? (trimmedNote || 'Royalty credited by admin')
-      : `Admin transfer to ${walletLabel}${trimmedNote ? `: ${trimmedNote}` : ''}`;
     const poolReason = `${walletActionLabel}: ${user.fullName} (${user.userId})${trimmedNote ? ` - ${trimmedNote}` : ''}`;
+    const walletTypeForV2: 'fund' | 'income' | 'royalty' = walletType === 'deposit' ? 'fund' : walletType;
+    const amountCents = Math.trunc(normalizedAmount * 100);
+    const adjustmentNote = trimmedNote || `Safety pool ${walletTypeForV2} credit to ${user.userId}`;
 
-    await Database.runWithLocalStateTransaction(async () => {
-      Database.deductFromSafetyPool(normalizedAmount, adminUser.id, poolReason);
+    const v2Adjustment = await submitV2AdminAdjustment({
+      targetUserCode: user.userId,
+      approverUserCode: adminUser.userId,
+      walletType: walletTypeForV2,
+      direction: 'credit',
+      amountCents,
+      reasonCode: walletTypeForV2 === 'royalty' ? 'SAFETY_POOL_ROYALTY' : 'SAFETY_POOL_CREDIT',
+      ticketId: `SP_${Date.now()}_${user.userId}`.slice(0, 80),
+      note: adjustmentNote,
+      description: `Safety pool credit to ${user.userId} (${walletTypeForV2})`
+    });
 
-      if (walletType === 'royalty') {
-        Database.updateWallet(user.id, {
-          royaltyWallet: (wallet.royaltyWallet || 0) + normalizedAmount,
-          totalReceived: (wallet.totalReceived || 0) + normalizedAmount
-        });
+    if (!v2Adjustment.success) {
+      return { success: false, message: v2Adjustment.message };
+    }
 
-        Database.createTransaction({
-          id: `tx_${Date.now()}_admin`,
-          userId: user.id,
-          type: 'royalty_income',
-          amount: normalizedAmount,
-          status: 'completed',
-          description: txDescription,
-          createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          ...(trimmedNote ? { adminReason: trimmedNote } : {}),
-          processedByAdminUserId: adminUser.id
-        });
+    // In v2 mode, keep safety-pool state in snapshot storage, but post wallet balance changes via v2 ledger API.
+    Database.deductFromSafetyPool(normalizedAmount, adminUser.id, poolReason);
+    await Database.forceRemoteSyncKeysNow([DB_KEYS.SAFETY_POOL], {
+      force: true,
+      timeoutMs: 30000,
+      maxAttempts: 3,
+      retryDelayMs: 1500
+    }).catch(() => false);
 
-        return;
-      }
-
-      if (walletType === 'deposit') {
-        Database.updateWallet(user.id, {
-          depositWallet: wallet.depositWallet + normalizedAmount
-        });
-      } else {
-        Database.updateWallet(user.id, {
-          incomeWallet: wallet.incomeWallet + normalizedAmount
-        });
-      }
-
-      Database.createTransaction({
-        id: `tx_${Date.now()}_admin`,
-        userId: user.id,
-        type: 'admin_credit',
-        amount: normalizedAmount,
-        status: 'completed',
-        description: txDescription,
-        createdAt: new Date().toISOString(),
-        completedAt: new Date().toISOString(),
-        ...(trimmedNote ? { adminReason: trimmedNote } : {}),
-        processedByAdminUserId: adminUser.id
-      });
-    }, {
-      syncOnCommit: true,
-      syncOptions: {
-        full: false,
-        force: true,
-        timeoutMs: 30000,
-        maxAttempts: 3,
-        retryDelayMs: 1500
-      }
+    await Database.hydrateFromServer({
+      keys: [DB_KEYS.SAFETY_POOL],
+      strict: false,
+      maxAttempts: 2,
+      timeoutMs: 12000,
+      retryDelayMs: 800
+    }).catch(() => {
+      // Best-effort refresh only.
     });
 
     if (walletType !== 'royalty') {
@@ -2894,9 +3782,16 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         });
 
         if (!result.success) {
+          enqueuePendingReferralCreditRetry({
+            sourceUserCode: credit.sourceUserCode,
+            beneficiaryUserCode: credit.beneficiaryUserCode,
+            amount: credit.amount,
+            sourceRef: credit.sourceRef,
+            description: credit.description
+          });
           failedCount += 1;
           if (failedDetails.length < 10) {
-            failedDetails.push(`${credit.sourceUserCode} -> ${credit.beneficiaryUserCode}: ${result.message}`);
+            failedDetails.push(`${credit.sourceUserCode} -> ${credit.beneficiaryUserCode}: ${result.message} (queued for auto-retry)`);
           }
         }
 
@@ -2934,9 +3829,15 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         });
 
         if (!result.success) {
+          enqueuePendingHelpEventRetry({
+            sourceUserCode: event.sourceUserCode,
+            newMemberUserCode: event.newMemberUserCode,
+            sourceRef: event.sourceRef,
+            description: event.description
+          });
           failedCount += 1;
           if (failedDetails.length < 10) {
-            failedDetails.push(`${event.sourceUserCode}: ${result.message}`);
+            failedDetails.push(`${event.sourceUserCode}: ${result.message} (queued for auto-retry)`);
           }
         }
 
@@ -3573,3 +4474,4 @@ function bindLockedIncomeAutoRelease(): void {
 }
 
 bindLockedIncomeAutoRelease();
+bindPostRegistrationRetryQueue();

@@ -142,7 +142,6 @@ const DB_KEYS_SET = new Set(DB_KEYS);
 const LEGACY_FINANCIAL_STATE_KEYS = new Set([
   'mlm_wallets',
   'mlm_transactions',
-  'mlm_safety_pool',
   'mlm_payments',
   'mlm_pins',
   'mlm_pin_transfers',
@@ -174,7 +173,7 @@ const V2_HELP_EXPENSE_ACCOUNT_CODE = 'SYS_HELP_EXPENSE';
 const V2_HELP_SETTLEMENT_ACCOUNT_CODE = 'SYS_CASH_OR_SETTLEMENT';
 const V2_HELP_SAFETY_POOL_ACCOUNT_CODE = 'SYS_HELP_SAFETY_POOL';
 const V2_FUND_TRANSFER_MAX_PROGRESS_UPDATES = 2;
-const V2_ADMIN_ADJUSTMENT_ENABLED = process.env.V2_ADMIN_ADJUSTMENT_ENABLED === 'true';
+const V2_ADMIN_ADJUSTMENT_ENABLED = process.env.V2_ADMIN_ADJUSTMENT_ENABLED !== 'false';
 const V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS = new Set(
   String(process.env.V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS || '')
     .split(',')
@@ -228,6 +227,7 @@ const V2_STATE_WRITE_ALLOWLIST_USER = new Set([
 ]);
 const V2_STATE_WRITE_ALLOWLIST_ADMIN = new Set([
   'mlm_users',
+  'mlm_safety_pool',
   'mlm_matrix',
   'mlm_grace_periods',
   'mlm_reentries',
@@ -4638,11 +4638,7 @@ async function processV2AdminAdjustment({
     throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
   }
 
-  if (V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.size === 0) {
-    throw createApiError(503, 'V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS policy is not configured', 'ADMIN_ADJUSTMENT_POLICY_MISSING');
-  }
-
-  if (!V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.has(actorUserCode)) {
+  if (V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.size > 0 && !V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.has(actorUserCode)) {
     throw createApiError(403, 'Actor is not allowed to perform admin adjustments', 'ACTOR_NOT_ALLOWED');
   }
 
@@ -4760,7 +4756,7 @@ async function processV2AdminAdjustment({
     if (targetUser.status !== 'active' || approverUser.status !== 'active') {
       throw createApiError(403, 'Target or approver user is not active', 'USER_NOT_ACTIVE');
     }
-    if (!V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.has(approverUserCode)) {
+    if (V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.size > 0 && !V2_ADMIN_ADJUSTMENT_ALLOWED_ACTORS.has(approverUserCode)) {
       throw createApiError(403, 'Approver user is not allowed by admin adjustment policy', 'APPROVER_NOT_ALLOWED');
     }
 

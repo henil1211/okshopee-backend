@@ -16,7 +16,7 @@ import { toast } from 'sonner';
 export default function FundTransfer() {
   const navigate = useNavigate();
   const { user, impersonatedUser, isAuthenticated, logout } = useAuthStore();
-  const { wallet, loadWallet, transferFunds } = useWalletStore();
+  const { wallet, loadWallet, transferFunds, v2ReadHealthy, v2ReadError } = useWalletStore();
   const { sendOtp } = useOtpStore();
   const syncKey = useSyncRefreshKey();
   const displayUser = impersonatedUser || user;
@@ -36,7 +36,7 @@ export default function FundTransfer() {
   const [recipientName, setRecipientName] = useState('');
 
   const isRoyaltyTransfer = transferData.source === 'royalty';
-  const isExternalTransfer = transferData.source === 'fund' || (transferData.source === 'income' && transferData.userId.trim().length > 0);
+  const isExternalTransfer = transferData.source !== 'royalty';
   const topWalletLabel = transferData.source === 'income'
     ? 'Income Wallet'
     : transferData.source === 'royalty'
@@ -54,7 +54,7 @@ export default function FundTransfer() {
       return;
     }
     if (!displayUser) return;
-    loadWallet(displayUser.id);
+    loadWallet(displayUser.id, { v2Only: true });
   }, [isAuthenticated, displayUser, navigate, loadWallet, syncKey]);
 
   useEffect(() => {
@@ -83,6 +83,10 @@ export default function FundTransfer() {
 
   const handleSendTransferOtp = async () => {
     if (!displayUser) return;
+    if (!v2ReadHealthy) {
+      toast.error(v2ReadError || 'Live V2 sync is unavailable. Please refresh and try again.');
+      return;
+    }
     setIsSendingTransferOtp(true);
     const result = await sendOtp(displayUser.id, displayUser.email, 'transaction');
     setIsSendingTransferOtp(false);
@@ -100,6 +104,10 @@ export default function FundTransfer() {
 
   const handleTransfer = async () => {
     if (!displayUser) return;
+    if (!v2ReadHealthy) {
+      toast.error(v2ReadError || 'Live V2 sync is unavailable. Please refresh and try again.');
+      return;
+    }
     const amount = parseFloat(transferData.amount);
     if (!Number.isFinite(amount) || amount <= 0) {
       toast.error('Please enter a valid amount');
@@ -128,7 +136,7 @@ export default function FundTransfer() {
     }
 
     toast.success(result.message);
-    loadWallet(displayUser.id);
+    loadWallet(displayUser.id, { v2Only: true });
     setTransferData({ userId: '', amount: '', source: transferData.source, destination: transferData.destination });
     resetTransferSecurity();
   };
@@ -139,9 +147,7 @@ export default function FundTransfer() {
   const recipientResolved = transferData.userId.trim().length === 7 && !!recipientName;
   const recipientIsInvalid = isRoyaltyTransfer
     ? false
-    : transferData.source === 'income'
-    ? (hasRecipientId && !recipientResolved)
-    : !recipientResolved;
+    : !hasRecipientId || !recipientResolved;
 
   return (
     <div className="fund-transfer-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
@@ -198,10 +204,18 @@ export default function FundTransfer() {
               Transfer details
             </CardTitle>
             <p className="text-sm text-white/60">
-              Transfer from fund wallet to chain members, from income wallet to your fund wallet / chain members, or from royalty wallet to your own income or fund wallet.
+              Transfer from fund wallet or income wallet to chain members, or from royalty wallet to your own income or fund wallet.
             </p>
           </CardHeader>
           <CardContent className="space-y-5 py-6">
+            {!v2ReadHealthy && (
+              <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-3">
+                <p className="text-sm text-rose-200 font-medium">Live V2 sync required for transfers</p>
+                <p className="text-xs text-rose-200/90 mt-1">
+                  {v2ReadError || 'Live V2 sync is unavailable. Transfer action is blocked to prevent stale balances.'}
+                </p>
+              </div>
+            )}
             <div className="space-y-2">
               <Label className="text-white/80">Transfer From</Label>
               <select
@@ -242,7 +256,7 @@ export default function FundTransfer() {
               <div className="space-y-2">
                 <Label className="text-white/80">
                   Recipient User ID
-                  {transferData.source === 'income' ? ' (optional)' : ' (7 digits)'}
+                  {' (7 digits)'}
                 </Label>
                 <Input
                   value={transferData.userId}
@@ -251,15 +265,11 @@ export default function FundTransfer() {
                     setTransferData({ ...transferData, userId: value });
                   }}
                   maxLength={7}
-                  placeholder={transferData.source === 'income'
-                    ? 'Leave blank for your own fund wallet'
-                    : 'Enter 7-digit ID'}
+                  placeholder="Enter 7-digit ID"
                   className="bg-[#1f2937] border-white/10 text-white"
                 />
                 <p className="text-xs text-white/50">
-                  {transferData.source === 'income'
-                    ? 'Blank recipient transfers to your own fund wallet. For member transfer, only upline/downline IDs are allowed.'
-                    : 'Only upline/downline IDs are allowed.'}
+                  Only upline/downline IDs are allowed.
                 </p>
                 {recipientName && (
                   <p className="text-xs text-emerald-400">Recipient: {recipientName}</p>
@@ -323,7 +333,7 @@ export default function FundTransfer() {
                       type="button"
                       variant="outline"
                       onClick={handleSendTransferOtp}
-                      disabled={isSendingTransferOtp || isTransferOtpSent}
+                      disabled={isSendingTransferOtp || isTransferOtpSent || !v2ReadHealthy}
                       className="border-white/20 text-white hover:bg-white/10 whitespace-nowrap"
                     >
                       {isSendingTransferOtp ? <RefreshCw className="w-4 h-4 animate-spin" /> : isTransferOtpSent ? 'OTP Sent' : 'Send OTP'}
@@ -355,7 +365,7 @@ export default function FundTransfer() {
               </Button>
               <Button
                 onClick={handleTransfer}
-                disabled={isLoading || recipientIsInvalid || (isExternalTransfer && (!transferTransactionPassword.trim() || !transferOtp.trim()))}
+                disabled={isLoading || !v2ReadHealthy || recipientIsInvalid || (isExternalTransfer && (!transferTransactionPassword.trim() || !transferOtp.trim()))}
                 className="flex-1 btn-primary"
               >
                 {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Transfer'}

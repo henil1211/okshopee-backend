@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback, type ChangeEvent } from 'react';
-import { useAuthStore, useAdminStore } from '@/store';
+import { useAuthStore, useAdminStore, usePostRegistrationRetryQueueStatus } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -1236,9 +1236,24 @@ export default function Admin() {
   const [deleteAllIdsAdminId, setDeleteAllIdsAdminId] = useState('');
   const [isDeletingAllIds, setIsDeletingAllIds] = useState(false);
   const adminBootstrapUserRef = useRef<string | null>(null);
+  const retryQueueStatus = usePostRegistrationRetryQueueStatus(15000);
   const deleteAllIdsArmed =
     deleteAllIdsPhrase.trim().toUpperCase() === DELETE_ALL_IDS_PHRASE
     && deleteAllIdsAdminId.trim() === (user?.userId || '');
+
+  const formatAgeLabel = useCallback((ageMs: number | null): string => {
+    if (ageMs == null) return '-';
+    const totalSeconds = Math.max(0, Math.floor(ageMs / 1000));
+    if (totalSeconds < 60) return `${totalSeconds}s`;
+    const totalMinutes = Math.floor(totalSeconds / 60);
+    if (totalMinutes < 60) return `${totalMinutes}m`;
+    const totalHours = Math.floor(totalMinutes / 60);
+    const remMinutes = totalMinutes % 60;
+    if (totalHours < 24) return remMinutes > 0 ? `${totalHours}h ${remMinutes}m` : `${totalHours}h`;
+    const totalDays = Math.floor(totalHours / 24);
+    const remHours = totalHours % 24;
+    return remHours > 0 ? `${totalDays}d ${remHours}h` : `${totalDays}d`;
+  }, []);
 
   const helpFlowDebugEntries = searchedUser
     ? Database.getHelpFlowDebugForUser(searchedUser.id, helpFlowView, 50 + helpFlowDebugTick * 0)
@@ -5110,6 +5125,26 @@ export default function Admin() {
                 <div>
                   <p className="text-sm text-white/60">Balance Amount Remaining</p>
                   <p className="text-xl sm:text-2xl font-bold text-white">{formatCurrency(stats?.balanceAmountRemaining || 0)}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="glass border-white/10">
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center">
+                  <Clock className="w-5 h-5 text-amber-300" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm text-white/60">Retry Queue</p>
+                    <Badge className={retryQueueStatus.pendingCount > 0 ? 'bg-amber-500/20 text-amber-300 border-amber-400/30' : 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'}>
+                      {retryQueueStatus.pendingCount > 0 ? 'Pending' : 'Clear'}
+                    </Badge>
+                  </div>
+                  <p className="text-xl sm:text-2xl font-bold text-white">{formatNumber(retryQueueStatus.pendingCount)}</p>
+                  <p className="text-xs text-white/60 truncate">Oldest pending: {formatAgeLabel(retryQueueStatus.oldestPendingAgeMs)}</p>
                 </div>
               </div>
             </CardContent>
