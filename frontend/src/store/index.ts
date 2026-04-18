@@ -3914,18 +3914,15 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Admin account cannot be blocked' };
     }
 
-    const result = Database.blockUser(targetUser.id, type, hours, reason);
-    if (!result) {
-      return { success: false, message: 'Failed to block user' };
-    }
-
-    get().loadAllUsers();
     try {
-      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
-      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      const result = await Database.commitCriticalAction(() => Database.blockUser(targetUser.id, type, hours, reason));
+      if (!result) {
+        return { success: false, message: 'Failed to block user' };
+      }
       get().loadAllUsers();
-    } catch {
-      // best-effort sync
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to persist block user action';
+      return { success: false, message };
     }
     return {
       success: true,
@@ -3948,18 +3945,15 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'User not found' };
     }
 
-    const result = Database.unblockUser(targetUser.id);
-    if (!result) {
-      return { success: false, message: 'Failed to unblock user' };
-    }
-
-    get().loadAllUsers();
     try {
-      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
-      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      const result = await Database.commitCriticalAction(() => Database.unblockUser(targetUser.id));
+      if (!result) {
+        return { success: false, message: 'Failed to unblock user' };
+      }
       get().loadAllUsers();
-    } catch {
-      // best-effort sync
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to persist unblock user action';
+      return { success: false, message };
     }
     return { success: true, message: 'User unblocked successfully' };
   },
@@ -3981,18 +3975,15 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'User was not auto-deactivated for direct referral deadline' };
     }
 
-    const result = Database.reactivateUser(targetUser.id);
-    if (!result) {
-      return { success: false, message: 'Failed to reactivate user' };
-    }
-
-    get().loadAllUsers();
     try {
-      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
-      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      const result = await Database.commitCriticalAction(() => Database.reactivateUser(targetUser.id));
+      if (!result) {
+        return { success: false, message: 'Failed to reactivate user' };
+      }
       get().loadAllUsers();
-    } catch {
-      // best-effort sync
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to persist reactivation';
+      return { success: false, message };
     }
     return { success: true, message: `User ${targetUserId} reactivated. 30-day deadline restarted.` };
   },
@@ -4547,7 +4538,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           deferredHelpEvents.push({
             sourceUserCode: newUser.userId,
             newMemberUserCode: newUser.userId,
-            sourceRef: `bulk_help_${newUser.userId}`,
+            sourceRef: `reg_help_${newUser.userId}_${newUser.userId}`,
             description: `Activation help event for ${newUser.fullName} (${newUser.userId})`
           });
 

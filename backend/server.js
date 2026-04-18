@@ -3448,6 +3448,9 @@ async function processV2Registration({
       const placement = sponsorUser
         ? findLegacyNextMatrixPlacementForRegistration(matrix, sponsorUser.userId)
         : null;
+      if (sponsorUser && !placement) {
+        throw createApiError(409, 'Sponsor matrix placement is unavailable', 'SPONSOR_PLACEMENT_UNAVAILABLE');
+      }
 
       parentUserCode = placement?.parentId || null;
       position = placement?.position || null;
@@ -3480,6 +3483,9 @@ async function processV2Registration({
         sponsorUserCodeForResponse = sponsorUserCodeForPlacement;
 
         const placement = await findV2NextMatrixPlacementForRegistration(connection, sponsorUserCodeForPlacement);
+        if (!placement) {
+          throw createApiError(409, 'Sponsor matrix placement is unavailable', 'SPONSOR_PLACEMENT_UNAVAILABLE');
+        }
         parentUserCode = placement?.parentId || null;
         position = placement?.position || null;
         if (isValidV2UserCode(parentUserCode)) {
