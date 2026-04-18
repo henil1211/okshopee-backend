@@ -2705,6 +2705,68 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       });
     }
 
+    if (import.meta.env.PROD) {
+      const registrationSyncKeys = [
+        DB_KEYS.USERS,
+        DB_KEYS.MATRIX,
+        DB_KEYS.PINS,
+        DB_KEYS.TRANSACTIONS,
+        DB_KEYS.SAFETY_POOL,
+        DB_KEYS.NOTIFICATIONS
+      ];
+
+      let registrationConfirmed = false;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const authCheck = await Database.authenticateUserViaBackend(newUserId, password);
+        if (authCheck.success && authCheck.user?.userId === newUserId) {
+          registrationConfirmed = true;
+          break;
+        }
+
+        try {
+          await Database.forceRemoteSyncKeysNow(registrationSyncKeys, {
+            force: true,
+            timeoutMs: 20000,
+            maxAttempts: 2,
+            retryDelayMs: 900
+          });
+        } catch {
+          // Best-effort sync retry only.
+        }
+
+        try {
+          await Database.hydrateFromServer({
+            keys: registrationSyncKeys,
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 15000,
+            retryDelayMs: 900
+          });
+        } catch {
+          // Best-effort refresh retry only.
+        }
+      }
+
+      if (!registrationConfirmed) {
+        try {
+          await Database.hydrateFromServer({
+            keys: registrationSyncKeys,
+            strict: false,
+            maxAttempts: 1,
+            timeoutMs: 12000,
+            retryDelayMs: 700
+          });
+        } catch {
+          // Best-effort rollback-to-server snapshot only.
+        }
+
+        return {
+          success: false,
+          message: 'ID creation could not be finalized on server. No new ID was committed. Please retry.'
+        };
+      }
+    }
+
     let referralCreditWarning: string | null = null;
     if (referralBeneficiaryUserCode) {
       const sourceUserCode = String(newUser.userId || '').trim();

@@ -261,6 +261,8 @@ const V2_STATE_WRITE_ALLOWLIST_USER = new Set([
 ]);
 const V2_STATE_WRITE_ALLOWLIST_ADMIN = new Set([
   'mlm_users',
+  'mlm_transactions',
+  'mlm_pins',
   'mlm_safety_pool',
   'mlm_matrix',
   'mlm_grace_periods',
@@ -280,6 +282,10 @@ const V2_STATE_WRITE_ALLOWLIST_ADMIN = new Set([
   'mlm_marketplace_deals',
   'mlm_marketplace_invoices',
   'mlm_marketplace_redemptions'
+]);
+const V2_LEGACY_FINANCIAL_WRITE_ADMIN_COMPAT_KEYS = new Set([
+  'mlm_transactions',
+  'mlm_pins'
 ]);
 const QUALIFICATION_LOCKED_USER_FIELDS = Object.freeze([
   'sponsorId',
@@ -7667,6 +7673,11 @@ const server = createServer(async (req, res) => {
 
       const blockedFinancialKeys = getIncomingFinancialStateKeys(incomingState);
       if (FINANCE_ENGINE_MODE === 'v2' && !LEGACY_FINANCIAL_WRITES_ENABLED && blockedFinancialKeys.length > 0) {
+        const allowAdminCompatibilityWrite = !!stateActorContext?.authSubjectIsAdmin
+          && blockedFinancialKeys.every((key) => V2_LEGACY_FINANCIAL_WRITE_ADMIN_COMPAT_KEYS.has(key));
+        if (allowAdminCompatibilityWrite) {
+          // Compatibility path for admin-driven legacy registration projection during v2 transition.
+        } else {
         sendJson(res, 403, {
           ok: false,
           error: 'Legacy financial writes are blocked while FINANCE_ENGINE_MODE=v2',
@@ -7674,6 +7685,7 @@ const server = createServer(async (req, res) => {
           blockedKeys: blockedFinancialKeys
         });
         return;
+        }
       }
 
       const incomingBaseUpdatedAt = typeof parsed?.baseUpdatedAt === 'string' ? parsed.baseUpdatedAt : null;
