@@ -248,6 +248,7 @@ const V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW = Number(process.env.V2_PIN_CODE_MAX_R
 const V2_PIN_CODE_MAX_RETRIES_PER_PIN = Number.isFinite(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW) && V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW >= 1
   ? Math.trunc(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW)
   : 12;
+const V2_PIN_LEGACY_PROJECTION_ENABLED = String(process.env.V2_PIN_LEGACY_PROJECTION_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const V2_REQUEST_ID_MAX_LENGTH = 100;
 const V2_IMPERSONATION_REASON_MAX_LENGTH = 255;
 const V2_STATE_WRITE_ALLOWLIST_USER = new Set([
@@ -3216,13 +3217,15 @@ async function processV2PinPurchase({
       }
     }
 
-    const legacyProjection = await appendLegacyPinsForV2Purchase(connection, {
-      buyerUserCode,
-      createdByUserCode: actorUserCode,
-      pinCodes: generatedPinCodes,
-      pinPriceCents: effectivePinPriceCents
-    });
-    legacyPinsProjectionInserted = Number(legacyProjection?.inserted || 0);
+    if (V2_PIN_LEGACY_PROJECTION_ENABLED) {
+      const legacyProjection = await appendLegacyPinsForV2Purchase(connection, {
+        buyerUserCode,
+        createdByUserCode: actorUserCode,
+        pinCodes: generatedPinCodes,
+        pinPriceCents: effectivePinPriceCents
+      });
+      legacyPinsProjectionInserted = Number(legacyProjection?.inserted || 0);
+    }
 
     const responsePayload = {
       ok: true,
