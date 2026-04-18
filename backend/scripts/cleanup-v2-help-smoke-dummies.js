@@ -333,6 +333,7 @@ async function main() {
       await deleteByColumns(conn, 'v2_help_pending_contributions', ['source_user_id', 'beneficiary_user_id'], userIds, summary, 'delete');
       await deleteByColumns(conn, 'v2_help_level_state', ['user_id'], userIds, summary, 'delete');
       await deleteByColumns(conn, 'v2_help_progress_state', ['user_id'], userIds, summary, 'delete');
+      await deleteByColumns(conn, 'v2_baseline_balances', ['user_id'], userIds, summary, 'delete');
       await deleteByColumns(conn, 'v2_registration_profiles', ['user_id'], userIds, summary, 'delete');
       await deleteByColumns(conn, 'v2_wallet_accounts', ['user_id'], userIds, summary, 'delete');
       await deleteByColumns(conn, 'v2_gl_accounts', ['owner_user_id'], userIds, summary, 'delete');
