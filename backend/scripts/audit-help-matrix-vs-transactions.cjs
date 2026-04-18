@@ -13,7 +13,8 @@ function parseArgs(argv) {
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'okshopee24',
     label: 'help-matrix-vs-transactions-audit',
-    userCodes: []
+    userCodes: [],
+    expectedScope: 'observed-max' // observed-max | full
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -49,6 +50,11 @@ function parseArgs(argv) {
           .map((v) => String(v || '').trim())
           .filter(Boolean);
         break;
+      case 'expected-scope': {
+        const normalized = String(value || '').trim().toLowerCase();
+        args.expectedScope = normalized === 'full' ? 'full' : 'observed-max';
+        break;
+      }
       default:
         break;
     }
@@ -165,6 +171,7 @@ async function loadStateRows(conn) {
 
 function buildPendingEdgeSet({ legacyPending, lookups, allowedCodes }) {
   const pendingEdges = new Set();
+  const maxLevelBySource = new Map();
   const unresolved = [];
 
   for (const item of legacyPending) {
@@ -196,12 +203,37 @@ function buildPendingEdgeSet({ legacyPending, lookups, allowedCodes }) {
     }
 
     pendingEdges.add(edgeKey(sourceCode, beneficiaryCode, levelNo));
+    maxLevelBySource.set(sourceCode, Math.max(toInt(maxLevelBySource.get(sourceCode)), levelNo));
   }
 
-  return { pendingEdges, unresolvedPending: unresolved };
+  return { pendingEdges, maxLevelBySource, unresolvedPending: unresolved };
 }
 
-function buildExpectedEdgesFromMatrix({ legacyMatrix, lookups, pendingEdges, allowedCodes }) {
+function mergeSourceLevelCaps(...maps) {
+  const merged = new Map();
+
+  for (const map of maps) {
+    if (!(map instanceof Map)) continue;
+    for (const [sourceCode, levelNoRaw] of map.entries()) {
+      const sourceCodeNorm = String(sourceCode || '').trim();
+      if (!sourceCodeNorm) continue;
+      const levelNo = toInt(levelNoRaw);
+      if (!levelNo) continue;
+      merged.set(sourceCodeNorm, Math.max(toInt(merged.get(sourceCodeNorm)), levelNo));
+    }
+  }
+
+  return merged;
+}
+
+function buildExpectedEdgesFromMatrix({
+  legacyMatrix,
+  lookups,
+  pendingEdges,
+  allowedCodes,
+  expectedScope,
+  sourceLevelCaps
+}) {
   const parentByCode = new Map();
   const unresolved = [];
 
@@ -222,15 +254,24 @@ function buildExpectedEdgesFromMatrix({ legacyMatrix, lookups, pendingEdges, all
   const expectedPending = new Set();
   const expectedAll = new Set();
 
-  for (const sourceCode of parentByCode.keys()) {
+  const sourceUniverse = expectedScope === 'full'
+    ? Array.from(parentByCode.keys())
+    : Array.from(sourceLevelCaps.keys());
+
+  for (const sourceCode of sourceUniverse) {
     if (!sourceCode) continue;
     if (allowedCodes.size > 0 && !allowedCodes.has(sourceCode)) continue;
+    if (!parentByCode.has(sourceCode)) continue;
+
+    const maxLevelLimit = expectedScope === 'full'
+      ? 20
+      : Math.max(1, toInt(sourceLevelCaps.get(sourceCode)));
 
     const visited = new Set([sourceCode]);
     let levelNo = 1;
     let current = sourceCode;
 
-    while (levelNo <= 20) {
+    while (levelNo <= maxLevelLimit) {
       const parentCode = parentByCode.get(current) || null;
       if (!parentCode) break;
 
@@ -269,6 +310,7 @@ function buildExpectedEdgesFromMatrix({ legacyMatrix, lookups, pendingEdges, all
 
 function buildActualEdgesFromTransactions({ legacyTransactions, lookups, allowedCodes }) {
   const counts = new Map();
+  const maxLevelBySource = new Map();
   const unresolved = [];
 
   for (const tx of legacyTransactions) {
@@ -304,9 +346,10 @@ function buildActualEdgesFromTransactions({ legacyTransactions, lookups, allowed
 
     const key = edgeKey(sourceCode, beneficiaryCode, levelNo);
     counts.set(key, (counts.get(key) || 0) + 1);
+    maxLevelBySource.set(sourceCode, Math.max(toInt(maxLevelBySource.get(sourceCode)), levelNo));
   }
 
-  return { actualCounts: counts, unresolvedActual: unresolved };
+  return { actualCounts: counts, maxLevelBySource, unresolvedActual: unresolved };
 }
 
 function summarizeDiscrepancy({ expectedProcessed, expectedPending, expectedAll, actualCounts }) {
@@ -338,6 +381,15 @@ function summarizeDiscrepancy({ expectedProcessed, expectedPending, expectedAll,
     }
   }
 
+  const extraProcessedWithNonNumericUserCode = [];
+  for (const row of extraProcessed) {
+    const isNumericSource = /^\d{7}$/.test(String(row.sourceUserCode || ''));
+    const isNumericBeneficiary = /^\d{7}$/.test(String(row.beneficiaryUserCode || ''));
+    if (!isNumericSource || !isNumericBeneficiary) {
+      extraProcessedWithNonNumericUserCode.push(row);
+    }
+  }
+
   const byLevel = {};
   const collectLevel = (bucket, list) => {
     for (const row of list) {
@@ -356,11 +408,13 @@ function summarizeDiscrepancy({ expectedProcessed, expectedPending, expectedAll,
     duplicateProcessedCount: duplicateProcessed.length,
     missingProcessedCount: missingProcessed.length,
     extraProcessedCount: extraProcessed.length,
+    extraProcessedWithNonNumericUserCodeCount: extraProcessedWithNonNumericUserCode.length,
     processedThatAreExpectedPendingCount: processedThatAreExpectedPending.length,
     missingByLevel: byLevel,
     duplicateProcessedSample: duplicateProcessed.slice(0, 200),
     missingProcessedSample: missingProcessed.slice(0, 200),
     extraProcessedSample: extraProcessed.slice(0, 200),
+    extraProcessedWithNonNumericUserCodeSample: extraProcessedWithNonNumericUserCode.slice(0, 200),
     processedThatAreExpectedPendingSample: processedThatAreExpectedPending.slice(0, 200)
   };
 }
@@ -390,24 +444,37 @@ async function main() {
       allowedCodes
     });
 
-    const expectedResult = buildExpectedEdgesFromMatrix({
-      legacyMatrix: stateRows.legacyMatrix,
-      lookups,
-      pendingEdges: pendingResult.pendingEdges,
-      allowedCodes
-    });
-
     const actualResult = buildActualEdgesFromTransactions({
       legacyTransactions: stateRows.legacyTransactions,
       lookups,
       allowedCodes
     });
 
+    const sourceLevelCaps = mergeSourceLevelCaps(
+      pendingResult.maxLevelBySource,
+      actualResult.maxLevelBySource
+    );
+
+    const expectedResult = buildExpectedEdgesFromMatrix({
+      legacyMatrix: stateRows.legacyMatrix,
+      lookups,
+      pendingEdges: pendingResult.pendingEdges,
+      allowedCodes,
+      expectedScope: args.expectedScope,
+      sourceLevelCaps
+    });
+
     const summary = {
       selectedUserCodes: args.userCodes,
+      expectedScope: args.expectedScope,
       matrixNodes: stateRows.legacyMatrix.length,
       pendingRows: stateRows.legacyPending.length,
       transactionRows: stateRows.legacyTransactions.length,
+      observedSourceUsers: sourceLevelCaps.size,
+      observedSourceMaxLevelSample: Array.from(sourceLevelCaps.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 100)
+        .map(([sourceUserCode, maxObservedLevel]) => ({ sourceUserCode, maxObservedLevel })),
       unresolvedPendingCount: pendingResult.unresolvedPending.length,
       unresolvedExpectedCount: expectedResult.unresolvedExpected.length,
       unresolvedActualCount: actualResult.unresolvedActual.length,
