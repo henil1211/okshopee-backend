@@ -258,6 +258,7 @@ const V2_REGISTRATION_MODE = String(process.env.V2_REGISTRATION_MODE
   || (V2_REGISTRATION_LEGACY_PROJECTION_ENABLED ? 'hybrid' : 'pure_v2')).trim().toLowerCase();
 const V2_REGISTRATION_PURE_V2_MODE = V2_REGISTRATION_MODE === 'pure_v2';
 const V2_AUTH_PROFILE_FALLBACK_ENABLED = String(process.env.V2_AUTH_PROFILE_FALLBACK_ENABLED || 'true').trim().toLowerCase() !== 'false';
+const V2_AUTH_PROFILE_FALLBACK_EFFECTIVE = V2_AUTH_PROFILE_FALLBACK_ENABLED || V2_REGISTRATION_PURE_V2_MODE;
 const V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED = String(process.env.V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const V2_REQUEST_ID_MAX_LENGTH = 100;
 const V2_IMPERSONATION_REASON_MAX_LENGTH = 255;
@@ -1318,7 +1319,7 @@ function mapV2RegistrationProfileRowToLegacyUser(row) {
 }
 
 async function findV2AuthUserByUserCode(userCode) {
-  if (!V2_AUTH_PROFILE_FALLBACK_ENABLED || !pool) return null;
+  if (!V2_AUTH_PROFILE_FALLBACK_EFFECTIVE || !pool) return null;
 
   const normalizedUserCode = normalizeV2UserCode(userCode);
   if (!isValidV2UserCode(normalizedUserCode)) return null;
@@ -1380,7 +1381,7 @@ async function findLegacyUserByPublicUserId(userId) {
   const legacyUser = users.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId) || null;
   if (legacyUser) return legacyUser;
 
-  if (V2_AUTH_PROFILE_FALLBACK_ENABLED) {
+  if (V2_AUTH_PROFILE_FALLBACK_EFFECTIVE) {
     return findV2AuthUserByUserCode(normalizedUserId);
   }
 
@@ -9654,6 +9655,7 @@ async function start() {
       `signedTokenEnabled=${!!V2_AUTH_TOKEN_SECRET}`,
       `legacyBearerCompat=${V2_ALLOW_LEGACY_BEARER_USER_CODE}`,
       `profileFallback=${V2_AUTH_PROFILE_FALLBACK_ENABLED}`,
+      `profileFallbackEffective=${V2_AUTH_PROFILE_FALLBACK_EFFECTIVE}`,
       `auditEnabled=${V2_AUTH_AUDIT_ENABLED}`,
       `issuer=${V2_AUTH_TOKEN_ISSUER}`,
       `ttlSeconds=${V2_AUTH_TOKEN_TTL_SECONDS}`
