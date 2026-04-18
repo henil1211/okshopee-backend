@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, type ChangeEvent } from 'react';
-import { useAuthStore, usePinStore, useOtpStore, useSyncRefreshKey } from '@/store';
+import { useAuthStore, usePinStore, useOtpStore, useSyncRefreshKey, useWalletStore } from '@/store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,6 +33,7 @@ export default function PinWallet() {
     copyPinToClipboard 
   } = usePinStore();
   const { sendOtp, verifyOtp } = useOtpStore();
+  const { loadWallet, refreshTransactions } = useWalletStore();
   const syncKey = useSyncRefreshKey();
   const displayUser = useMemo(() => {
     const activeUser = impersonatedUser || user;
@@ -354,6 +355,45 @@ export default function PinWallet() {
     setShowDirectBuyTxPassword(false);
     setShowDirectBuyModal(false);
     loadPurchaseRequests(displayUser.id);
+  };
+
+  const handleRefresh = async () => {
+    if (!displayUser || isRefreshing) return;
+
+    setIsRefreshing(true);
+    try {
+      await Database.forceRemoteSyncNowWithOptions({
+        full: false,
+        force: true,
+        timeoutMs: 15000,
+        maxAttempts: 2,
+        retryDelayMs: 1200
+      });
+
+      await Database.hydrateFromServer({
+        strict: true,
+        maxAttempts: 2,
+        timeoutMs: 12000,
+        retryDelayMs: 800,
+        keys: Database.getPinFreshDataKeys()
+      });
+    } catch {
+      // Best-effort sync only.
+    } finally {
+      loadPins(displayUser.id);
+      loadPurchaseRequests(displayUser.id);
+      loadWallet(displayUser.id, { v2Only: true });
+      refreshTransactions(displayUser.id, { v2Only: true });
+
+      // Run one more read pass after in-store async V2 fetches settle.
+      setTimeout(() => {
+        if (!displayUser) return;
+        loadPins(displayUser.id);
+        loadPurchaseRequests(displayUser.id);
+      }, 450);
+
+      setIsRefreshing(false);
+    }
   };
 
   const renderUnusedPins = () => (
@@ -899,20 +939,7 @@ export default function PinWallet() {
         </div>
         <Button
           variant="outline"
-          onClick={async () => {
-            if (!displayUser || isRefreshing) return;
-            setIsRefreshing(true);
-            try {
-              await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
-              await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
-            } catch {
-              // best-effort sync
-            } finally {
-              loadPins(displayUser.id);
-              loadPurchaseRequests(displayUser.id);
-              setIsRefreshing(false);
-            }
-          }}
+          onClick={handleRefresh}
           className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
         >
           <RefreshCw className={`w-4 h-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
