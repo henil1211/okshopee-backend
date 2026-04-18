@@ -37,6 +37,7 @@ export default function FundTransfer() {
 
   const isRoyaltyTransfer = transferData.source === 'royalty';
   const isExternalTransfer = transferData.source !== 'royalty';
+  const isIncomeToFundSelfTransferMode = transferData.source === 'income' && transferData.destination === 'fund';
   const topWalletLabel = transferData.source === 'income'
     ? 'Income Wallet'
     : transferData.source === 'royalty'
@@ -143,8 +144,11 @@ export default function FundTransfer() {
 
   if (!displayUser) return null;
 
-  const hasRecipientId = transferData.userId.trim().length > 0;
-  const recipientResolved = transferData.userId.trim().length === 7 && !!recipientName;
+  const effectiveRecipientUserId = transferData.userId.trim() || (isIncomeToFundSelfTransferMode ? displayUser.userId : '');
+  const effectiveRecipientName = recipientName || (isIncomeToFundSelfTransferMode && !transferData.userId.trim() ? displayUser.fullName : '');
+  const hasRecipientId = effectiveRecipientUserId.length > 0;
+  const recipientResolved = effectiveRecipientUserId.length === 7
+    && (effectiveRecipientUserId === displayUser.userId || !!Database.getUserByUserId(effectiveRecipientUserId));
   const recipientIsInvalid = isRoyaltyTransfer
     ? false
     : !hasRecipientId || !recipientResolved;
@@ -269,12 +273,14 @@ export default function FundTransfer() {
                   className="bg-[#1f2937] border-white/10 text-white"
                 />
                 <p className="text-xs text-white/50">
-                  Only upline/downline IDs are allowed.
+                  {isIncomeToFundSelfTransferMode
+                    ? 'Leave blank to transfer from your Income Wallet to your own Fund Wallet, or enter an upline/downline User ID.'
+                    : 'Only upline/downline IDs are allowed.'}
                 </p>
-                {recipientName && (
-                  <p className="text-xs text-emerald-400">Recipient: {recipientName}</p>
+                {effectiveRecipientName && (
+                  <p className="text-xs text-emerald-400">Recipient: {effectiveRecipientName}</p>
                 )}
-                {transferData.userId.length === 7 && !recipientName && (
+                {transferData.userId.length === 7 && !effectiveRecipientName && (
                   <p className="text-xs text-rose-400">Recipient ID not found</p>
                 )}
               </div>

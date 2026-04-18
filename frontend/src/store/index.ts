@@ -3128,6 +3128,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     });
 
     const normalizedTarget = (toUserId || '').trim();
+    const isSelfIncomeToFundTransfer = sourceWallet === 'income' && destinationWallet === 'fund';
+    const effectiveTargetUserCode = normalizedTarget || (isSelfIncomeToFundTransfer ? fromUser.userId : '');
 
     if (sourceWallet !== 'fund' && sourceWallet !== 'income') {
       return {
@@ -3143,11 +3145,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       };
     }
 
-    if (!normalizedTarget) {
+    if (!effectiveTargetUserCode) {
       return { success: false, message: 'Recipient User ID is required' };
     }
 
-    const rawTargetUserForV2 = Database.getUserByUserId(normalizedTarget);
+    const rawTargetUserForV2 = Database.getUserByUserId(effectiveTargetUserCode);
     const toUserForV2 = rawTargetUserForV2
       ? (resolveCanonicalUserForWalletActions(rawTargetUserForV2.id) || rawTargetUserForV2)
       : undefined;
@@ -3155,11 +3157,12 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       return { success: false, message: 'Recipient not found' };
     }
 
-    if (toUserForV2.id === effectiveFromUserId) {
+    const isSelfTransfer = toUserForV2.id === effectiveFromUserId;
+    if (isSelfTransfer && !isSelfIncomeToFundTransfer) {
       return { success: false, message: 'Self transfer is not allowed for Fund Wallet transfer.' };
     }
 
-    if (!Database.isInSameChain(effectiveFromUserId, toUserForV2.id)) {
+    if (!isSelfTransfer && !Database.isInSameChain(effectiveFromUserId, toUserForV2.id)) {
       return { success: false, message: 'Transfer allowed only to upline or downline' };
     }
 
@@ -3212,7 +3215,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         destinationWallet,
         amountCents,
         referenceId: `ui_fund_transfer_${requestId}`,
-        description: `${sourceWallet === 'income' ? 'Income' : 'Fund'} wallet transfer from ${fromUser.userId} to ${toUserForV2.userId}`
+        description: isSelfTransfer
+          ? `Income wallet self-transfer from ${fromUser.userId} to fund wallet`
+          : `${sourceWallet === 'income' ? 'Income' : 'Fund'} wallet transfer from ${fromUser.userId} to ${toUserForV2.userId}`
       })
     });
 

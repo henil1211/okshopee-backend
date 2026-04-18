@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS v2_ledger_entries (
 
 CREATE TABLE IF NOT EXISTS v2_pins (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-  pin_code CHAR(16) NOT NULL,
+  pin_code CHAR(7) NOT NULL,
   buyer_user_id BIGINT UNSIGNED NOT NULL,
   price_cents BIGINT UNSIGNED NOT NULL,
   status ENUM('generated','used','expired','cancelled') NOT NULL DEFAULT 'generated',
@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS v2_pins (
   UNIQUE KEY uq_v2_pins_code (pin_code),
   KEY idx_v2_pins_buyer_status (buyer_user_id, status),
   KEY idx_v2_pins_used_by (used_by_user_id),
+  CONSTRAINT chk_v2_pins_code_len_7 CHECK (CHAR_LENGTH(TRIM(pin_code)) = 7),
   CONSTRAINT fk_v2_pins_buyer FOREIGN KEY (buyer_user_id) REFERENCES v2_users(id),
   CONSTRAINT fk_v2_pins_purchase_txn FOREIGN KEY (purchased_txn_id) REFERENCES v2_ledger_transactions(id),
   CONSTRAINT fk_v2_pins_used_by FOREIGN KEY (used_by_user_id) REFERENCES v2_users(id),

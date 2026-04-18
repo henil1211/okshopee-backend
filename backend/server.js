@@ -6956,8 +6956,16 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      if (senderUserCode === receiverUserCode) {
-        sendJson(res, 400, { ok: false, error: 'senderUserCode and receiverUserCode must be different', code: 'SELF_TRANSFER_NOT_ALLOWED' });
+      const isSelfIncomeToFundTransfer =
+        senderUserCode === receiverUserCode
+        && sourceWallet === 'income'
+        && destinationWallet === 'fund';
+      if (senderUserCode === receiverUserCode && !isSelfIncomeToFundTransfer) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'senderUserCode and receiverUserCode must be different unless converting income wallet to own fund wallet',
+          code: 'SELF_TRANSFER_NOT_ALLOWED'
+        });
         return;
       }
       if (senderUserCode !== actorUserCode) {
