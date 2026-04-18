@@ -3898,6 +3898,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   blockUser: async (targetUserId: string, type: 'temporary' | 'permanent', reason: string = 'Blocked by admin', hours: number = 24) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can block users' };
@@ -3918,6 +3920,13 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     }
 
     get().loadAllUsers();
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      get().loadAllUsers();
+    } catch {
+      // best-effort sync
+    }
     return {
       success: true,
       message: type === 'temporary'
@@ -3927,6 +3936,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   unblockUser: async (targetUserId: string) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can unblock users' };
@@ -3943,10 +3954,19 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     }
 
     get().loadAllUsers();
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      get().loadAllUsers();
+    } catch {
+      // best-effort sync
+    }
     return { success: true, message: 'User unblocked successfully' };
   },
 
   reactivateAutoDeactivatedUser: async (targetUserId: string) => {
+    await Database.ensureFreshData();
+
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can reactivate users' };
@@ -3967,6 +3987,13 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     }
 
     get().loadAllUsers();
+    try {
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
+      get().loadAllUsers();
+    } catch {
+      // best-effort sync
+    }
     return { success: true, message: `User ${targetUserId} reactivated. 30-day deadline restarted.` };
   },
 
