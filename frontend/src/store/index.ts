@@ -3184,7 +3184,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     const otpForV2 = (security?.otp || '').trim();
-    if (!otpForV2 || !Database.verifyOtp(effectiveFromUserId, otpForV2, 'transaction')) {
+    const otpSubjectKey = String(fromUser.userId || '').trim() || effectiveFromUserId;
+    if (!otpForV2 || !Database.verifyOtp(otpSubjectKey, otpForV2, 'transaction')) {
       return { success: false, message: 'Invalid or expired OTP' };
     }
 

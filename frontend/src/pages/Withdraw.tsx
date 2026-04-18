@@ -75,7 +75,7 @@ export default function Withdraw() {
   const handleSendOtp = async () => {
     if (!displayUser) return;
     setIsSendingOtp(true);
-    const result = await sendOtp(displayUser.id, displayUser.email, 'withdrawal');
+    const result = await sendOtp(displayUser.userId, displayUser.email, 'withdrawal');
     setIsSendingOtp(false);
     if (result.success) {
       setIsOtpSent(true);
@@ -142,7 +142,7 @@ export default function Withdraw() {
         toast.error('Please enter OTP');
         return;
       }
-      const isValidOtp = await verifyOtp(displayUser.id, otp, 'withdrawal');
+      const isValidOtp = await verifyOtp(displayUser.userId, otp, 'withdrawal');
       if (!isValidOtp) {
         toast.error('Invalid or expired OTP');
         return;

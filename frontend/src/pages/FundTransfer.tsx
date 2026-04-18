@@ -89,7 +89,7 @@ export default function FundTransfer() {
       return;
     }
     setIsSendingTransferOtp(true);
-    const result = await sendOtp(displayUser.id, displayUser.email, 'transaction');
+    const result = await sendOtp(displayUser.userId, displayUser.email, 'transaction');
     setIsSendingTransferOtp(false);
     if (result.success) {
       setIsTransferOtpSent(true);

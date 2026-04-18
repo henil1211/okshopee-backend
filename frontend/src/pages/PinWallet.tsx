@@ -218,7 +218,7 @@ export default function PinWallet() {
       return;
     }
 
-    const otpValid = await verifyOtp(displayUser.id, transferOtp, 'transaction');
+    const otpValid = await verifyOtp(displayUser.userId, transferOtp, 'transaction');
     if (!otpValid) {
       toast.error('Invalid or expired OTP');
       return;
@@ -258,7 +258,7 @@ export default function PinWallet() {
   const handleSendTransferOtp = async () => {
     if (!displayUser) return;
     setIsSendingOtp(true);
-    const result = await sendOtp(displayUser.id, displayUser.email, 'transaction');
+    const result = await sendOtp(displayUser.userId, displayUser.email, 'transaction');
     setIsSendingOtp(false);
     if (result.success) {
       setIsTransferOtpSent(true);

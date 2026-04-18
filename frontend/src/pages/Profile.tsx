@@ -116,7 +116,7 @@ export default function Profile() {
     }
 
     setSendingOtpFor(purpose);
-    const result = await sendOtp(displayUser.id, selectedEmail, 'profile_update');
+    const result = await sendOtp(displayUser.userId, selectedEmail, 'profile_update');
     setSendingOtpFor(null);
 
     if (result.success) {
@@ -156,7 +156,7 @@ export default function Profile() {
       toast.error('OTP is required');
       return;
     }
-    const otpValid = await verifyOtp(displayUser.id, contactData.otp, 'profile_update');
+    const otpValid = await verifyOtp(displayUser.userId, contactData.otp, 'profile_update');
     if (!otpValid) {
       toast.error('Invalid or expired OTP');
       return;
@@ -211,7 +211,7 @@ export default function Profile() {
       toast.error('OTP is required');
       return;
     }
-    const otpValid = await verifyOtp(displayUser.id, passwordData.otp, 'profile_update');
+    const otpValid = await verifyOtp(displayUser.userId, passwordData.otp, 'profile_update');
     if (!otpValid) {
       toast.error('Invalid or expired OTP');
       return;
@@ -263,7 +263,7 @@ export default function Profile() {
       toast.error('OTP is required');
       return;
     }
-    const otpValid = await verifyOtp(displayUser.id, txPasswordData.otp, 'profile_update');
+    const otpValid = await verifyOtp(displayUser.userId, txPasswordData.otp, 'profile_update');
     if (!otpValid) {
       toast.error('Invalid or expired OTP');
       return;

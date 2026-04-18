@@ -38,7 +38,7 @@ export default function ForgotPassword() {
     }
 
     setIsSendingOtp(true);
-    const result = await sendOtp(user.id, user.email, 'profile_update');
+    const result = await sendOtp(user.userId, user.email, 'profile_update');
     setIsSendingOtp(false);
     if (result.success) {
       setOtpSent(true);
@@ -75,7 +75,7 @@ export default function ForgotPassword() {
     }
 
     setIsResetting(true);
-    const validOtp = await verifyOtp(user.id, otp, 'profile_update');
+    const validOtp = await verifyOtp(user.userId, otp, 'profile_update');
     if (!validOtp) {
       setIsResetting(false);
       setError('Invalid or expired OTP');
