@@ -3726,14 +3726,6 @@ export const usePinStore = create<PinState>((set, get) => ({
     }
     const settings = Database.getSettings();
     const amount = quantity * settings.pinAmount;
-    Database.repairFundWalletConsistency(effectiveUserId);
-    const wallet = Database.getWallet(effectiveUserId);
-    if (!wallet) {
-      return { success: false, message: 'Wallet not found' };
-    }
-    if (wallet.depositWallet < amount) {
-      return { success: false, message: 'Insufficient fund wallet balance for direct buy' };
-    }
 
     try {
       const idempotencyKey = generateClientIdempotencyKey();
