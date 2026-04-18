@@ -1461,6 +1461,109 @@ function parseIdempotencyResponseBody(responseBody) {
   }
 }
 
+async function appendLegacyPinsForV2Purchase(connection, {
+  buyerUserCode,
+  createdByUserCode,
+  pinCodes,
+  pinPriceCents
+}) {
+  const normalizedBuyerUserCode = normalizeV2UserCode(buyerUserCode);
+  if (!isValidV2UserCode(normalizedBuyerUserCode)) {
+    throw createApiError(400, 'Buyer user code is invalid for legacy pin projection', 'INVALID_USER_CODE');
+  }
+
+  const normalizedCreatedByUserCode = normalizeV2UserCode(createdByUserCode);
+  const normalizedPinCodes = Array.isArray(pinCodes)
+    ? pinCodes
+      .map((value) => String(value || '').trim().toUpperCase())
+      .filter((value) => value.length >= 6 && value.length <= 40)
+    : [];
+
+  if (normalizedPinCodes.length === 0) {
+    return { inserted: 0, skipped: true };
+  }
+
+  const [usersRows] = await connection.execute(
+    `SELECT state_value
+     FROM state_store
+     WHERE state_key = 'mlm_users'
+     LIMIT 1
+     FOR UPDATE`
+  );
+  const usersRaw = Array.isArray(usersRows) && usersRows[0]
+    ? usersRows[0].state_value
+    : '[]';
+  const usersParsed = typeof usersRaw === 'string' ? safeParseJSON(usersRaw) : [];
+  const legacyUsers = Array.isArray(usersParsed) ? usersParsed : [];
+
+  const legacyBuyerUser = legacyUsers.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedBuyerUserCode);
+  if (!legacyBuyerUser) {
+    throw createApiError(404, 'Legacy buyer user is missing for PIN projection', 'LEGACY_BUYER_NOT_FOUND');
+  }
+
+  const legacyCreatedByUser = normalizedCreatedByUserCode
+    ? legacyUsers.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedCreatedByUserCode)
+    : null;
+
+  const [pinsRows] = await connection.execute(
+    `SELECT state_value
+     FROM state_store
+     WHERE state_key = 'mlm_pins'
+     LIMIT 1
+     FOR UPDATE`
+  );
+  const pinsRaw = Array.isArray(pinsRows) && pinsRows[0]
+    ? pinsRows[0].state_value
+    : '[]';
+  const pinsParsed = typeof pinsRaw === 'string' ? safeParseJSON(pinsRaw) : [];
+  const legacyPins = Array.isArray(pinsParsed) ? pinsParsed : [];
+
+  const existingPinCodes = new Set(
+    legacyPins
+      .map((pin) => String(pin?.pinCode || '').trim().toUpperCase())
+      .filter(Boolean)
+  );
+
+  const priceAmount = Number.isFinite(Number(pinPriceCents))
+    ? Math.max(0, Math.trunc(Number(pinPriceCents)) / 100)
+    : 0;
+  const nowIso = new Date().toISOString();
+  const legacyOwnerId = String(legacyBuyerUser.id || '').trim();
+  const legacyCreatedById = String(legacyCreatedByUser?.id || legacyOwnerId).trim() || legacyOwnerId;
+
+  const pinsToInsert = [];
+  normalizedPinCodes.forEach((pinCode, index) => {
+    if (!pinCode || existingPinCodes.has(pinCode)) return;
+    pinsToInsert.push({
+      id: `pin_v2_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 9)}`,
+      pinCode,
+      amount: priceAmount,
+      status: 'unused',
+      ownerId: legacyOwnerId,
+      createdBy: legacyCreatedById,
+      createdAt: nowIso
+    });
+    existingPinCodes.add(pinCode);
+  });
+
+  if (pinsToInsert.length === 0) {
+    return { inserted: 0, skipped: true };
+  }
+
+  const mergedPins = [...legacyPins, ...pinsToInsert];
+  await connection.execute(
+    `INSERT INTO state_store (state_key, state_value, updated_at) VALUES ('mlm_pins', ?, ?)
+     ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+    [JSON.stringify(mergedPins), toMySQLDatetime(nowIso)]
+  );
+
+  return {
+    inserted: pinsToInsert.length,
+    skipped: false,
+    ownerUserCode: normalizedBuyerUserCode
+  };
+}
+
 function isRetryableV2TransactionError(error) {
   const code = String(error?.code || '').toUpperCase();
   const errno = Number(error?.errno || 0);
@@ -2868,6 +2971,7 @@ async function processV2PinPurchase({
 
   const connection = await pool.getConnection();
   let transactionOpen = false;
+  let legacyPinsProjectionInserted = 0;
 
   try {
     await connection.beginTransaction();
@@ -3064,6 +3168,14 @@ async function processV2PinPurchase({
       }
     }
 
+    const legacyProjection = await appendLegacyPinsForV2Purchase(connection, {
+      buyerUserCode,
+      createdByUserCode: actorUserCode,
+      pinCodes: generatedPinCodes,
+      pinPriceCents: effectivePinPriceCents
+    });
+    legacyPinsProjectionInserted = Number(legacyProjection?.inserted || 0);
+
     const responsePayload = {
       ok: true,
       txUuid,
@@ -3086,6 +3198,11 @@ async function processV2PinPurchase({
 
     await connection.commit();
     transactionOpen = false;
+
+    if (legacyPinsProjectionInserted > 0) {
+      invalidateStateSnapshotCache();
+    }
+
     return { status: 200, payload: responsePayload };
   } catch (error) {
     if (transactionOpen) {

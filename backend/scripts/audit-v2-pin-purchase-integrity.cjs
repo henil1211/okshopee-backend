@@ -115,6 +115,250 @@ function generateV2PinCode() {
   return randomBytes(8).toString('hex').toUpperCase();
 }
 
+function safeParseJson(value, fallback) {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed == null ? fallback : parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeUserCode(value) {
+  return String(value || '').trim();
+}
+
+function mapV2PinStatusToLegacyStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'generated') return 'unused';
+  if (normalized === 'used') return 'used';
+  return 'suspended';
+}
+
+function buildLegacyProjectionPinFromV2({
+  v2Pin,
+  legacyBuyer,
+  legacyUsedBy
+}) {
+  const createdAt = v2Pin.created_at
+    ? new Date(v2Pin.created_at).toISOString()
+    : new Date().toISOString();
+  const usedAt = v2Pin.used_at
+    ? new Date(v2Pin.used_at).toISOString()
+    : undefined;
+  const status = mapV2PinStatusToLegacyStatus(v2Pin.status);
+  const legacyBuyerId = String(legacyBuyer?.id || '').trim();
+  const legacyUsedById = String(legacyUsedBy?.id || '').trim();
+
+  return {
+    id: `pin_v2_${String(v2Pin.id || '').trim() || randomBytes(6).toString('hex')}`,
+    pinCode: String(v2Pin.pin_code || '').trim().toUpperCase(),
+    amount: Math.max(0, Number(v2Pin.price_cents || 0)) / 100,
+    status,
+    ownerId: legacyBuyerId,
+    createdBy: legacyBuyerId,
+    createdAt,
+    ...(status === 'used' && usedAt ? { usedAt } : {}),
+    ...(status === 'used' && legacyUsedById ? { usedById: legacyUsedById, registrationUserId: legacyUsedById } : {}),
+    ...(status === 'suspended'
+      ? {
+        suspendedAt: usedAt || createdAt,
+        suspensionReason: `Projected from v2 pin status: ${String(v2Pin.status || '').trim() || 'unknown'}`
+      }
+      : {})
+  };
+}
+
+async function fetchV2PinsForUser(conn, userCode) {
+  if (!userCode) return [];
+
+  const [rows] = await conn.execute(
+    `SELECT
+       p.id,
+       p.pin_code,
+       p.price_cents,
+       p.status,
+       p.created_at,
+       p.used_at,
+       p.used_by_user_id,
+       used_user.user_code AS used_by_user_code
+     FROM v2_pins p
+     INNER JOIN v2_users buyer
+       ON buyer.id = p.buyer_user_id
+     LEFT JOIN v2_users used_user
+       ON used_user.id = p.used_by_user_id
+     WHERE buyer.user_code = ?
+     ORDER BY p.id ASC`,
+    [userCode]
+  );
+
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function loadLegacyUsersAndPins(conn, { forUpdate = false } = {}) {
+  const lockClause = forUpdate ? ' FOR UPDATE' : '';
+  const [rows] = await conn.execute(
+    `SELECT state_key, state_value
+     FROM state_store
+     WHERE state_key IN ('mlm_users', 'mlm_pins')${lockClause}`
+  );
+
+  const byKey = new Map((Array.isArray(rows) ? rows : []).map((row) => [String(row.state_key || ''), row.state_value]));
+  const users = safeParseJson(byKey.get('mlm_users') || '[]', []);
+  const pins = safeParseJson(byKey.get('mlm_pins') || '[]', []);
+
+  return {
+    users: Array.isArray(users) ? users : [],
+    pins: Array.isArray(pins) ? pins : []
+  };
+}
+
+function inspectLegacyProjectionForUser({ userCode, v2Pins, legacyUsers, legacyPins }) {
+  const normalizedUserCode = normalizeUserCode(userCode);
+  const legacyUser = legacyUsers.find((candidate) => normalizeUserCode(candidate?.userId) === normalizedUserCode) || null;
+  const legacyOwnerId = String(legacyUser?.id || '').trim();
+
+  const legacyPinsForUser = legacyPins.filter((pin) => {
+    const ownerId = String(pin?.ownerId || '').trim();
+    return ownerId === legacyOwnerId || normalizeUserCode(ownerId) === normalizedUserCode;
+  });
+
+  const legacyPinCodeSet = new Set(
+    legacyPins
+      .map((pin) => String(pin?.pinCode || '').trim().toUpperCase())
+      .filter(Boolean)
+  );
+
+  const missingV2PinsInLegacy = v2Pins.filter((pin) => {
+    const code = String(pin?.pin_code || '').trim().toUpperCase();
+    return !!code && !legacyPinCodeSet.has(code);
+  });
+
+  return {
+    userCode: normalizedUserCode,
+    legacyUserFound: !!legacyUser,
+    legacyOwnerId: legacyOwnerId || null,
+    v2PinCount: v2Pins.length,
+    legacyPinCountForOwner: legacyPinsForUser.length,
+    missingInLegacyCount: missingV2PinsInLegacy.length,
+    missingInLegacyPinCodes: missingV2PinsInLegacy.map((pin) => String(pin.pin_code || '').trim().toUpperCase()),
+    projectionMismatch: missingV2PinsInLegacy.length > 0 || (legacyUser && v2Pins.length !== legacyPinsForUser.length),
+    missingV2PinsInLegacy
+  };
+}
+
+async function inspectLegacyProjectionMismatch(conn, userCode) {
+  const normalizedUserCode = normalizeUserCode(userCode);
+  if (!normalizedUserCode) {
+    return {
+      checked: false,
+      reason: '--user-code is required to audit legacy projection mismatch'
+    };
+  }
+
+  const [v2Pins, legacy] = await Promise.all([
+    fetchV2PinsForUser(conn, normalizedUserCode),
+    loadLegacyUsersAndPins(conn)
+  ]);
+
+  const details = inspectLegacyProjectionForUser({
+    userCode: normalizedUserCode,
+    v2Pins,
+    legacyUsers: legacy.users,
+    legacyPins: legacy.pins
+  });
+
+  return {
+    checked: true,
+    ...details
+  };
+}
+
+async function repairLegacyProjectionMismatch(conn, userCode) {
+  const normalizedUserCode = normalizeUserCode(userCode);
+  if (!normalizedUserCode) {
+    return {
+      action: 'skipped',
+      reason: '--user-code is required for projection repair',
+      insertedPins: 0
+    };
+  }
+
+  const v2Pins = await fetchV2PinsForUser(conn, normalizedUserCode);
+
+  await conn.beginTransaction();
+  try {
+    const legacy = await loadLegacyUsersAndPins(conn, { forUpdate: true });
+    const projection = inspectLegacyProjectionForUser({
+      userCode: normalizedUserCode,
+      v2Pins,
+      legacyUsers: legacy.users,
+      legacyPins: legacy.pins
+    });
+
+    if (!projection.legacyUserFound) {
+      await conn.rollback();
+      return {
+        action: 'failed',
+        reason: 'legacy_user_not_found',
+        insertedPins: 0
+      };
+    }
+
+    if (!projection.projectionMismatch || projection.missingV2PinsInLegacy.length === 0) {
+      await conn.rollback();
+      return {
+        action: 'skipped',
+        reason: 'already_reconciled',
+        insertedPins: 0
+      };
+    }
+
+    const userByCode = new Map();
+    for (const user of legacy.users) {
+      const code = normalizeUserCode(user?.userId);
+      if (code) userByCode.set(code, user);
+    }
+
+    const legacyBuyer = userByCode.get(normalizedUserCode) || null;
+    const additions = projection.missingV2PinsInLegacy.map((pin) => {
+      const usedByCode = normalizeUserCode(pin.used_by_user_code);
+      const legacyUsedBy = usedByCode ? userByCode.get(usedByCode) || null : null;
+      return buildLegacyProjectionPinFromV2({
+        v2Pin: pin,
+        legacyBuyer,
+        legacyUsedBy
+      });
+    });
+
+    const mergedPins = [...legacy.pins, ...additions];
+    const now = new Date().toISOString().replace('T', ' ').replace('Z', '');
+    await conn.execute(
+      `INSERT INTO state_store (state_key, state_value, updated_at)
+       VALUES ('mlm_pins', ?, ?)
+       ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+      [JSON.stringify(mergedPins), now]
+    );
+
+    await conn.commit();
+    return {
+      action: 'repaired',
+      reason: null,
+      insertedPins: additions.length,
+      userCode: normalizedUserCode,
+      insertedPinCodes: additions.map((pin) => pin.pinCode)
+    };
+  } catch (error) {
+    await conn.rollback();
+    return {
+      action: 'failed',
+      reason: error instanceof Error ? error.message : String(error),
+      insertedPins: 0,
+      userCode: normalizedUserCode
+    };
+  }
+}
+
 async function fetchPinPurchaseRows(conn, args) {
   const where = ["lt.tx_type = 'pin_purchase'", "lt.status = 'posted'"];
   const params = [];
@@ -296,6 +540,7 @@ async function main() {
   try {
     const rows = await fetchPinPurchaseRows(conn, args);
     const findings = buildFindings(rows);
+    const projectionCheck = await inspectLegacyProjectionMismatch(conn, args.userCode);
 
     const report = {
       generatedAt: new Date().toISOString(),
@@ -306,10 +551,12 @@ async function main() {
         limit: args.limit
       },
       scannedPurchases: rows.length,
-      mismatches: findings
+      mismatches: findings,
+      legacyProjectionCheck: projectionCheck
     };
 
     const applyResults = [];
+    let projectionApplyResult = null;
     if (args.apply) {
       for (const finding of findings) {
         if (!finding.canAutoRepair) {
@@ -348,8 +595,22 @@ async function main() {
 
       report.applyResults = applyResults;
 
+      if (projectionCheck.checked && projectionCheck.projectionMismatch) {
+        projectionApplyResult = await repairLegacyProjectionMismatch(conn, args.userCode);
+      } else {
+        projectionApplyResult = {
+          action: 'skipped',
+          reason: projectionCheck.checked ? 'already_reconciled' : 'projection_check_not_run',
+          insertedPins: 0,
+          userCode: args.userCode || null
+        };
+      }
+
+      report.projectionApplyResult = projectionApplyResult;
+
       const remainingRows = await fetchPinPurchaseRows(conn, args);
       report.remainingMismatchesAfterApply = buildFindings(remainingRows);
+      report.legacyProjectionCheckAfterApply = await inspectLegacyProjectionMismatch(conn, args.userCode);
     }
 
     fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
@@ -360,16 +621,30 @@ async function main() {
     const remainingCount = Array.isArray(report.remainingMismatchesAfterApply)
       ? report.remainingMismatchesAfterApply.length
       : findings.length;
+    const projectionMismatchCount = projectionCheck.checked && projectionCheck.projectionMismatch ? 1 : 0;
+    const projectionMissingCount = projectionCheck.checked
+      ? Number(projectionCheck.missingInLegacyCount || 0)
+      : 0;
+    const projectionInsertedPins = Number(projectionApplyResult?.insertedPins || 0);
+    const projectionApplyStatus = projectionApplyResult?.action || (args.apply ? 'not-run' : 'n/a');
+    const remainingProjectionMismatch = args.apply
+      ? !!(report.legacyProjectionCheckAfterApply?.checked && report.legacyProjectionCheckAfterApply?.projectionMismatch)
+      : !!(projectionCheck.checked && projectionCheck.projectionMismatch);
 
     const summaryLines = [
       `GeneratedAt: ${report.generatedAt}`,
       `Mode: ${report.mode}`,
       `ScannedPurchases: ${report.scannedPurchases}`,
       `MismatchesFound: ${findings.length}`,
+      `LegacyProjectionMismatchRows: ${projectionMismatchCount}`,
+      `LegacyProjectionMissingPins: ${projectionMissingCount}`,
       `AutoRepairable: ${findings.filter((f) => f.canAutoRepair).length}`,
       `RepairedRows: ${repairedCount}`,
       `RepairedPins: ${repairedPins}`,
       `ApplyFailures: ${failedCount}`,
+      `ProjectionApplyStatus: ${projectionApplyStatus}`,
+      `ProjectionRepairedPins: ${projectionInsertedPins}`,
+      `RemainingProjectionMismatch: ${remainingProjectionMismatch ? 1 : 0}`,
       `RemainingMismatches: ${remainingCount}`,
       `Report: ${reportPath}`
     ];
@@ -379,11 +654,11 @@ async function main() {
     console.log('--- V2 PIN Purchase Integrity ---');
     summaryLines.forEach((line) => console.log(line));
 
-    if (!args.apply && findings.length > 0) {
+    if (!args.apply && (findings.length > 0 || remainingProjectionMismatch)) {
       process.exit(2);
     }
 
-    if (args.apply && remainingCount > 0) {
+    if (args.apply && (remainingCount > 0 || remainingProjectionMismatch)) {
       process.exit(3);
     }
 
