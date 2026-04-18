@@ -6,6 +6,8 @@ const mysql = require('mysql2/promise');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 
 function parseArgs(argv) {
+  const pendingAmountRaw = Number(process.env.V2_HELP_LEVEL1_AMOUNT_CENTS || 500);
+
   const args = {
     apply: false,
     mergeMode: 'additive', // additive | max
@@ -15,13 +17,22 @@ function parseArgs(argv) {
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'okshopee24',
     label: 'help-state-backfill',
-    userCodes: []
+    userCodes: [],
+    allowWalletGap: false,
+    pendingContributionAmountCents: Number.isFinite(pendingAmountRaw) && pendingAmountRaw > 0
+      ? Math.trunc(pendingAmountRaw)
+      : 500
   };
 
   for (let i = 0; i < argv.length; i += 1) {
     const item = argv[i];
     if (item === '--apply') {
       args.apply = true;
+      continue;
+    }
+
+    if (item === '--allow-wallet-gap') {
+      args.allowWalletGap = true;
       continue;
     }
 
@@ -61,6 +72,13 @@ function parseArgs(argv) {
           .map((v) => String(v || '').trim())
           .filter(Boolean);
         break;
+      case 'pending-contribution-amount-cents': {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          args.pendingContributionAmountCents = Math.trunc(parsed);
+        }
+        break;
+      }
       default:
         break;
     }
@@ -157,24 +175,57 @@ async function ensureHelpTables(conn) {
        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
      ) ENGINE=InnoDB`
   );
+
+  await conn.query(
+    `CREATE TABLE IF NOT EXISTS v2_help_pending_contributions (
+       id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+       source_event_key VARCHAR(180) NOT NULL,
+       source_user_id BIGINT UNSIGNED NOT NULL,
+       beneficiary_user_id BIGINT UNSIGNED NOT NULL,
+       level_no SMALLINT UNSIGNED NOT NULL,
+       side ENUM('left','right','unknown') NOT NULL DEFAULT 'unknown',
+       amount_cents BIGINT UNSIGNED NOT NULL,
+       status ENUM('pending','processed','skipped','failed') NOT NULL DEFAULT 'pending',
+       processed_txn_id BIGINT UNSIGNED NULL,
+       reason VARCHAR(190) NULL,
+       created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+       processed_at DATETIME(3) NULL,
+       UNIQUE KEY uq_v2_help_pending_dedupe (source_event_key, source_user_id, beneficiary_user_id, level_no, side),
+       KEY idx_v2_help_pending_source_status (source_user_id, status, level_no, id),
+       KEY idx_v2_help_pending_beneficiary_status (beneficiary_user_id, status, level_no, id)
+     ) ENGINE=InnoDB`
+  );
 }
 
 async function loadStateRows(conn) {
   const [rows] = await conn.query(
     `SELECT state_key, state_value
      FROM state_store
-     WHERE state_key IN ('mlm_users', 'mlm_help_trackers', 'mlm_transactions')`
+     WHERE state_key IN (
+       'mlm_users',
+       'mlm_help_trackers',
+       'mlm_transactions',
+       'mlm_wallets',
+       'mlm_matrix_pending_contributions',
+       'mlm_matrix'
+     )`
   );
 
   const byKey = new Map((Array.isArray(rows) ? rows : []).map((row) => [String(row.state_key), row.state_value]));
   const legacyUsers = safeParseJson(byKey.get('mlm_users') || '[]', []);
   const legacyTrackers = safeParseJson(byKey.get('mlm_help_trackers') || '[]', []);
   const legacyTransactions = safeParseJson(byKey.get('mlm_transactions') || '[]', []);
+  const legacyWallets = safeParseJson(byKey.get('mlm_wallets') || '[]', []);
+  const legacyPendingContributions = safeParseJson(byKey.get('mlm_matrix_pending_contributions') || '[]', []);
+  const legacyMatrix = safeParseJson(byKey.get('mlm_matrix') || '[]', []);
 
   return {
     legacyUsers: Array.isArray(legacyUsers) ? legacyUsers : [],
     legacyTrackers: Array.isArray(legacyTrackers) ? legacyTrackers : [],
-    legacyTransactions: Array.isArray(legacyTransactions) ? legacyTransactions : []
+    legacyTransactions: Array.isArray(legacyTransactions) ? legacyTransactions : [],
+    legacyWallets: Array.isArray(legacyWallets) ? legacyWallets : [],
+    legacyPendingContributions: Array.isArray(legacyPendingContributions) ? legacyPendingContributions : [],
+    legacyMatrix: Array.isArray(legacyMatrix) ? legacyMatrix : []
   };
 }
 
@@ -413,6 +464,129 @@ function buildCandidates({ legacyUsers, legacyTrackers, legacyTransactions, v2By
   return { candidates: [], unresolved, sourceUsed: 'none' };
 }
 
+function buildLegacyUserLookups(legacyUsers) {
+  const byInternal = new Map();
+  const byPublicCode = new Map();
+
+  for (const user of legacyUsers) {
+    const internal = String(user?.id || '').trim();
+    const publicCode = normalizeCode(user?.userId);
+    if (internal) byInternal.set(internal, user);
+    if (publicCode) byPublicCode.set(publicCode, user);
+  }
+
+  return { byInternal, byPublicCode };
+}
+
+function resolveLegacyUserByRef(ref, lookups) {
+  const rawRef = String(ref || '').trim();
+  if (!rawRef) return null;
+
+  const fromInternal = lookups.byInternal.get(rawRef) || null;
+  if (fromInternal) return fromInternal;
+
+  const normalizedCode = normalizeCode(rawRef);
+  return lookups.byPublicCode.get(normalizedCode) || null;
+}
+
+function normalizePendingSide(value) {
+  const side = String(value || '').trim().toLowerCase();
+  if (side === 'left' || side === 'right') return side;
+  return 'unknown';
+}
+
+function buildPendingContributionCandidates({
+  legacyUsers,
+  legacyPendingContributions,
+  v2ByCode,
+  allowedCodes,
+  pendingContributionAmountCents
+}) {
+  const lookups = buildLegacyUserLookups(legacyUsers);
+  const unresolved = [];
+  const floorByUserLevel = new Map();
+  const pendingRows = [];
+  const seenDedupes = new Set();
+  const amountCents = Math.max(1, toInt(pendingContributionAmountCents));
+
+  for (let index = 0; index < legacyPendingContributions.length; index += 1) {
+    const item = legacyPendingContributions[index];
+    if (!item || typeof item !== 'object') continue;
+
+    const status = String(item.status || '').trim().toLowerCase();
+    if (status && status !== 'pending') continue;
+
+    const levelNo = toInt(item.level);
+    if (!levelNo) continue;
+
+    const sourceLegacyUser = resolveLegacyUserByRef(item.fromUserId, lookups);
+    const beneficiaryLegacyUser = resolveLegacyUserByRef(item.toUserId, lookups);
+    const sourceUserCode = normalizeCode(sourceLegacyUser?.userId || item.fromUserId);
+    const beneficiaryUserCode = normalizeCode(beneficiaryLegacyUser?.userId || item.toUserId);
+
+    if (!sourceUserCode || !beneficiaryUserCode) {
+      unresolved.push({
+        sourceRef: String(item.fromUserId || ''),
+        beneficiaryRef: String(item.toUserId || ''),
+        levelNo,
+        reason: 'invalid_legacy_user_reference'
+      });
+      continue;
+    }
+
+    if (
+      allowedCodes.size > 0
+      && !allowedCodes.has(sourceUserCode)
+      && !allowedCodes.has(beneficiaryUserCode)
+    ) {
+      continue;
+    }
+
+    const sourceV2User = v2ByCode.get(sourceUserCode) || null;
+    const beneficiaryV2User = v2ByCode.get(beneficiaryUserCode) || null;
+    if (!sourceV2User?.id || !beneficiaryV2User?.id) {
+      unresolved.push({
+        sourceUserCode,
+        beneficiaryUserCode,
+        levelNo,
+        reason: 'missing_v2_user'
+      });
+      continue;
+    }
+
+    const sourceLevelNo = Math.max(1, levelNo - 1);
+    const floorKey = `${sourceV2User.id}:${sourceLevelNo}`;
+    floorByUserLevel.set(floorKey, (floorByUserLevel.get(floorKey) || 0) + amountCents);
+
+    const pendingId = String(item.id || '').trim();
+    const sourceEventKey = pendingId
+      ? `legacy_pmc_${pendingId}`.slice(0, 180)
+      : `legacy_pmc_idx_${index}`;
+    const side = normalizePendingSide(item.side);
+
+    const dedupeKey = `${sourceEventKey}|${sourceV2User.id}|${beneficiaryV2User.id}|${levelNo}|${side}`;
+    if (seenDedupes.has(dedupeKey)) continue;
+    seenDedupes.add(dedupeKey);
+
+    pendingRows.push({
+      sourceEventKey,
+      sourceV2UserId: sourceV2User.id,
+      beneficiaryV2UserId: beneficiaryV2User.id,
+      sourceUserCode,
+      beneficiaryUserCode,
+      levelNo,
+      side,
+      amountCents
+    });
+  }
+
+  return {
+    pendingRows,
+    pendingGiveFloorByUserLevel: floorByUserLevel,
+    unresolved
+  };
+}
+
 async function loadExistingLevelRows(conn, candidateRows) {
   const byKey = new Map();
   for (const row of candidateRows) {
@@ -456,6 +630,61 @@ function buildMergedRows(candidateRows, existingByKey, mergeMode) {
   }
 
   return merged;
+}
+
+function applyPendingGiveFloorToMergedRows(mergedRows, pendingGiveFloorByUserLevel, v2ByCode) {
+  if (!(pendingGiveFloorByUserLevel instanceof Map) || pendingGiveFloorByUserLevel.size === 0) {
+    return mergedRows;
+  }
+
+  const userCodeById = new Map();
+  for (const row of v2ByCode.values()) {
+    userCodeById.set(Number(row.id), String(row.userCode));
+  }
+
+  const byKey = new Map(mergedRows.map((row) => [`${row.v2UserId}:${row.levelNo}`, row]));
+
+  for (const [key, floorPendingGiveCentsRaw] of pendingGiveFloorByUserLevel.entries()) {
+    const floorPendingGiveCents = toInt(floorPendingGiveCentsRaw);
+    if (floorPendingGiveCents <= 0) continue;
+
+    let row = byKey.get(key);
+    if (!row) {
+      const [v2UserIdRaw, levelNoRaw] = String(key).split(':');
+      const v2UserId = toInt(v2UserIdRaw);
+      const levelNo = toInt(levelNoRaw);
+      if (!v2UserId || !levelNo) continue;
+
+      row = {
+        v2UserId,
+        userCode: userCodeById.get(v2UserId) || `unknown:${v2UserId}`,
+        levelNo,
+        receiveCount: 0,
+        receiveTotalCents: 0,
+        lockedFirstTwoCents: 0,
+        lockedQualificationCents: 0,
+        safetyDeductedCents: 0,
+        pendingGiveCents: 0,
+        givenCents: 0,
+        incomeCreditedCents: 0,
+        lastEventSeq: 0,
+        hadExisting: false
+      };
+      mergedRows.push(row);
+      byKey.set(key, row);
+    }
+
+    row.pendingGiveCents = Math.max(toInt(row.pendingGiveCents), floorPendingGiveCents);
+    row.lockedFirstTwoCents = Math.max(toInt(row.lockedFirstTwoCents), row.pendingGiveCents);
+    row.incomeCreditedCents = Math.max(
+      0,
+      toInt(row.receiveTotalCents) - toInt(row.lockedFirstTwoCents) - toInt(row.lockedQualificationCents) - toInt(row.safetyDeductedCents)
+    );
+    row.lastEventSeq = Math.max(1, toInt(row.lastEventSeq));
+  }
+
+  mergedRows.sort((a, b) => a.v2UserId - b.v2UserId || a.levelNo - b.levelNo);
+  return mergedRows;
 }
 
 function buildProgressRows(mergedRows) {
@@ -563,17 +792,111 @@ async function applyMergedRows(conn, mergedRows, progressRows) {
   }
 }
 
-function summarize(mergedRows, progressRows, unresolved, args, sourceUsed) {
+async function applyPendingContributionRows(conn, pendingContributionRows) {
+  for (const row of pendingContributionRows) {
+    await conn.query(
+      `INSERT INTO v2_help_pending_contributions
+        (source_event_key, source_user_id, beneficiary_user_id, level_no, side, amount_cents, status)
+       VALUES
+        (?, ?, ?, ?, ?, ?, 'pending')
+       ON DUPLICATE KEY UPDATE
+        amount_cents = VALUES(amount_cents),
+        status = IF(status = 'processed', status, 'pending'),
+        reason = IF(status = 'processed', reason, NULL),
+        processed_txn_id = IF(status = 'processed', processed_txn_id, NULL),
+        processed_at = IF(status = 'processed', processed_at, NULL)`,
+      [
+        row.sourceEventKey,
+        row.sourceV2UserId,
+        row.beneficiaryV2UserId,
+        row.levelNo,
+        normalizePendingSide(row.side),
+        row.amountCents
+      ]
+    );
+  }
+}
+
+function buildWalletReconciliation({ legacyUsers, legacyWallets, v2ByCode, mergedRows }) {
+  const lookups = buildLegacyUserLookups(legacyUsers);
+  const pendingByUserId = new Map();
+
+  for (const row of mergedRows) {
+    pendingByUserId.set(
+      row.v2UserId,
+      (pendingByUserId.get(row.v2UserId) || 0) + toInt(row.pendingGiveCents)
+    );
+  }
+
+  const deltas = [];
+  for (const wallet of legacyWallets) {
+    if (!wallet || typeof wallet !== 'object') continue;
+
+    const legacyUser = resolveLegacyUserByRef(wallet.userId, lookups);
+    const userCode = normalizeCode(legacyUser?.userId || wallet.userId);
+    if (!userCode) continue;
+
+    const v2User = v2ByCode.get(userCode) || null;
+    if (!v2User?.id) continue;
+
+    const walletLockedCents = toCents(Number(wallet.lockedIncomeWallet || 0) + Number(wallet.giveHelpLocked || 0));
+    const derivedPendingCents = toInt(pendingByUserId.get(v2User.id) || 0);
+    const deltaCents = walletLockedCents - derivedPendingCents;
+
+    if (deltaCents === 0) continue;
+
+    deltas.push({
+      userCode,
+      walletLockedCents,
+      derivedPendingCents,
+      deltaCents
+    });
+  }
+
+  const positive = deltas.filter((item) => item.deltaCents > 0);
+  const negative = deltas.filter((item) => item.deltaCents < 0);
+
+  return {
+    totalComparedUsers: deltas.length,
+    positiveGapUsers: positive.length,
+    negativeGapUsers: negative.length,
+    maxPositiveGapCents: positive.length > 0 ? Math.max(...positive.map((item) => item.deltaCents)) : 0,
+    maxNegativeGapCents: negative.length > 0 ? Math.min(...negative.map((item) => item.deltaCents)) : 0,
+    samples: deltas
+      .sort((a, b) => Math.abs(b.deltaCents) - Math.abs(a.deltaCents))
+      .slice(0, 50)
+  };
+}
+
+function summarize({
+  mergedRows,
+  progressRows,
+  unresolved,
+  pendingContributionRows,
+  unresolvedPendingContributions,
+  walletReconciliation,
+  args,
+  sourceUsed
+}) {
   const affectedUsers = new Set(mergedRows.map((row) => row.userCode));
+  const pendingSources = new Set(pendingContributionRows.map((row) => row.sourceUserCode));
+
   return {
     apply: args.apply,
     mergeMode: args.mergeMode,
     sourceUsed,
     selectedUserCodes: args.userCodes,
+    pendingContributionAmountCents: args.pendingContributionAmountCents,
+    allowWalletGap: args.allowWalletGap,
     candidateRows: mergedRows.length,
     affectedUsers: affectedUsers.size,
     progressRows: progressRows.length,
     unresolvedCount: unresolved.length,
+    pendingContributionRows: pendingContributionRows.length,
+    pendingContributionSources: pendingSources.size,
+    pendingContributionUnresolvedCount: unresolvedPendingContributions.length,
+    pendingContributionUnresolved: unresolvedPendingContributions.slice(0, 100),
+    walletReconciliation,
     unresolved: unresolved.slice(0, 100),
     sample: mergedRows.slice(0, 20)
   };
@@ -608,11 +931,51 @@ async function main() {
       allowedCodes
     });
 
+    const pendingContributionResult = buildPendingContributionCandidates({
+      legacyUsers: stateRows.legacyUsers,
+      legacyPendingContributions: stateRows.legacyPendingContributions,
+      v2ByCode,
+      allowedCodes,
+      pendingContributionAmountCents: args.pendingContributionAmountCents
+    });
+
     const existingByKey = await loadExistingLevelRows(conn, candidates);
     const mergedRows = buildMergedRows(candidates, existingByKey, args.mergeMode);
-    const progressRows = buildProgressRows(mergedRows);
+    applyPendingGiveFloorToMergedRows(
+      mergedRows,
+      pendingContributionResult.pendingGiveFloorByUserLevel,
+      v2ByCode
+    );
 
-    const summary = summarize(mergedRows, progressRows, unresolved, args, sourceUsed);
+    const progressRows = buildProgressRows(mergedRows);
+    const walletReconciliation = buildWalletReconciliation({
+      legacyUsers: stateRows.legacyUsers,
+      legacyWallets: stateRows.legacyWallets,
+      v2ByCode,
+      mergedRows
+    });
+
+    if (
+      args.apply
+      && !args.allowWalletGap
+      && Number(walletReconciliation.positiveGapUsers || 0) > 0
+    ) {
+      throw new Error(
+        `Wallet reconciliation has ${walletReconciliation.positiveGapUsers} users with locked-wallet > derived pending help. `
+        + `Review summary.json and rerun with --allow-wallet-gap only after manual validation.`
+      );
+    }
+
+    const summary = summarize({
+      mergedRows,
+      progressRows,
+      unresolved,
+      pendingContributionRows: pendingContributionResult.pendingRows,
+      unresolvedPendingContributions: pendingContributionResult.unresolved,
+      walletReconciliation,
+      args,
+      sourceUsed
+    });
     fs.writeFileSync(path.join(evidenceDir, 'summary.json'), JSON.stringify(summary, null, 2), 'utf8');
 
     if (!args.apply) {
@@ -624,6 +987,7 @@ async function main() {
 
     await conn.beginTransaction();
     await applyMergedRows(conn, mergedRows, progressRows);
+    await applyPendingContributionRows(conn, pendingContributionResult.pendingRows);
     await conn.commit();
 
     console.log('Apply complete.');
