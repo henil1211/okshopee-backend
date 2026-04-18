@@ -329,6 +329,28 @@ async function main() {
         summary['delete:v2_ledger_entries.by_user'] = Number(deleteEntryUserResult?.affectedRows || 0);
       }
 
+      if (await tableExists(conn, 'v2_pins')) {
+        const pinColumns = await getTableColumns(conn, 'v2_pins');
+        if (pinColumns.has('used_by_user_id')) {
+          const idInClause = inClausePlaceholders(userIds);
+          const setClauses = ['used_by_user_id = NULL'];
+          if (pinColumns.has('used_at')) {
+            setClauses.push('used_at = NULL');
+          }
+          if (pinColumns.has('updated_at')) {
+            setClauses.push('updated_at = NOW(3)');
+          }
+
+          const [updateUsedByResult] = await conn.execute(
+            `UPDATE v2_pins
+             SET ${setClauses.join(', ')}
+             WHERE used_by_user_id IN (${idInClause})`,
+            userIds
+          );
+          summary['update:v2_pins.used_by_user_id'] = Number(updateUsedByResult?.affectedRows || 0);
+        }
+      }
+
       await deleteByColumns(conn, 'v2_help_events_queue', ['actor_user_id', 'source_user_id', 'new_member_user_id'], userIds, summary, 'delete');
       await deleteByColumns(conn, 'v2_help_pending_contributions', ['source_user_id', 'beneficiary_user_id'], userIds, summary, 'delete');
       await deleteByColumns(conn, 'v2_help_level_state', ['user_id'], userIds, summary, 'delete');
