@@ -10184,18 +10184,40 @@ class Database {
     this.setStorageItem(DB_KEYS.OTP_RECORDS, JSON.stringify(records));
   }
 
+  private static resolveOtpSubjectCandidates(subject: string): string[] {
+    const normalized = String(subject || '').trim();
+    const candidates = new Set<string>();
+    if (normalized) candidates.add(normalized);
+
+    const byInternalId = normalized ? this.getUserById(normalized) : null;
+    if (byInternalId?.id) candidates.add(String(byInternalId.id).trim());
+    if (byInternalId?.userId) candidates.add(String(byInternalId.userId).trim());
+
+    const byPublicUserId = normalized ? this.getUserByUserId(normalized) : null;
+    if (byPublicUserId?.id) candidates.add(String(byPublicUserId.id).trim());
+    if (byPublicUserId?.userId) candidates.add(String(byPublicUserId.userId).trim());
+
+    return Array.from(candidates).filter((value) => value.length > 0);
+  }
+
   static generateOtp(userId: string, email: string, purpose: OtpRecord['purpose']): OtpRecord {
+    const otpSubjectCandidates = this.resolveOtpSubjectCandidates(userId);
+    const otpSubject =
+      otpSubjectCandidates.find((candidate) => /^\d{7}$/.test(candidate))
+      || otpSubjectCandidates[0]
+      || String(userId || '').trim();
+
     // Invalidate existing OTPs for this user/purpose
     const records = this.getOtpRecords();
     const updated = records.map(r =>
-      (r.userId === userId && r.purpose === purpose && !r.isUsed)
+      (otpSubjectCandidates.includes(String(r.userId || '').trim()) && r.purpose === purpose && !r.isUsed)
         ? { ...r, isUsed: true }
         : r
     );
 
     const otp: OtpRecord = {
       id: `otp_${Date.now()}`,
-      userId,
+      userId: otpSubject,
       email,
       otp: generateOTP(),
       purpose,
@@ -10211,8 +10233,12 @@ class Database {
 
   static verifyOtp(userId: string, otp: string, purpose: OtpRecord['purpose']): boolean {
     const records = this.getOtpRecords();
+    const otpSubjectCandidates = this.resolveOtpSubjectCandidates(userId);
+    if (otpSubjectCandidates.length === 0) {
+      otpSubjectCandidates.push(String(userId || '').trim());
+    }
     const record = records.find(
-      r => r.userId === userId &&
+      r => otpSubjectCandidates.includes(String(r.userId || '').trim()) &&
         r.otp === otp &&
         r.purpose === purpose &&
         !r.isUsed &&

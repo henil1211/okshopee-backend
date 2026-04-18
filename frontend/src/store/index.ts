@@ -5232,6 +5232,7 @@ export const useOtpStore = create<OtpState>((set) => ({
   otpExpiry: null,
 
   sendOtp: async (userId: string, email: string, purpose, context) => {
+    const otpRecordsBeforeGenerate = Database.getOtpRecords();
     const otpRecord = Database.generateOtp(userId, email, purpose);
     const purposeLabel = purpose === 'withdrawal'
       ? 'withdrawal'
@@ -5274,6 +5275,8 @@ export const useOtpStore = create<OtpState>((set) => ({
       }
     });
     if (!emailResult.success) {
+      // If dispatch failed, restore previous OTP state so a still-valid code is not accidentally invalidated.
+      Database.saveOtpRecords(otpRecordsBeforeGenerate);
       return {
         success: false,
         status: 'failed',
