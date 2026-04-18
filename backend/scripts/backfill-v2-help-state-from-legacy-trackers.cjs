@@ -255,6 +255,64 @@ function normalizeLegacyLevelFromTransaction(tx) {
   return parsed > 0 ? parsed : 1;
 }
 
+function buildLegacyLevelAmountMap({ legacyTransactions, fallbackLevel1AmountCents }) {
+  const grouped = new Map();
+
+  for (const tx of legacyTransactions) {
+    if (!tx || typeof tx !== 'object') continue;
+
+    const type = String(tx.type || '').trim().toLowerCase();
+    const status = String(tx.status || '').trim().toLowerCase();
+    if (status !== 'completed') continue;
+    if (type !== 'receive_help' && type !== 'give_help') continue;
+
+    const levelNo = normalizeLegacyLevelFromTransaction(tx);
+    if (levelNo <= 0) continue;
+
+    const amountCents = toCents(Math.abs(Number(tx.amount || 0)));
+    if (amountCents <= 0) continue;
+
+    let byAmount = grouped.get(levelNo);
+    if (!byAmount) {
+      byAmount = new Map();
+      grouped.set(levelNo, byAmount);
+    }
+    byAmount.set(amountCents, (byAmount.get(amountCents) || 0) + 1);
+  }
+
+  const levelAmountByLevel = new Map();
+  const fallbackBase = Math.max(1, toInt(fallbackLevel1AmountCents));
+
+  for (const [levelNo, byAmount] of grouped.entries()) {
+    let bestAmount = 0;
+    let bestCount = -1;
+    for (const [amountCents, count] of byAmount.entries()) {
+      if (count > bestCount) {
+        bestCount = count;
+        bestAmount = amountCents;
+      }
+    }
+    if (bestAmount > 0) {
+      levelAmountByLevel.set(levelNo, bestAmount);
+    }
+  }
+
+  if (!levelAmountByLevel.has(1)) {
+    levelAmountByLevel.set(1, fallbackBase);
+  }
+
+  return levelAmountByLevel;
+}
+
+function resolvePendingAmountCentsForLevel(levelNo, levelAmountByLevel, fallbackLevel1AmountCents) {
+  const direct = toInt(levelAmountByLevel.get(levelNo));
+  if (direct > 0) return direct;
+
+  const base = toInt(levelAmountByLevel.get(1)) || Math.max(1, toInt(fallbackLevel1AmountCents));
+  const exponent = Math.max(0, Math.min(20, toInt(levelNo) - 1));
+  return Math.max(1, Math.trunc(base * Math.pow(2, exponent)));
+}
+
 function buildCandidatesFromTrackers({ legacyUsers, legacyTrackers, v2ByCode, allowedCodes }) {
   const legacyByInternal = new Map();
   for (const user of legacyUsers) {
@@ -498,16 +556,16 @@ function normalizePendingSide(value) {
 function buildPendingContributionCandidates({
   legacyUsers,
   legacyPendingContributions,
+  levelAmountByLevel,
   v2ByCode,
   allowedCodes,
-  pendingContributionAmountCents
+  fallbackLevel1AmountCents
 }) {
   const lookups = buildLegacyUserLookups(legacyUsers);
   const unresolved = [];
   const floorByUserLevel = new Map();
   const pendingRows = [];
   const seenDedupes = new Set();
-  const amountCents = Math.max(1, toInt(pendingContributionAmountCents));
 
   for (let index = 0; index < legacyPendingContributions.length; index += 1) {
     const item = legacyPendingContributions[index];
@@ -518,6 +576,12 @@ function buildPendingContributionCandidates({
 
     const levelNo = toInt(item.level);
     if (!levelNo) continue;
+
+    const amountCents = resolvePendingAmountCentsForLevel(
+      levelNo,
+      levelAmountByLevel,
+      fallbackLevel1AmountCents
+    );
 
     const sourceLegacyUser = resolveLegacyUserByRef(item.fromUserId, lookups);
     const beneficiaryLegacyUser = resolveLegacyUserByRef(item.toUserId, lookups);
@@ -875,6 +939,7 @@ function summarize({
   pendingContributionRows,
   unresolvedPendingContributions,
   walletReconciliation,
+  inferredLevelAmounts,
   args,
   sourceUsed
 }) {
@@ -887,6 +952,7 @@ function summarize({
     sourceUsed,
     selectedUserCodes: args.userCodes,
     pendingContributionAmountCents: args.pendingContributionAmountCents,
+    inferredPendingAmountByLevelCents: inferredLevelAmounts,
     allowWalletGap: args.allowWalletGap,
     candidateRows: mergedRows.length,
     affectedUsers: affectedUsers.size,
@@ -931,12 +997,18 @@ async function main() {
       allowedCodes
     });
 
+    const levelAmountByLevel = buildLegacyLevelAmountMap({
+      legacyTransactions: stateRows.legacyTransactions,
+      fallbackLevel1AmountCents: args.pendingContributionAmountCents
+    });
+
     const pendingContributionResult = buildPendingContributionCandidates({
       legacyUsers: stateRows.legacyUsers,
       legacyPendingContributions: stateRows.legacyPendingContributions,
+      levelAmountByLevel,
       v2ByCode,
       allowedCodes,
-      pendingContributionAmountCents: args.pendingContributionAmountCents
+      fallbackLevel1AmountCents: args.pendingContributionAmountCents
     });
 
     const existingByKey = await loadExistingLevelRows(conn, candidates);
@@ -973,6 +1045,11 @@ async function main() {
       pendingContributionRows: pendingContributionResult.pendingRows,
       unresolvedPendingContributions: pendingContributionResult.unresolved,
       walletReconciliation,
+      inferredLevelAmounts: Object.fromEntries(
+        Array.from(levelAmountByLevel.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([levelNo, amountCents]) => [String(levelNo), amountCents])
+      ),
       args,
       sourceUsed
     });
