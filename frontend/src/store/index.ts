@@ -157,6 +157,78 @@ function resolveV2ReadRequestHeaders(params: {
   return { headers };
 }
 
+let walletLoadRequestSequence = 0;
+let walletTransactionsRequestSequence = 0;
+
+function resolveActiveWalletContextUser(): User | null {
+  const authState = useAuthStore.getState();
+  const activeUser = authState.impersonatedUser || authState.user;
+  if (!activeUser) return null;
+  return resolveCanonicalUserForWalletActions(activeUser.id)
+    || Database.getUserByUserId(activeUser.userId)
+    || Database.getUserById(activeUser.id)
+    || activeUser;
+}
+
+function isAdminImpersonationActive(): boolean {
+  const authState = useAuthStore.getState();
+  return !!(authState.user?.isAdmin && authState.impersonatedUser);
+}
+
+function normalizePurchasedPinCodes(rawPinCodes: unknown): string[] {
+  if (!Array.isArray(rawPinCodes)) return [];
+
+  const normalized = rawPinCodes
+    .map((value) => String(value || '').trim().toUpperCase())
+    .filter((value) => value.length >= 6 && value.length <= 40);
+
+  return Array.from(new Set(normalized));
+}
+
+function upsertPurchasedPinsIntoLocalCache(params: {
+  ownerInternalUserId: string;
+  pinPriceCents: number;
+  pinCodes: string[];
+  createdByRef: string;
+}): boolean {
+  const ownerInternalUserId = String(params.ownerInternalUserId || '').trim();
+  if (!ownerInternalUserId || params.pinCodes.length === 0) {
+    return false;
+  }
+
+  const existingPins = Database.getPins();
+  const existingCodes = new Set(existingPins.map((pin) => String(pin.pinCode || '').trim().toUpperCase()));
+  const now = new Date().toISOString();
+  const amount = Math.max(0, Number(params.pinPriceCents || 0) / 100);
+  const createdByRef = String(params.createdByRef || '').trim() || ownerInternalUserId;
+  const pinsToAdd: Pin[] = [];
+
+  params.pinCodes.forEach((pinCode, index) => {
+    const normalizedCode = String(pinCode || '').trim().toUpperCase();
+    if (!normalizedCode || existingCodes.has(normalizedCode)) {
+      return;
+    }
+
+    pinsToAdd.push({
+      id: `pin_v2_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`,
+      pinCode: normalizedCode,
+      amount,
+      status: 'unused',
+      ownerId: ownerInternalUserId,
+      createdBy: createdByRef,
+      createdAt: now
+    });
+    existingCodes.add(normalizedCode);
+  });
+
+  if (pinsToAdd.length === 0) {
+    return false;
+  }
+
+  Database.savePins([...existingPins, ...pinsToAdd]);
+  return true;
+}
+
 function buildWalletDefaultsForV2Read(userId: string, existingWallet?: Wallet | null): Wallet {
   return {
     userId,
@@ -2538,18 +2610,31 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
   loadWallet: (userId: string, options?: { v2Only?: boolean }) => {
     void (async () => {
+      const requestSequence = ++walletLoadRequestSequence;
       const v2Only = !!options?.v2Only;
-      const canonicalUser = resolveCanonicalUserForWalletActions(userId);
-      const resolvedUser = canonicalUser
+      const requestedCanonicalUser = resolveCanonicalUserForWalletActions(userId);
+      const requestedResolvedUser = requestedCanonicalUser
         || Database.getUserById(userId)
         || Database.getUserByUserId(userId);
+      const contextUser = resolveActiveWalletContextUser();
+      const resolvedUser = isAdminImpersonationActive() && contextUser
+        ? contextUser
+        : requestedResolvedUser;
       const effectiveUserId = resolvedUser?.id || userId;
+
+      const shouldApplyResult = () => {
+        if (requestSequence !== walletLoadRequestSequence) return false;
+        const latestContextUser = resolveActiveWalletContextUser();
+        if (latestContextUser && latestContextUser.id !== effectiveUserId) return false;
+        return true;
+      };
 
       if (resolvedUser) {
         const v2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(resolvedUser, {
           includeLegacyTransactions: !v2Only
         }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
         if (v2Read.snapshot) {
+          if (!shouldApplyResult()) return;
           set({
             wallet: v2Read.snapshot.wallet,
             transactions: v2Read.snapshot.transactions,
@@ -2560,6 +2645,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         }
 
         if (v2Only) {
+          if (!shouldApplyResult()) return;
           set({
             v2ReadHealthy: false,
             v2ReadError: v2Read.errorMessage || V2_TRANSFER_SYNC_REQUIRED_MESSAGE
@@ -2569,6 +2655,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       }
 
       if (v2Only) {
+        if (!shouldApplyResult()) return;
         set({
           v2ReadHealthy: false,
           v2ReadError: V2_TRANSFER_SYNC_REQUIRED_MESSAGE
@@ -2590,6 +2677,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       Database.checkDirectReferralDeadline(effectiveUserId);
       const wallet = Database.getWallet(effectiveUserId);
       const transactions = Database.getUserTransactions(effectiveUserId);
+      if (!shouldApplyResult()) return;
       set({
         wallet,
         transactions,
@@ -2901,17 +2989,31 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
   refreshTransactions: (userId: string, options?: { v2Only?: boolean }) => {
     void (async () => {
+      const requestSequence = ++walletTransactionsRequestSequence;
       const v2Only = !!options?.v2Only;
-      const canonicalUser = resolveCanonicalUserForWalletActions(userId);
-      const resolvedUser = canonicalUser
+      const requestedCanonicalUser = resolveCanonicalUserForWalletActions(userId);
+      const requestedResolvedUser = requestedCanonicalUser
         || Database.getUserById(userId)
         || Database.getUserByUserId(userId);
+      const contextUser = resolveActiveWalletContextUser();
+      const resolvedUser = isAdminImpersonationActive() && contextUser
+        ? contextUser
+        : requestedResolvedUser;
+      const effectiveUserId = resolvedUser?.id || userId;
+
+      const shouldApplyResult = () => {
+        if (requestSequence !== walletTransactionsRequestSequence) return false;
+        const latestContextUser = resolveActiveWalletContextUser();
+        if (latestContextUser && latestContextUser.id !== effectiveUserId) return false;
+        return true;
+      };
 
       if (resolvedUser) {
         const v2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(resolvedUser, {
           includeLegacyTransactions: !v2Only
         }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
         if (v2Read.snapshot) {
+          if (!shouldApplyResult()) return;
           set({
             wallet: v2Read.snapshot.wallet,
             transactions: v2Read.snapshot.transactions,
@@ -2922,6 +3024,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         }
 
         if (v2Only) {
+          if (!shouldApplyResult()) return;
           set({
             transactions: [],
             v2ReadHealthy: false,
@@ -2930,7 +3033,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
           return;
         }
 
-        const transactions = Database.getUserTransactions(userId);
+        const transactions = Database.getUserTransactions(effectiveUserId);
+        if (!shouldApplyResult()) return;
         set({
           transactions,
           v2ReadHealthy: false,
@@ -2940,6 +3044,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       }
 
       if (v2Only) {
+        if (!shouldApplyResult()) return;
         set({
           transactions: [],
           v2ReadHealthy: false,
@@ -2948,7 +3053,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         return;
       }
 
-      const transactions = Database.getUserTransactions(userId);
+      const transactions = Database.getUserTransactions(effectiveUserId);
+      if (!shouldApplyResult()) return;
       set({
         transactions,
         v2ReadHealthy: false,
@@ -3246,6 +3352,15 @@ export const usePinStore = create<PinState>((set, get) => ({
         return { success: false, message: errorMessage };
       }
 
+      const purchasedPinCodes = normalizePurchasedPinCodes(payload?.pinCodes);
+      if (purchasedPinCodes.length === 0 && payload?.idempotentReplay !== true) {
+        return {
+          success: false,
+          message: 'PIN purchase was accepted but no PIN codes were returned. Please contact admin immediately with your request ID.'
+        };
+      }
+
+      let hydratedAfterPurchase = false;
       try {
         await Database.hydrateFromServer({
           keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS, DB_KEYS.PINS, DB_KEYS.PIN_PURCHASE_REQUESTS],
@@ -3254,8 +3369,18 @@ export const usePinStore = create<PinState>((set, get) => ({
           timeoutMs: 20000,
           retryDelayMs: 1000
         });
+        hydratedAfterPurchase = true;
       } catch {
         // Best-effort refresh. Purchase has already been committed server-side.
+      }
+
+      if (!hydratedAfterPurchase && purchasedPinCodes.length > 0) {
+        upsertPurchasedPinsIntoLocalCache({
+          ownerInternalUserId: effectiveUserId,
+          pinPriceCents,
+          pinCodes: purchasedPinCodes,
+          createdByRef: buyerUser.id
+        });
       }
 
       get().loadPins(effectiveUserId);
