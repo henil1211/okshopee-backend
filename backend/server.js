@@ -168,6 +168,9 @@ const V2_REFERRAL_MAX_LEVEL = 100;
 const V2_REFERRAL_SOURCE_REF_MAX_LENGTH = 120;
 const V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH = 120;
 const V2_HELP_EVENT_TYPE_ACTIVATION_JOIN = 'activation_join';
+const V2_HELP_EVENT_REQUIRE_REGISTRATION_SOURCE = process.env.V2_HELP_EVENT_REQUIRE_REGISTRATION_SOURCE
+  ? process.env.V2_HELP_EVENT_REQUIRE_REGISTRATION_SOURCE === 'true'
+  : true;
 const V2_HELP_STAGE_CODE_MAX_LENGTH = 40;
 const V2_HELP_LEVEL1_AMOUNT_CENTS_RAW = Number(process.env.V2_HELP_LEVEL1_AMOUNT_CENTS || 500);
 const V2_HELP_LEVEL1_AMOUNT_CENTS = Number.isFinite(V2_HELP_LEVEL1_AMOUNT_CENTS_RAW) && V2_HELP_LEVEL1_AMOUNT_CENTS_RAW > 0
@@ -1072,6 +1075,20 @@ function isValidV2HelpEventSourceRef(value) {
   return /^[a-zA-Z0-9:_-]+$/.test(normalized);
 }
 
+function buildV2RegistrationHelpSourceRef(sourceUserCode, newMemberUserCode) {
+  return `reg_help_${sourceUserCode}_${newMemberUserCode}`;
+}
+
+function isCanonicalV2RegistrationHelpEventSource({ sourceUserCode, newMemberUserCode, sourceRef, eventType }) {
+  if (!V2_HELP_EVENT_REQUIRE_REGISTRATION_SOURCE) return true;
+  if (!isValidV2HelpEventType(eventType)) return false;
+  if (!isValidV2UserCode(sourceUserCode) || !isValidV2UserCode(newMemberUserCode)) return false;
+  if (sourceUserCode !== newMemberUserCode) return false;
+
+  const expectedSourceRef = buildV2RegistrationHelpSourceRef(sourceUserCode, newMemberUserCode);
+  return String(sourceRef || '').trim() === expectedSourceRef;
+}
+
 function isValidV2WalletType(value) {
   return value === 'fund' || value === 'income' || value === 'royalty';
 }
@@ -1936,6 +1953,9 @@ function parseV2PostRegistrationQueuePayload(taskType, rawPayload) {
     }
     if (!isValidV2HelpEventType(eventType)) {
       throw createApiError(400, 'Queue payload has invalid eventType', 'INVALID_QUEUE_PAYLOAD');
+    }
+    if (!isCanonicalV2RegistrationHelpEventSource({ sourceUserCode, newMemberUserCode, sourceRef, eventType })) {
+      throw createApiError(400, 'Queue payload has invalid source mapping for help event', 'INVALID_QUEUE_PAYLOAD');
     }
 
     return {
@@ -6328,6 +6348,18 @@ async function processV2HelpEvent({
   if (!isValidV2HelpEventSourceRef(normalizedSourceRef)) {
     throw createApiError(400, `sourceRef must be 1-${V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH} chars [a-zA-Z0-9:_-]`, 'INVALID_SOURCE_REF');
   }
+  if (!isCanonicalV2RegistrationHelpEventSource({
+    sourceUserCode,
+    newMemberUserCode,
+    sourceRef: normalizedSourceRef,
+    eventType
+  })) {
+    throw createApiError(
+      400,
+      'Help event must use canonical registration source mapping (sourceUserCode == newMemberUserCode and matching reg_help sourceRef)',
+      'INVALID_EVENT_SOURCE_MAPPING'
+    );
+  }
   const levelNo = 1;
   const settlementAmountCents = V2_HELP_LEVEL1_AMOUNT_CENTS;
 
@@ -8937,6 +8969,14 @@ const server = createServer(async (req, res) => {
           ok: false,
           error: `sourceRef must be 1-${V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH} chars [a-zA-Z0-9:_-]`,
           code: 'INVALID_SOURCE_REF'
+        });
+        return;
+      }
+      if (!isCanonicalV2RegistrationHelpEventSource({ sourceUserCode, newMemberUserCode, sourceRef, eventType })) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'Help event must use canonical registration source mapping (sourceUserCode == newMemberUserCode and matching reg_help sourceRef)',
+          code: 'INVALID_EVENT_SOURCE_MAPPING'
         });
         return;
       }
