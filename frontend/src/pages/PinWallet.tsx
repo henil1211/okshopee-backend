@@ -33,7 +33,7 @@ export default function PinWallet() {
     copyPinToClipboard 
   } = usePinStore();
   const { sendOtp, verifyOtp } = useOtpStore();
-  const { loadWallet, refreshTransactions } = useWalletStore();
+  const { wallet, loadWallet, refreshTransactions } = useWalletStore();
   const syncKey = useSyncRefreshKey();
   const displayUser = useMemo(() => {
     const activeUser = impersonatedUser || user;
@@ -75,8 +75,9 @@ export default function PinWallet() {
     if (displayUser) {
       loadPins(displayUser.id);
       loadPurchaseRequests(displayUser.id);
+      loadWallet(displayUser.id, { v2Only: true });
     }
-  }, [isAuthenticated, displayUser, loadPins, loadPurchaseRequests, navigate, syncKey]);
+  }, [isAuthenticated, displayUser, loadPins, loadPurchaseRequests, loadWallet, navigate, syncKey]);
 
   useEffect(() => {
     if (!isAuthenticated || !displayUser) return;
@@ -737,7 +738,13 @@ export default function PinWallet() {
     const pinAmount = settings.pinAmount;
     const quantityNumber = Math.max(0, Number.parseInt(requestQuantity, 10) || 0);
     const totalAmount = quantityNumber * pinAmount;
-    const fundWalletBalance = displayUser ? (Database.getWallet(displayUser.id)?.depositWallet || 0) : 0;
+    const localFundWalletBalance = displayUser ? (Database.getWallet(displayUser.id)?.depositWallet || 0) : 0;
+    const liveFundWalletBalance = displayUser && wallet && String(wallet.userId || '').trim() === String(displayUser.id || '').trim()
+      ? Number(wallet.depositWallet || 0)
+      : null;
+    const fundWalletBalance = liveFundWalletBalance != null
+      ? liveFundWalletBalance
+      : localFundWalletBalance;
     const canDirectBuy = quantityNumber > 0 && fundWalletBalance >= totalAmount;
     const activeCryptoMethod = Database.getPaymentMethods().find(m => m.isActive && m.type === 'crypto');
 
