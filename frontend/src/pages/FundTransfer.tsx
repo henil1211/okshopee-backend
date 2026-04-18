@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import MobileBottomNav from '@/components/MobileBottomNav';
+import { useOtpResend } from '@/hooks/use-otp-resend';
 import { formatCurrency } from '@/utils/helpers';
 import { toast } from 'sonner';
 
@@ -34,6 +35,7 @@ export default function FundTransfer() {
   const [isTransferOtpSent, setIsTransferOtpSent] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [recipientName, setRecipientName] = useState('');
+  const transferOtpResend = useOtpResend(30);
 
   const isRoyaltyTransfer = transferData.source === 'royalty';
   const isExternalTransfer = transferData.source !== 'royalty';
@@ -74,6 +76,7 @@ export default function FundTransfer() {
     setIsSendingTransferOtp(false);
     setIsTransferOtpSent(false);
     setShowTransferTxPassword(false);
+    transferOtpResend.resetCooldown();
   };
 
   const handleLogout = () => {
@@ -93,6 +96,7 @@ export default function FundTransfer() {
     setIsSendingTransferOtp(false);
     if (result.success) {
       setIsTransferOtpSent(true);
+      transferOtpResend.startCooldown();
       if (result.status === 'pending') {
         toast.warning(result.message);
       } else {
@@ -339,10 +343,16 @@ export default function FundTransfer() {
                       type="button"
                       variant="outline"
                       onClick={handleSendTransferOtp}
-                      disabled={isSendingTransferOtp || isTransferOtpSent || !v2ReadHealthy}
+                      disabled={isSendingTransferOtp || transferOtpResend.isCoolingDown || !v2ReadHealthy}
                       className="border-white/20 text-white hover:bg-white/10 whitespace-nowrap"
                     >
-                      {isSendingTransferOtp ? <RefreshCw className="w-4 h-4 animate-spin" /> : isTransferOtpSent ? 'OTP Sent' : 'Send OTP'}
+                      {isSendingTransferOtp
+                        ? <RefreshCw className="w-4 h-4 animate-spin" />
+                        : !isTransferOtpSent
+                          ? 'Send OTP'
+                          : transferOtpResend.isCoolingDown
+                            ? `Resend in ${transferOtpResend.remainingSeconds}s`
+                            : 'Resend OTP'}
                     </Button>
                   </div>
                   {isTransferOtpSent && (

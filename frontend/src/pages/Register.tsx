@@ -23,6 +23,7 @@ import {
   normalizePhoneNumber
 } from '@/utils/helpers';
 import { AUTH_MAINTENANCE_ENABLED, AUTH_MAINTENANCE_MESSAGE } from '@/lib/maintenance';
+import { useOtpResend } from '@/hooks/use-otp-resend';
 
 export default function Register() {
   const navigate = useNavigate();
@@ -62,6 +63,7 @@ export default function Register() {
   const [otpVerified, setOtpVerified] = useState(false);
   const [isSendingOtp, setIsSendingOtp] = useState(false);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
+  const otpResend = useOtpResend(30);
   const [isPinChecking, setIsPinChecking] = useState(false);
   const successBannerRef = useRef<HTMLDivElement | null>(null);
   const pinCodeRef = useRef('');
@@ -171,6 +173,7 @@ export default function Register() {
     setOtpVerified(false);
     setIsSendingOtp(false);
     setIsVerifyingOtp(false);
+    otpResend.resetCooldown();
   };
 
   const handleEmailChange = (value: string) => {
@@ -233,6 +236,7 @@ export default function Register() {
 
     setOtpSent(true);
     setOtpVerified(false);
+    otpResend.startCooldown();
   };
 
   const handleVerifyOtpCode = async () => {
@@ -823,7 +827,7 @@ export default function Register() {
                       <Button
                         type="button"
                         onClick={handleSendOtp}
-                        disabled={isSendingOtp}
+                        disabled={isSendingOtp || otpResend.isCoolingDown}
                         className="w-full sm:w-auto btn-primary"
                       >
                         {isSendingOtp ? (
@@ -831,7 +835,9 @@ export default function Register() {
                             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                             Sending...
                           </>
-                        ) : otpSent ? 'Resend OTP' : 'Send OTP'}
+                        ) : otpSent
+                          ? (otpResend.isCoolingDown ? `Resend in ${otpResend.remainingSeconds}s` : 'Resend OTP')
+                          : 'Send OTP'}
                       </Button>
                       {otpVerified && (
                         <span className="inline-flex items-center text-emerald-400 text-sm">

@@ -20,6 +20,7 @@ import MobileBottomNav from '@/components/MobileBottomNav';
 import BrandLogo from '@/components/BrandLogo';
 import { toast } from 'sonner';
 import Database from '@/db';
+import { useOtpResend } from '@/hooks/use-otp-resend';
 
 const ROYALTY_MILESTONES = [
   { qualifiedLevel: 3, percent: 5 },
@@ -70,6 +71,7 @@ export default function Dashboard() {
   const [withdrawOtp, setWithdrawOtp] = useState('');
   const [isSendingWithdrawOtp, setIsSendingWithdrawOtp] = useState(false);
   const [isWithdrawOtpSent, setIsWithdrawOtpSent] = useState(false);
+  const withdrawOtpResend = useOtpResend(30);
   const [copied, setCopied] = useState(false);
   const settings = Database.getSettings();
   const withdrawalFeePercent = settings.withdrawalFeePercent;
@@ -164,6 +166,7 @@ export default function Dashboard() {
       setWithdrawTransactionPassword('');
       setWithdrawOtp('');
       setIsWithdrawOtpSent(false);
+      withdrawOtpResend.resetCooldown();
     } else {
       toast.error(result.message);
     }
@@ -204,6 +207,7 @@ export default function Dashboard() {
     setIsSendingWithdrawOtp(false);
     if (result.success) {
       setIsWithdrawOtpSent(true);
+      withdrawOtpResend.startCooldown();
       if (result.status === 'pending') {
         toast.warning(result.message);
       } else {
@@ -1210,10 +1214,16 @@ export default function Dashboard() {
                     type="button"
                     variant="outline"
                     onClick={handleSendWithdrawOtp}
-                    disabled={isSendingWithdrawOtp}
+                    disabled={isSendingWithdrawOtp || withdrawOtpResend.isCoolingDown}
                     className="border-white/20 text-white hover:bg-white/10"
                   >
-                    {isSendingWithdrawOtp ? 'Sending...' : 'Send OTP'}
+                    {isSendingWithdrawOtp
+                      ? 'Sending...'
+                      : !isWithdrawOtpSent
+                        ? 'Send OTP'
+                        : withdrawOtpResend.isCoolingDown
+                          ? `Resend in ${withdrawOtpResend.remainingSeconds}s`
+                          : 'Resend OTP'}
                   </Button>
                 </div>
                 {isWithdrawOtpSent && (
@@ -1248,6 +1258,7 @@ export default function Dashboard() {
                 setWithdrawTransactionPassword('');
                 setWithdrawOtp('');
                 setIsWithdrawOtpSent(false);
+                withdrawOtpResend.resetCooldown();
               }}
               className="flex-1 border-white/20 text-white hover:bg-white/10"
             >

@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import Database from '@/db';
 import { useOtpStore } from '@/store';
 import PublicFooter from '@/components/PublicFooter';
+import { useOtpResend } from '@/hooks/use-otp-resend';
 
 export default function ForgotPassword() {
   const navigate = useNavigate();
@@ -24,6 +25,7 @@ export default function ForgotPassword() {
   const [isResetting, setIsResetting] = useState(false);
   const [error, setError] = useState('');
   const [otpSent, setOtpSent] = useState(false);
+  const otpResend = useOtpResend(30);
 
   const handleSendOtp = async () => {
     setError('');
@@ -42,6 +44,7 @@ export default function ForgotPassword() {
     setIsSendingOtp(false);
     if (result.success) {
       setOtpSent(true);
+      otpResend.startCooldown();
       if (result.status === 'pending') {
         toast.warning(result.message);
       } else {
@@ -142,10 +145,16 @@ export default function ForgotPassword() {
               type="button"
               variant="outline"
               onClick={handleSendOtp}
-              disabled={isSendingOtp || userId.length !== 7 || !email}
+              disabled={isSendingOtp || otpResend.isCoolingDown || userId.length !== 7 || !email}
               className="w-full border-white/20 text-white hover:bg-white/10"
             >
-              {isSendingOtp ? 'Sending OTP...' : 'Send OTP'}
+              {isSendingOtp
+                ? 'Sending OTP...'
+                : !otpSent
+                  ? 'Send OTP'
+                  : otpResend.isCoolingDown
+                    ? `Resend in ${otpResend.remainingSeconds}s`
+                    : 'Resend OTP'}
             </Button>
 
             {otpSent && (

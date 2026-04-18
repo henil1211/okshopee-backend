@@ -14,6 +14,7 @@ import Database from '@/db';
 import { toast } from 'sonner';
 import { useNavigate } from 'react-router-dom';
 import { uploadOptimizedFileToBackend } from '@/utils/helpers';
+import { useOtpResend } from '@/hooks/use-otp-resend';
 
 export default function PinWallet() {
   const navigate = useNavigate();
@@ -64,6 +65,7 @@ export default function PinWallet() {
   const [showDirectBuyTxPassword, setShowDirectBuyTxPassword] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [bulkSelectCount, setBulkSelectCount] = useState('');
+  const transferOtpResend = useOtpResend(30);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pinSyncInFlight = useRef(false);
 
@@ -244,6 +246,7 @@ export default function PinWallet() {
       setShowTransferTxPassword(false);
       setTransferOtp('');
       setIsTransferOtpSent(false);
+      transferOtpResend.resetCooldown();
       setTransferUserId('');
       setTargetUserName('');
       setSelectedPins([]);
@@ -262,6 +265,7 @@ export default function PinWallet() {
     setIsSendingOtp(false);
     if (result.success) {
       setIsTransferOtpSent(true);
+      transferOtpResend.startCooldown();
       if (result.status === 'pending') {
         toast.warning(result.message);
       } else {
@@ -1127,10 +1131,16 @@ export default function PinWallet() {
                     type="button"
                     variant="outline"
                     onClick={handleSendTransferOtp}
-                    disabled={isSendingOtp}
+                    disabled={isSendingOtp || transferOtpResend.isCoolingDown}
                     className="border-white/20 text-white hover:bg-white/10"
                   >
-                    {isSendingOtp ? 'Sending...' : 'Send OTP'}
+                    {isSendingOtp
+                      ? 'Sending...'
+                      : !isTransferOtpSent
+                        ? 'Send OTP'
+                        : transferOtpResend.isCoolingDown
+                          ? `Resend in ${transferOtpResend.remainingSeconds}s`
+                          : 'Resend OTP'}
                   </Button>
                 </div>
                 {isTransferOtpSent && (
@@ -1147,6 +1157,7 @@ export default function PinWallet() {
                     setShowTransferTxPassword(false);
                     setTransferOtp('');
                     setIsTransferOtpSent(false);
+                    transferOtpResend.resetCooldown();
                     setTransferUserId('');
                     setTargetUserName('');
                     setSelectedPins([]);

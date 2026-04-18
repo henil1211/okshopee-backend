@@ -19,6 +19,7 @@ import {
   isValidTransactionPassword,
   normalizePhoneNumber
 } from '@/utils/helpers';
+import { useOtpResend } from '@/hooks/use-otp-resend';
 
 export default function CreateId() {
   const navigate = useNavigate();
@@ -57,6 +58,7 @@ export default function CreateId() {
   const [isSendingOtp, setIsSendingOtp] = useState(false);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
   const [isPinChecking, setIsPinChecking] = useState(false);
+  const otpResend = useOtpResend(30);
   const pinRefreshInFlight = useRef<Promise<void> | null>(null);
   const lastPinRefresh = useRef<number>(0);
   const selectedPinRef = useRef('');
@@ -205,6 +207,7 @@ export default function CreateId() {
     setOtpVerified(false);
     setIsSendingOtp(false);
     setIsVerifyingOtp(false);
+    otpResend.resetCooldown();
   };
 
   const handleEmailChange = (value: string) => {
@@ -260,6 +263,7 @@ export default function CreateId() {
 
     setOtpSent(true);
     setOtpVerified(false);
+    otpResend.startCooldown();
   };
 
   const handleVerifyOtpCode = async () => {
@@ -633,7 +637,7 @@ export default function CreateId() {
                   <Button
                     type="button"
                     onClick={handleSendOtp}
-                    disabled={isSendingOtp}
+                    disabled={isSendingOtp || otpResend.isCoolingDown}
                     className="w-full sm:w-auto btn-primary"
                   >
                     {isSendingOtp ? (
@@ -641,7 +645,9 @@ export default function CreateId() {
                         <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                         Sending...
                       </>
-                    ) : otpSent ? 'Resend OTP' : 'Send OTP'}
+                    ) : otpSent
+                      ? (otpResend.isCoolingDown ? `Resend in ${otpResend.remainingSeconds}s` : 'Resend OTP')
+                      : 'Send OTP'}
                   </Button>
                   {otpVerified && (
                     <span className="inline-flex items-center text-emerald-400 text-sm">

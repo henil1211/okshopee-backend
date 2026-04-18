@@ -17,6 +17,7 @@ import type { Transaction } from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { useOtpResend } from '@/hooks/use-otp-resend';
 
 export default function Withdraw() {
   const navigate = useNavigate();
@@ -41,6 +42,7 @@ export default function Withdraw() {
   const [showSuccessDialog, setShowSuccessDialog] = useState(false);
   const [showQrFullscreen, setShowQrFullscreen] = useState(false);
   const [withdrawalHistory, setWithdrawalHistory] = useState<Transaction[]>([]);
+  const otpResend = useOtpResend(30);
   const payoutQrInputRef = useRef<HTMLInputElement>(null);
 
   const loadWithdrawalHistory = useCallback(() => {
@@ -79,6 +81,7 @@ export default function Withdraw() {
     setIsSendingOtp(false);
     if (result.success) {
       setIsOtpSent(true);
+      otpResend.startCooldown();
       if (result.status === 'pending') {
         toast.warning(result.message);
       } else {
@@ -166,6 +169,7 @@ export default function Withdraw() {
     setTransactionPassword('');
     setOtp('');
     setIsOtpSent(false);
+    otpResend.resetCooldown();
     loadWallet(displayUser.id);
     loadWithdrawalHistory();
   };
@@ -379,10 +383,16 @@ export default function Withdraw() {
                         type="button"
                         variant="outline"
                         onClick={handleSendOtp}
-                        disabled={isSendingOtp}
+                        disabled={isSendingOtp || otpResend.isCoolingDown}
                         className="border-white/20 text-white hover:bg-white/10"
                       >
-                        {isSendingOtp ? 'Sending...' : 'Send OTP'}
+                        {isSendingOtp
+                          ? 'Sending...'
+                          : !isOtpSent
+                            ? 'Send OTP'
+                            : otpResend.isCoolingDown
+                              ? `Resend in ${otpResend.remainingSeconds}s`
+                              : 'Resend OTP'}
                       </Button>
                     </div>
                     {isOtpSent && (

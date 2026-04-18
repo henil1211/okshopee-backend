@@ -17,6 +17,7 @@ import {
   isValidTransactionPassword,
   normalizePhoneNumber
 } from '@/utils/helpers';
+import { useOtpResend } from '@/hooks/use-otp-resend';
 
 export default function Profile() {
   const navigate = useNavigate();
@@ -65,6 +66,9 @@ export default function Profile() {
   const [showChangeEmail, setShowChangeEmail] = useState(false);
   const [showChangePhone, setShowChangePhone] = useState(false);
   const [showChangeUsdt, setShowChangeUsdt] = useState(false);
+  const contactOtpResend = useOtpResend(30);
+  const passwordOtpResend = useOtpResend(30);
+  const txOtpResend = useOtpResend(30);
 
   const applyDialCode = (value: string, countryName?: string | null) => {
     const dial = getDialCodeForCountry(countryName);
@@ -103,6 +107,13 @@ export default function Profile() {
 
   const handleSendOtp = async (purpose: 'contact' | 'password' | 'tx') => {
     if (!displayUser) return;
+    const otpResend = purpose === 'contact'
+      ? contactOtpResend
+      : purpose === 'password'
+        ? passwordOtpResend
+        : txOtpResend;
+    if (otpResend.isCoolingDown) return;
+
     // Always send OTP to the CURRENT registered email (not the new one)
     const selectedEmail = (displayUser.email || '').trim();
 
@@ -120,6 +131,7 @@ export default function Profile() {
     setSendingOtpFor(null);
 
     if (result.success) {
+      otpResend.startCooldown();
       if (result.status === 'pending') {
         toast.warning(result.message);
       } else {
@@ -516,10 +528,14 @@ export default function Profile() {
                         type="button"
                         variant="outline"
                         onClick={() => handleSendOtp('contact')}
-                        disabled={sendingOtpFor === 'contact'}
+                        disabled={sendingOtpFor === 'contact' || contactOtpResend.isCoolingDown}
                         className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
                       >
-                        {sendingOtpFor === 'contact' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send OTP'}
+                        {sendingOtpFor === 'contact'
+                          ? <RefreshCw className="w-4 h-4 animate-spin" />
+                          : contactOtpResend.isCoolingDown
+                            ? `Resend in ${contactOtpResend.remainingSeconds}s`
+                            : 'Send OTP'}
                       </Button>
                     </div>
                   </div>
@@ -607,10 +623,14 @@ export default function Profile() {
                 type="button"
                 variant="outline"
                 onClick={() => handleSendOtp('password')}
-                disabled={sendingOtpFor === 'password'}
+                disabled={sendingOtpFor === 'password' || passwordOtpResend.isCoolingDown}
                 className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
               >
-                {sendingOtpFor === 'password' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send OTP'}
+                {sendingOtpFor === 'password'
+                  ? <RefreshCw className="w-4 h-4 animate-spin" />
+                  : passwordOtpResend.isCoolingDown
+                    ? `Resend in ${passwordOtpResend.remainingSeconds}s`
+                    : 'Send OTP'}
               </Button>
             </div>
             <div className="space-y-1">
@@ -699,10 +719,14 @@ export default function Profile() {
                 type="button"
                 variant="outline"
                 onClick={() => handleSendOtp('tx')}
-                disabled={sendingOtpFor === 'tx'}
+                disabled={sendingOtpFor === 'tx' || txOtpResend.isCoolingDown}
                 className="border-white/20 text-white hover:bg-white/10 w-full sm:w-auto"
               >
-                {sendingOtpFor === 'tx' ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Send OTP'}
+                {sendingOtpFor === 'tx'
+                  ? <RefreshCw className="w-4 h-4 animate-spin" />
+                  : txOtpResend.isCoolingDown
+                    ? `Resend in ${txOtpResend.remainingSeconds}s`
+                    : 'Send OTP'}
               </Button>
             </div>
             <div className="space-y-1">
