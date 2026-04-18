@@ -16,6 +16,8 @@
     "audit:pin-integrity:apply": "node scripts/audit-v2-pin-purchase-integrity.cjs --apply",
     "repair:pin-format:dry": "node scripts/repair-v2-pin-code-format.cjs",
     "repair:pin-format:apply": "node scripts/repair-v2-pin-code-format.cjs --apply",
+    "cleanup:legacy-wallet-smoke:dry": "node scripts/fix-legacy-wallet-gaps-and-smoke-users.cjs",
+    "cleanup:legacy-wallet-smoke:apply": "node scripts/fix-legacy-wallet-gaps-and-smoke-users.cjs --apply",
     "backfill:pins:legacy-to-v2:dry": "node scripts/backfill-legacy-pins-to-v2.cjs",
     "backfill:pins:legacy-to-v2:apply": "node scripts/backfill-legacy-pins-to-v2.cjs --apply",
     "audit:registration-integrity:dry": "node scripts/audit-registration-integrity.cjs",
