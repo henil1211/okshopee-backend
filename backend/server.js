@@ -1785,6 +1785,8 @@ async function processV2FundTransfer({
   senderUserCode,
   receiverUserCode,
   amountCents,
+  sourceWallet = 'fund',
+  destinationWallet = 'fund',
   allowInactiveActor = false,
   helpProgressUpdates,
   referenceId,
@@ -1808,6 +1810,8 @@ async function processV2FundTransfer({
     senderUserCode,
     receiverUserCode,
     amountCents,
+    sourceWallet,
+    destinationWallet,
     helpProgressUpdates,
     referenceId,
     description
@@ -1894,28 +1898,28 @@ async function processV2FundTransfer({
          u.status AS user_status
        FROM v2_wallet_accounts wa
        INNER JOIN v2_users u ON u.id = wa.user_id
-       WHERE u.user_code IN (?, ?) AND wa.wallet_type = 'fund'
+       WHERE u.user_code IN (?, ?) AND wa.wallet_type IN (?, ?)
        ORDER BY wa.id
        FOR UPDATE`,
-      [senderUserCode, receiverUserCode]
+      [senderUserCode, receiverUserCode, sourceWallet, destinationWallet]
     );
 
     const senderWallet = Array.isArray(walletRows)
-      ? walletRows.find((row) => row.user_code === senderUserCode)
+      ? walletRows.find((row) => row.user_code === senderUserCode && row.wallet_type === sourceWallet)
       : null;
     const receiverWallet = Array.isArray(walletRows)
-      ? walletRows.find((row) => row.user_code === receiverUserCode)
+      ? walletRows.find((row) => row.user_code === receiverUserCode && row.wallet_type === destinationWallet)
       : null;
 
     if (!senderWallet || !receiverWallet) {
-      throw createApiError(404, 'Sender or receiver fund wallet is not provisioned in v2', 'V2_WALLET_NOT_FOUND');
+      throw createApiError(404, 'Sender or receiver wallet is not provisioned in v2', 'V2_WALLET_NOT_FOUND');
     }
     const senderStatusAllowed = senderWallet.user_status === 'active' || (allowInactiveActor && senderWallet.user_code === actorUserCode);
     if (!senderStatusAllowed || receiverWallet.user_status !== 'active') {
       throw createApiError(403, 'Sender or receiver account is not active', 'USER_NOT_ACTIVE');
     }
     if (Number(senderWallet.current_amount_cents) < amountCents) {
-      throw createApiError(409, 'Insufficient fund wallet balance', 'INSUFFICIENT_FUNDS');
+      throw createApiError(409, `Insufficient ${sourceWallet} wallet balance`, 'INSUFFICIENT_FUNDS');
     }
 
     const txUuid = randomUUID();
@@ -1948,16 +1952,18 @@ async function processV2FundTransfer({
       `INSERT INTO v2_ledger_entries
         (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
        VALUES
-        (?, 1, ?, ?, 'fund', 'debit', ?),
-        (?, 2, ?, ?, 'fund', 'credit', ?)`,
+        (?, 1, ?, ?, ?, 'debit', ?),
+        (?, 2, ?, ?, ?, 'credit', ?)`,
       [
         ledgerTxnId,
         senderWallet.gl_account_id,
         senderWallet.user_id,
+        sourceWallet,
         amountCents,
         ledgerTxnId,
         receiverWallet.gl_account_id,
         receiverWallet.user_id,
+        destinationWallet,
         amountCents
       ]
     );
@@ -1965,18 +1971,18 @@ async function processV2FundTransfer({
     const [senderUpdateResult] = await connection.execute(
       `UPDATE v2_wallet_accounts
        SET current_amount_cents = current_amount_cents - ?, version = version + 1
-       WHERE user_id = ? AND wallet_type = 'fund' AND current_amount_cents >= ?`,
-      [amountCents, senderWallet.user_id, amountCents]
+       WHERE user_id = ? AND wallet_type = ? AND current_amount_cents >= ?`,
+      [amountCents, senderWallet.user_id, sourceWallet, amountCents]
     );
     if (Number(senderUpdateResult?.affectedRows || 0) !== 1) {
-      throw createApiError(409, 'Insufficient fund wallet balance', 'INSUFFICIENT_FUNDS');
+      throw createApiError(409, `Insufficient ${sourceWallet} wallet balance`, 'INSUFFICIENT_FUNDS');
     }
 
     const [receiverUpdateResult] = await connection.execute(
       `UPDATE v2_wallet_accounts
        SET current_amount_cents = current_amount_cents + ?, version = version + 1
-       WHERE user_id = ? AND wallet_type = 'fund'`,
-      [amountCents, receiverWallet.user_id]
+       WHERE user_id = ? AND wallet_type = ?`,
+      [amountCents, receiverWallet.user_id, destinationWallet]
     );
     if (Number(receiverUpdateResult?.affectedRows || 0) !== 1) {
       throw createApiError(500, 'Failed to credit receiver wallet', 'RECEIVER_WALLET_UPDATE_FAILED');
@@ -1997,6 +2003,8 @@ async function processV2FundTransfer({
       ledgerTransactionId: ledgerTxnId,
       senderUserCode,
       receiverUserCode,
+      sourceWallet,
+      destinationWallet,
       amountCents,
       postedAt: new Date().toISOString()
     };
@@ -6153,6 +6161,8 @@ const server = createServer(async (req, res) => {
       const actorUserCode = authContext.actorUserCode;
       const senderUserCode = normalizeV2UserCode(parsed?.senderUserCode);
       const receiverUserCode = normalizeV2UserCode(parsed?.receiverUserCode);
+      const sourceWallet = String(parsed?.sourceWallet || 'fund').trim().toLowerCase();
+      const destinationWallet = String(parsed?.destinationWallet || 'fund').trim().toLowerCase();
       const amountCentsRaw = Number(parsed?.amountCents);
       const amountCents = Number.isFinite(amountCentsRaw) ? Math.trunc(amountCentsRaw) : NaN;
       const normalizedProgress = normalizeV2FundTransferProgressUpdates(
@@ -6169,6 +6179,30 @@ const server = createServer(async (req, res) => {
           ok: false,
           error: 'senderUserCode and receiverUserCode are required and must be 3-20 chars [a-zA-Z0-9_-]',
           code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (!isValidV2WalletType(sourceWallet) || !isValidV2WalletType(destinationWallet)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'sourceWallet and destinationWallet must be one of fund, income, royalty',
+          code: 'INVALID_WALLET_TYPE'
+        });
+        return;
+      }
+      if (sourceWallet !== 'fund' && sourceWallet !== 'income') {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'sourceWallet currently supports fund or income only',
+          code: 'UNSUPPORTED_SOURCE_WALLET'
+        });
+        return;
+      }
+      if (destinationWallet !== 'fund') {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'destinationWallet for this endpoint currently supports fund only',
+          code: 'UNSUPPORTED_DESTINATION_WALLET'
         });
         return;
       }
@@ -6208,6 +6242,8 @@ const server = createServer(async (req, res) => {
           senderUserCode,
           receiverUserCode,
           amountCents,
+          sourceWallet,
+          destinationWallet,
           allowInactiveActor,
           helpProgressUpdates: normalizedProgress.updates,
           referenceId,
