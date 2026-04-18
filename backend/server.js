@@ -3797,8 +3797,12 @@ async function processV2Registration({
   const warnings = [];
   const sourceUserCode = String(registeredUser?.userId || '').trim();
   const sourceUserName = String(registeredUser?.fullName || '').trim();
-  const beneficiaryUserCode = String(sponsorUser?.userId || '').trim();
-  const beneficiaryUserName = String(sponsorUser?.fullName || '').trim();
+  const beneficiaryUserCode = normalizeV2UserCode(
+    sponsorUserCodeForResponse
+    || sponsorUserCodeForPlacement
+    || sponsorUser?.userId
+  );
+  const beneficiaryUserName = String(sponsorUser?.fullName || '').trim() || beneficiaryUserCode;
 
   if (sourceUserCode && beneficiaryUserCode) {
     const referralSourceRef = `reg_pin_${sourceUserCode}_${beneficiaryUserCode}`;
