@@ -229,6 +229,157 @@ function upsertPurchasedPinsIntoLocalCache(params: {
   return true;
 }
 
+function mapV2PinStatusToLocalPinStatus(status: unknown): Pin['status'] {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'generated') return 'unused';
+  if (normalized === 'used') return 'used';
+  if (normalized === 'expired' || normalized === 'cancelled') return 'suspended';
+  return 'unused';
+}
+
+function mergeV2PinsWithLegacyTransitionPins(v2Pins: Pin[], legacyPins: Pin[]): Pin[] {
+  const mergedByCode = new Map<string, Pin>();
+
+  for (const pin of v2Pins) {
+    const pinCode = String(pin.pinCode || '').trim().toUpperCase();
+    if (!pinCode) continue;
+    mergedByCode.set(pinCode, pin);
+  }
+
+  for (const pin of legacyPins) {
+    const pinCode = String(pin.pinCode || '').trim().toUpperCase();
+    if (!pinCode || mergedByCode.has(pinCode)) continue;
+
+    const shouldCarryForward = pin.status === 'transferred' || !!pin.transferredFrom;
+    if (!shouldCarryForward) continue;
+
+    mergedByCode.set(pinCode, pin);
+  }
+
+  return Array.from(mergedByCode.values()).sort((left, right) => {
+    const rightTs = new Date(String(right.createdAt || '')).getTime() || 0;
+    const leftTs = new Date(String(left.createdAt || '')).getTime() || 0;
+    return rightTs - leftTs;
+  });
+}
+
+async function fetchV2PinsSnapshotForUserWithStatus(user: User): Promise<{ pins: Pin[] | null; errorMessage: string | null }> {
+  const canonicalUser = resolveCanonicalUserForWalletActions(user.id)
+    || Database.getUserByUserId(user.userId)
+    || Database.getUserById(user.id)
+    || user;
+
+  const userCode = String(canonicalUser?.userId || '').trim();
+  const internalUserId = String(canonicalUser?.id || '').trim();
+  if (!userCode || !internalUserId) {
+    return { pins: null, errorMessage: 'V2 pin read skipped: user identity is incomplete.' };
+  }
+
+  const requestId = generateClientRequestId('v2_pins_read');
+  const resolvedHeaders = resolveV2ReadRequestHeaders({
+    requestId,
+    impersonationReason: 'pins_read_refresh'
+  });
+  if (!('headers' in resolvedHeaders)) {
+    return {
+      pins: null,
+      errorMessage: resolvedHeaders.message || 'Live V2 pin read failed: auth headers could not be prepared.'
+    };
+  }
+
+  const requestUrl = `${getBackendApiBase()}/api/v2/pins?userCode=${encodeURIComponent(userCode)}&limit=1000`;
+  let response: Response;
+  try {
+    response = await fetch(requestUrl, {
+      method: 'GET',
+      headers: resolvedHeaders.headers
+    });
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : 'Network request error';
+    const normalizedMessage = /failed to fetch|networkerror|load failed|fetch failed/i.test(rawMessage)
+      ? `Cannot reach. Wait few Minutes ${getBackendApiBase()}. Check internet, DNS, SSL, or CORS/proxy settings.`
+      : rawMessage;
+    return {
+      pins: null,
+      errorMessage: `Live V2 pin read failed: ${normalizedMessage}`
+    };
+  }
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false) {
+    const status = response.status || 0;
+    const code = typeof payload?.code === 'string' ? payload.code : '';
+    const backendMessage = typeof payload?.error === 'string'
+      ? payload.error
+      : typeof payload?.message === 'string'
+        ? payload.message
+        : `HTTP ${status}`;
+
+    if (status === 401) {
+      Database.setV2AuthSession(null);
+      return {
+        pins: null,
+        errorMessage: `V2 session rejected (HTTP 401). Please logout and login again.${code ? ` (${code})` : ''}`
+      };
+    }
+
+    return {
+      pins: null,
+      errorMessage: `Live V2 pin read failed: ${backendMessage}${code ? ` (${code})` : ''}`
+    };
+  }
+
+  const rows = Array.isArray((payload as { pins?: unknown[] })?.pins)
+    ? ((payload as { pins?: unknown[] }).pins as Array<Record<string, unknown>>)
+    : [];
+
+  const v2Pins: Pin[] = rows
+    .map((row, index) => {
+      const pinCode = String(row.pinCode || '').trim().toUpperCase();
+      if (!pinCode) return null;
+
+      const localStatus = mapV2PinStatusToLocalPinStatus(row.status);
+      const createdAt = typeof row.createdAt === 'string' && row.createdAt.trim()
+        ? row.createdAt
+        : new Date().toISOString();
+      const usedByUserCode = String(row.usedByUserCode || '').trim();
+      const usedByInternalUser = usedByUserCode
+        ? (resolveCanonicalUserForWalletActions(usedByUserCode)
+          || Database.getUserByUserId(usedByUserCode)
+          || Database.getUserById(usedByUserCode))
+        : null;
+      const usedById = String(usedByInternalUser?.id || usedByUserCode || '').trim();
+      const usedAt = typeof row.usedAt === 'string' && row.usedAt.trim() ? row.usedAt : undefined;
+
+      return {
+        id: `pin_v2_${String(row.id || `${pinCode}_${index}`)}`,
+        pinCode,
+        amount: Math.max(0, Number(row.priceCents || 0)) / 100,
+        status: localStatus,
+        ownerId: internalUserId,
+        createdBy: internalUserId,
+        createdAt,
+        ...(localStatus === 'used' && usedAt ? { usedAt } : {}),
+        ...(localStatus === 'used' && usedById ? { usedById, registrationUserId: usedById } : {}),
+        ...(localStatus === 'suspended'
+          ? {
+            suspendedAt: usedAt || createdAt,
+            suspensionReason: `Projected from v2 pin status: ${String(row.status || '').trim() || 'unknown'}`
+          }
+          : {})
+      } as Pin;
+    })
+    .filter((pin): pin is Pin => !!pin);
+
+  const legacyPins = Database.getUserPins(internalUserId);
+  const mergedPins = mergeV2PinsWithLegacyTransitionPins(v2Pins, legacyPins);
+
+  return {
+    pins: mergedPins,
+    errorMessage: null
+  };
+}
+
 function buildWalletDefaultsForV2Read(userId: string, existingWallet?: Wallet | null): Wallet {
   return {
     userId,
@@ -3099,19 +3250,44 @@ export const usePinStore = create<PinState>((set, get) => ({
   purchaseRequests: [],
 
   loadPins: (userId: string) => {
-    const pins = Database.getUserPins(userId);
-    const unusedPins = Database.getUnusedPins(userId);
-    const usedPins = Database.getUsedPins(userId);
-    const receivedPins = Database.getReceivedPins(userId);
-    const transfers = Database.getUserPinTransfers(userId);
+    const applyPinsToState = (ownerId: string) => {
+      const pins = Database.getUserPins(ownerId);
+      const unusedPins = pins.filter((pin) => pin.status === 'unused');
+      const usedPins = pins.filter((pin) => pin.status === 'used');
+      const receivedPins = pins.filter((pin) => !!pin.transferredFrom);
+      const transfers = Database.getUserPinTransfers(ownerId);
 
-    set({
-      pins,
-      unusedPins,
-      usedPins,
-      receivedPins,
-      transfers
-    });
+      set({
+        pins,
+        unusedPins,
+        usedPins,
+        receivedPins,
+        transfers
+      });
+    };
+
+    const canonicalUser = resolveCanonicalUserForWalletActions(userId)
+      || Database.getUserById(userId)
+      || Database.getUserByUserId(userId);
+    const ownerId = String(canonicalUser?.id || userId).trim();
+
+    applyPinsToState(ownerId);
+
+    if (!canonicalUser) {
+      return;
+    }
+
+    void (async () => {
+      const v2Read = await fetchV2PinsSnapshotForUserWithStatus(canonicalUser);
+      if (!v2Read.pins) {
+        return;
+      }
+
+      const allPins = Database.getPins();
+      const pinsForOtherUsers = allPins.filter((pin) => String(pin.ownerId || '').trim() !== ownerId);
+      Database.savePins([...pinsForOtherUsers, ...v2Read.pins]);
+      applyPinsToState(ownerId);
+    })();
   },
 
   transferPin: async (pinId: string, fromUserId: string, toUserId: string) => {

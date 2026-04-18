@@ -160,6 +160,7 @@ const V2_REGISTRATION_QUEUE_ADMIN_READ_ENDPOINT_NAME = 'v2_registration_queue_ad
 const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
 const V2_WALLET_READ_ENDPOINT_NAME = 'v2_wallet_read';
 const V2_TRANSACTIONS_READ_ENDPOINT_NAME = 'v2_transactions_read';
+const V2_PINS_READ_ENDPOINT_NAME = 'v2_pins_read';
 const V2_STATE_SYNC_ENDPOINT_NAME = 'v2_state_sync';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 const V2_REFERRAL_MAX_LEVEL = 100;
@@ -2291,6 +2292,14 @@ function normalizeV2LedgerEntryStatus(status) {
   return 'pending';
 }
 
+function normalizeV2PinStatusForRead(status) {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'generated' || normalized === 'used' || normalized === 'expired' || normalized === 'cancelled') {
+    return normalized;
+  }
+  return 'generated';
+}
+
 async function resolveV2UserForReadByCode(userCode) {
   const normalizedUserCode = normalizeV2UserCode(userCode);
   if (!isValidV2UserCode(normalizedUserCode)) {
@@ -2401,6 +2410,45 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
       postedAt
     };
   });
+}
+
+async function readV2PinsByBuyerUserId(userId, limit = 500) {
+  const safeLimit = normalizeV2ReadLimit(limit, 500, 2000);
+  const [rows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT
+         p.id,
+         p.pin_code,
+         p.price_cents,
+         p.status,
+         p.purchased_txn_id,
+         p.used_txn_id,
+         p.expires_at,
+         p.created_at,
+         p.used_at,
+         used_user.user_code AS used_by_user_code
+       FROM v2_pins p
+       LEFT JOIN v2_users used_user ON used_user.id = p.used_by_user_id
+       WHERE p.buyer_user_id = ?
+       ORDER BY p.id DESC
+       LIMIT ?`,
+      [userId, safeLimit]
+    ),
+    'read_v2_pins'
+  );
+
+  return (Array.isArray(rows) ? rows : []).map((row) => ({
+    id: Number(row?.id || 0),
+    pinCode: String(row?.pin_code || '').trim().toUpperCase(),
+    priceCents: Number.isFinite(Number(row?.price_cents)) ? Math.trunc(Number(row.price_cents)) : 0,
+    status: normalizeV2PinStatusForRead(row?.status),
+    purchasedTxnId: Number.isFinite(Number(row?.purchased_txn_id)) ? Math.trunc(Number(row.purchased_txn_id)) : null,
+    usedTxnId: Number.isFinite(Number(row?.used_txn_id)) ? Math.trunc(Number(row.used_txn_id)) : null,
+    usedByUserCode: typeof row?.used_by_user_code === 'string' ? row.used_by_user_code : null,
+    expiresAt: row?.expires_at ? new Date(row.expires_at).toISOString() : null,
+    createdAt: row?.created_at ? new Date(row.created_at).toISOString() : null,
+    usedAt: row?.used_at ? new Date(row.used_at).toISOString() : null
+  }));
 }
 
 async function processV2FundTransfer({
@@ -6772,6 +6820,68 @@ const server = createServer(async (req, res) => {
         ok: false,
         error: message,
         code: error?.code || (typeof error === 'object' && error.code) || 'V2_TRANSACTIONS_READ_FAILED'
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/v2/pins') {
+    try {
+      if (STORAGE_MODE !== 'mysql') {
+        sendJson(res, 503, { ok: false, error: 'V2 financial APIs require STORAGE_MODE=mysql', code: 'V2_REQUIRES_MYSQL' });
+        return;
+      }
+      if (FINANCE_ENGINE_MODE !== 'v2') {
+        sendJson(res, 409, { ok: false, error: 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/pins', code: 'FINANCE_MODE_MISMATCH' });
+        return;
+      }
+      if (!pool) {
+        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+        return;
+      }
+
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_PINS_READ_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+
+      const requestedUserCode = normalizeV2UserCode(url.searchParams.get('userCode') || authContext.actorUserCode);
+      if (!isValidV2UserCode(requestedUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'userCode is required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (requestedUserCode !== authContext.actorUserCode) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Actor is only allowed to read their effective userCode pins',
+          code: 'ACTOR_USER_MISMATCH'
+        });
+        return;
+      }
+
+      const user = await resolveV2UserForReadByCode(requestedUserCode);
+      const limit = normalizeV2ReadLimit(url.searchParams.get('limit'), 500, 2000);
+      const pins = await readV2PinsByBuyerUserId(user.userId, limit);
+
+      sendJson(res, 200, {
+        ok: true,
+        userCode: user.userCode,
+        count: pins.length,
+        pins
+      });
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : getHttpStatusForRequestError(error));
+      const message = getErrorMessage(error, 'Failed to read V2 pins');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_PINS_READ_FAILED'
       });
     }
     return;
