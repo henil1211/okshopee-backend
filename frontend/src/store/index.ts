@@ -237,6 +237,128 @@ function mapV2PinStatusToLocalPinStatus(status: unknown): Pin['status'] {
   return 'unused';
 }
 
+function mapV2TransactionStatusToPaymentStatus(status: unknown): PinPurchaseRequest['status'] {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'completed') return 'completed';
+  if (normalized === 'reversed') return 'reversed';
+  if (normalized === 'cancelled') return 'cancelled';
+  return 'pending';
+}
+
+function inferPinQuantityFromV2Purchase(params: {
+  referenceId: unknown;
+  description: unknown;
+  signedAmountCents: unknown;
+  pinAmountDollars: number;
+}): number {
+  const referenceId = String(params.referenceId || '').trim();
+  const refMatch = referenceId.match(/:(\d+)$/);
+  if (refMatch) {
+    const qty = Number(refMatch[1]);
+    if (Number.isInteger(qty) && qty > 0) return qty;
+  }
+
+  const description = String(params.description || '').trim();
+  const descMatch = description.match(/(\d+)\s*pin/i);
+  if (descMatch) {
+    const qty = Number(descMatch[1]);
+    if (Number.isInteger(qty) && qty > 0) return qty;
+  }
+
+  const amountCents = Math.abs(Number(params.signedAmountCents || 0));
+  const pinAmountCents = Math.max(1, Math.round(Number(params.pinAmountDollars || 11) * 100));
+  if (amountCents > 0) {
+    const inferredQty = Math.max(1, Math.round(amountCents / pinAmountCents));
+    if (Number.isInteger(inferredQty) && inferredQty > 0) return inferredQty;
+  }
+
+  return 1;
+}
+
+function mergePinRequestRecordsById(existing: PinPurchaseRequest[], incoming: PinPurchaseRequest[]): PinPurchaseRequest[] {
+  const byId = new Map<string, PinPurchaseRequest>();
+
+  for (const request of existing) {
+    const id = String(request?.id || '').trim();
+    if (!id) continue;
+    byId.set(id, request);
+  }
+
+  for (const request of incoming) {
+    const id = String(request?.id || '').trim();
+    if (!id) continue;
+    const current = byId.get(id);
+    if (!current) {
+      byId.set(id, request);
+      continue;
+    }
+
+    const existingPins = Array.isArray(current.pinsGenerated) ? current.pinsGenerated : [];
+    const incomingPins = Array.isArray(request.pinsGenerated) ? request.pinsGenerated : [];
+    const mergedPins = Array.from(new Set([...existingPins, ...incomingPins]));
+
+    byId.set(id, {
+      ...current,
+      ...request,
+      pinsGenerated: mergedPins.length > 0 ? mergedPins : undefined
+    });
+  }
+
+  return Array.from(byId.values()).sort((left, right) => {
+    const rightTs = new Date(String(right.createdAt || '')).getTime() || 0;
+    const leftTs = new Date(String(left.createdAt || '')).getTime() || 0;
+    return rightTs - leftTs;
+  });
+}
+
+function upsertDirectPinPurchaseRequestIntoLocalCache(params: {
+  ownerInternalUserId: string;
+  quantity: number;
+  amount: number;
+  pinCodes: string[];
+  txUuid?: unknown;
+  ledgerTransactionId?: unknown;
+  createdAt?: unknown;
+}): void {
+  const ownerInternalUserId = String(params.ownerInternalUserId || '').trim();
+  if (!ownerInternalUserId) return;
+
+  const ledgerTxId = Number(params.ledgerTransactionId || 0);
+  const txUuid = String(params.txUuid || '').trim();
+  const requestId = Number.isInteger(ledgerTxId) && ledgerTxId > 0
+    ? `v2_direct_${ledgerTxId}`
+    : txUuid
+      ? `v2_direct_${txUuid}`
+      : `v2_direct_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const createdAt = typeof params.createdAt === 'string' && params.createdAt.trim()
+    ? params.createdAt
+    : new Date().toISOString();
+  const quantity = Math.max(1, Number.isFinite(Number(params.quantity)) ? Math.trunc(Number(params.quantity)) : 1);
+  const amount = Math.max(0, Number(params.amount || 0));
+  const normalizedPinCodes = normalizePurchasedPinCodes(params.pinCodes);
+
+  const incoming: PinPurchaseRequest = {
+    id: requestId,
+    userId: ownerInternalUserId,
+    quantity,
+    amount,
+    status: 'completed',
+    purchaseType: 'direct',
+    paidFromWallet: true,
+    createdAt,
+    processedAt: createdAt,
+    processedBy: 'v2_system',
+    pinsGenerated: normalizedPinCodes.length > 0 ? normalizedPinCodes : undefined
+  };
+
+  const allRequests = Database.getPinPurchaseRequests();
+  const otherUsers = allRequests.filter((request) => String(request.userId || '').trim() !== ownerInternalUserId);
+  const ownerRequests = allRequests.filter((request) => String(request.userId || '').trim() === ownerInternalUserId);
+  const mergedOwner = mergePinRequestRecordsById(ownerRequests, [incoming]);
+  Database.savePinPurchaseRequests([...otherUsers, ...mergedOwner]);
+}
+
 function mergeV2PinsWithLegacyTransitionPins(v2Pins: Pin[], legacyPins: Pin[]): Pin[] {
   const mergedByCode = new Map<string, Pin>();
 
@@ -376,6 +498,121 @@ async function fetchV2PinsSnapshotForUserWithStatus(user: User): Promise<{ pins:
 
   return {
     pins: mergedPins,
+    errorMessage: null
+  };
+}
+
+async function fetchV2DirectPinPurchaseRequestsForUserWithStatus(user: User): Promise<{
+  requests: PinPurchaseRequest[] | null;
+  errorMessage: string | null;
+}> {
+  const canonicalUser = resolveCanonicalUserForWalletActions(user.id)
+    || Database.getUserByUserId(user.userId)
+    || Database.getUserById(user.id)
+    || user;
+
+  const userCode = String(canonicalUser?.userId || '').trim();
+  const internalUserId = String(canonicalUser?.id || '').trim();
+  if (!userCode || !internalUserId) {
+    return { requests: null, errorMessage: 'V2 direct pin history read skipped: user identity is incomplete.' };
+  }
+
+  const requestId = generateClientRequestId('v2_pin_requests_read');
+  const resolvedHeaders = resolveV2ReadRequestHeaders({
+    requestId,
+    impersonationReason: 'pin_requests_read_refresh'
+  });
+  if (!('headers' in resolvedHeaders)) {
+    return {
+      requests: null,
+      errorMessage: resolvedHeaders.message || 'Live V2 direct pin history read failed: auth headers could not be prepared.'
+    };
+  }
+
+  const requestUrl = `${getBackendApiBase()}/api/v2/transactions?userCode=${encodeURIComponent(userCode)}&limit=400`;
+  let response: Response;
+  try {
+    response = await fetch(requestUrl, {
+      method: 'GET',
+      headers: resolvedHeaders.headers
+    });
+  } catch (error) {
+    const rawMessage = error instanceof Error ? error.message : 'Network request error';
+    return {
+      requests: null,
+      errorMessage: `Live V2 direct pin history read failed: ${rawMessage}`
+    };
+  }
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false) {
+    const status = response.status || 0;
+    const code = typeof payload?.code === 'string' ? payload.code : '';
+    const backendMessage = typeof payload?.error === 'string'
+      ? payload.error
+      : typeof payload?.message === 'string'
+        ? payload.message
+        : `HTTP ${status}`;
+
+    if (status === 401) {
+      Database.setV2AuthSession(null);
+      return {
+        requests: null,
+        errorMessage: `V2 session rejected (HTTP 401). Please logout and login again.${code ? ` (${code})` : ''}`
+      };
+    }
+
+    return {
+      requests: null,
+      errorMessage: `Live V2 direct pin history read failed: ${backendMessage}${code ? ` (${code})` : ''}`
+    };
+  }
+
+  const txRows = Array.isArray((payload as { transactions?: unknown[] })?.transactions)
+    ? ((payload as { transactions?: unknown[] }).transactions as Array<Record<string, unknown>>)
+    : [];
+
+  const pinAmountDollars = Math.max(1, Number(Database.getSettings()?.pinAmount || 11));
+
+  const requests = txRows
+    .filter((row) => String(row.txType || '').toLowerCase() === 'pin_purchase' && Number(row.signedAmountCents || 0) < 0)
+    .map((row, index) => {
+      const ledgerTransactionId = Number(row.ledgerTransactionId || 0);
+      const txUuid = String(row.txUuid || '').trim();
+      const id = Number.isInteger(ledgerTransactionId) && ledgerTransactionId > 0
+        ? `v2_direct_${ledgerTransactionId}`
+        : txUuid
+          ? `v2_direct_${txUuid}`
+          : `v2_direct_fallback_${Date.now()}_${index}`;
+      const createdAt = typeof row.postedAt === 'string' && row.postedAt.trim()
+        ? row.postedAt
+        : typeof row.createdAt === 'string' && row.createdAt.trim()
+          ? row.createdAt
+          : new Date().toISOString();
+      const amount = Math.abs(Number(row.signedAmountCents || 0)) / 100;
+      const quantity = inferPinQuantityFromV2Purchase({
+        referenceId: row.referenceId,
+        description: row.description,
+        signedAmountCents: row.signedAmountCents,
+        pinAmountDollars
+      });
+      const status = mapV2TransactionStatusToPaymentStatus(row.status);
+
+      return {
+        id,
+        userId: internalUserId,
+        quantity,
+        amount,
+        status,
+        purchaseType: 'direct',
+        paidFromWallet: true,
+        createdAt,
+        ...(status === 'completed' ? { processedAt: createdAt, processedBy: 'v2_system' } : {})
+      } as PinPurchaseRequest;
+    });
+
+  return {
+    requests,
     errorMessage: null
   };
 }
@@ -3536,7 +3773,6 @@ export const usePinStore = create<PinState>((set, get) => ({
         };
       }
 
-      let hydratedAfterPurchase = false;
       try {
         await Database.hydrateFromServer({
           keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS, DB_KEYS.PINS, DB_KEYS.PIN_PURCHASE_REQUESTS],
@@ -3545,12 +3781,11 @@ export const usePinStore = create<PinState>((set, get) => ({
           timeoutMs: 20000,
           retryDelayMs: 1000
         });
-        hydratedAfterPurchase = true;
       } catch {
         // Best-effort refresh. Purchase has already been committed server-side.
       }
 
-      if (!hydratedAfterPurchase && purchasedPinCodes.length > 0) {
+      if (purchasedPinCodes.length > 0) {
         upsertPurchasedPinsIntoLocalCache({
           ownerInternalUserId: effectiveUserId,
           pinPriceCents,
@@ -3558,6 +3793,16 @@ export const usePinStore = create<PinState>((set, get) => ({
           createdByRef: buyerUser.id
         });
       }
+
+      upsertDirectPinPurchaseRequestIntoLocalCache({
+        ownerInternalUserId: effectiveUserId,
+        quantity: Number(payload?.quantity || quantity),
+        amount: Math.max(0, Number(payload?.totalAmountCents || Math.round(amount * 100)) / 100),
+        pinCodes: purchasedPinCodes,
+        txUuid: payload?.txUuid,
+        ledgerTransactionId: payload?.ledgerTransactionId,
+        createdAt: payload?.postedAt
+      });
 
       get().loadPins(effectiveUserId);
       get().loadPurchaseRequests(effectiveUserId);
@@ -3578,8 +3823,41 @@ export const usePinStore = create<PinState>((set, get) => ({
   },
 
   loadPurchaseRequests: (userId: string) => {
-    const requests = Database.getUserPinPurchaseRequests(userId);
-    set({ purchaseRequests: requests });
+    const applyRequestsToState = (ownerId: string) => {
+      const requests = Database.getUserPinPurchaseRequests(ownerId)
+        .sort((left, right) => {
+          const rightTs = new Date(String(right.createdAt || '')).getTime() || 0;
+          const leftTs = new Date(String(left.createdAt || '')).getTime() || 0;
+          return rightTs - leftTs;
+        });
+      set({ purchaseRequests: requests });
+    };
+
+    const canonicalUser = resolveCanonicalUserForWalletActions(userId)
+      || Database.getUserById(userId)
+      || Database.getUserByUserId(userId);
+    const ownerId = String(canonicalUser?.id || userId).trim();
+
+    applyRequestsToState(ownerId);
+
+    if (!canonicalUser) {
+      return;
+    }
+
+    void (async () => {
+      const v2Read = await fetchV2DirectPinPurchaseRequestsForUserWithStatus(canonicalUser);
+      if (!v2Read.requests) {
+        return;
+      }
+
+      const allRequests = Database.getPinPurchaseRequests();
+      const otherUsers = allRequests.filter((request) => String(request.userId || '').trim() !== ownerId);
+      const ownerRequests = allRequests.filter((request) => String(request.userId || '').trim() === ownerId);
+      const mergedOwner = mergePinRequestRecordsById(ownerRequests, v2Read.requests);
+
+      Database.savePinPurchaseRequests([...otherUsers, ...mergedOwner]);
+      applyRequestsToState(ownerId);
+    })();
   },
 
   copyPinToClipboard: async (pinCode: string) => {
