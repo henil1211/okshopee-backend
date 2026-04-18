@@ -94,6 +94,28 @@ function parseExpectedQuantity(referenceId) {
   return qty;
 }
 
+function parseExpectedQuantityFromDescription(description) {
+  const raw = String(description || '').trim();
+  if (!raw) return null;
+
+  const patterns = [
+    /(\d+)\s*pin\b/i,
+    /pin\s*purchase\s*\((\d+)\)/i,
+    /\((\d+)\s*pins?\)/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (!match) continue;
+    const qty = Number(match[1]);
+    if (Number.isInteger(qty) && qty > 0 && qty <= 10000) {
+      return qty;
+    }
+  }
+
+  return null;
+}
+
 function inferPriceCents(row, expectedQty) {
   const minPrice = Number(row.min_price_cents || 0);
   const maxPrice = Number(row.max_price_cents || 0);
@@ -380,6 +402,7 @@ async function fetchPinPurchaseRows(conn, args) {
       lt.id AS ledger_txn_id,
       lt.tx_uuid,
       lt.reference_id,
+      lt.description,
       lt.created_at,
       lt.total_debit_cents,
       buyer.id AS buyer_user_id,
@@ -403,6 +426,7 @@ async function fetchPinPurchaseRows(conn, args) {
       lt.id,
       lt.tx_uuid,
       lt.reference_id,
+      lt.description,
       lt.created_at,
       lt.total_debit_cents,
       buyer.id,
@@ -422,7 +446,8 @@ function buildFindings(rows) {
     const pinsCount = Number(row.pins_count || 0);
     const pinsTotalCents = Number(row.pins_total_cents || 0);
     const totalDebitCents = Number(row.total_debit_cents || 0);
-    const expectedQty = parseExpectedQuantity(row.reference_id);
+    const expectedQty = parseExpectedQuantity(row.reference_id)
+      || parseExpectedQuantityFromDescription(row.description);
     const inferredPriceCents = inferPriceCents(row, expectedQty);
 
     const reasons = [];
