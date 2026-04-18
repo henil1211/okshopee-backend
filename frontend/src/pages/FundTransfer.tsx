@@ -109,6 +109,7 @@ export default function FundTransfer() {
 
   const handleTransfer = async () => {
     if (!displayUser) return;
+    if (isLoading) return;
     if (!v2ReadHealthy) {
       toast.error(v2ReadError || 'Live V2 sync is unavailable. Please refresh and try again.');
       return;

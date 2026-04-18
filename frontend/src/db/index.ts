@@ -10232,23 +10232,51 @@ class Database {
   }
 
   static verifyOtp(userId: string, otp: string, purpose: OtpRecord['purpose']): boolean {
+    const normalizedOtp = String(otp || '').trim();
+    if (!normalizedOtp) return false;
+
     const records = this.getOtpRecords();
     const otpSubjectCandidates = this.resolveOtpSubjectCandidates(userId);
     if (otpSubjectCandidates.length === 0) {
       otpSubjectCandidates.push(String(userId || '').trim());
     }
-    const record = records.find(
-      r => otpSubjectCandidates.includes(String(r.userId || '').trim()) &&
-        r.otp === otp &&
-        r.purpose === purpose &&
-        !r.isUsed &&
-        new Date(r.expiresAt) > new Date()
-    );
+    const isUsableOtpRecord = (r: OtpRecord): boolean => {
+      const recordOtp = String(r.otp || '').trim();
+      if (recordOtp !== normalizedOtp) return false;
+      if (r.purpose !== purpose) return false;
+      if (r.isUsed) return false;
+      if (new Date(r.expiresAt) <= new Date()) return false;
+      return true;
+    };
 
-    if (!record) return false;
+    let recordIndex = records.findIndex((r) => (
+      otpSubjectCandidates.includes(String(r.userId || '').trim()) && isUsableOtpRecord(r)
+    ));
+
+    // Fallback: if user-reference matching fails, allow matching by the same user's email.
+    // This handles edge cases where user references diverge across cached identity snapshots.
+    if (recordIndex === -1) {
+      const resolvedUser =
+        this.getUserById(userId)
+        || this.getUserByUserId(userId)
+        || this.getUserByEmail(userId);
+      const expectedEmail = String(resolvedUser?.email || '').trim().toLowerCase();
+      if (expectedEmail) {
+        const emailMatchedRecordIndex = records.findIndex((r) => {
+          const recordEmail = String(r.email || '').trim().toLowerCase();
+          if (!recordEmail || recordEmail !== expectedEmail) return false;
+          return isUsableOtpRecord(r);
+        });
+        if (emailMatchedRecordIndex >= 0) {
+          recordIndex = emailMatchedRecordIndex;
+        }
+      }
+    }
+
+    if (recordIndex === -1) return false;
 
     // Mark as used
-    record.isUsed = true;
+    records[recordIndex].isUsed = true;
     this.saveOtpRecords(records);
     return true;
   }
