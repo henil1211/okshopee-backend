@@ -163,16 +163,18 @@ async function loadStateRows(conn) {
   const [rows] = await conn.query(
     `SELECT state_key, state_value
      FROM state_store
-     WHERE state_key IN ('mlm_users', 'mlm_help_trackers')`
+     WHERE state_key IN ('mlm_users', 'mlm_help_trackers', 'mlm_transactions')`
   );
 
   const byKey = new Map((Array.isArray(rows) ? rows : []).map((row) => [String(row.state_key), row.state_value]));
   const legacyUsers = safeParseJson(byKey.get('mlm_users') || '[]', []);
   const legacyTrackers = safeParseJson(byKey.get('mlm_help_trackers') || '[]', []);
+  const legacyTransactions = safeParseJson(byKey.get('mlm_transactions') || '[]', []);
 
   return {
     legacyUsers: Array.isArray(legacyUsers) ? legacyUsers : [],
-    legacyTrackers: Array.isArray(legacyTrackers) ? legacyTrackers : []
+    legacyTrackers: Array.isArray(legacyTrackers) ? legacyTrackers : [],
+    legacyTransactions: Array.isArray(legacyTransactions) ? legacyTransactions : []
   };
 }
 
@@ -192,7 +194,17 @@ async function loadV2Users(conn) {
   return v2ByCode;
 }
 
-function buildCandidates({ legacyUsers, legacyTrackers, v2ByCode, allowedCodes }) {
+function normalizeLegacyLevelFromTransaction(tx) {
+  const numericLevel = toInt(tx?.level);
+  if (numericLevel > 0) return numericLevel;
+
+  const desc = String(tx?.description || tx?.notes || '').toLowerCase();
+  const match = desc.match(/\blevel\s+(\d+)\b/i);
+  const parsed = match ? toInt(match[1]) : 0;
+  return parsed > 0 ? parsed : 1;
+}
+
+function buildCandidatesFromTrackers({ legacyUsers, legacyTrackers, v2ByCode, allowedCodes }) {
   const legacyByInternal = new Map();
   for (const user of legacyUsers) {
     const internal = String(user?.id || '').trim();
@@ -278,6 +290,127 @@ function buildCandidates({ legacyUsers, legacyTrackers, v2ByCode, allowedCodes }
     candidates: Array.from(aggregate.values()).sort((a, b) => a.v2UserId - b.v2UserId || a.levelNo - b.levelNo),
     unresolved
   };
+}
+
+function buildCandidatesFromTransactions({ legacyUsers, legacyTransactions, v2ByCode, allowedCodes }) {
+  const legacyByInternal = new Map();
+  const legacyByPublicCode = new Map();
+
+  for (const user of legacyUsers) {
+    const internal = String(user?.id || '').trim();
+    const publicCode = normalizeCode(user?.userId);
+    if (internal) legacyByInternal.set(internal, user);
+    if (publicCode) legacyByPublicCode.set(publicCode, user);
+  }
+
+  const aggregate = new Map();
+  const unresolved = [];
+
+  for (const tx of legacyTransactions) {
+    if (!tx || typeof tx !== 'object') continue;
+    const type = String(tx.type || '').trim().toLowerCase();
+    const status = String(tx.status || '').trim().toLowerCase();
+    if (status !== 'completed') continue;
+    if (type !== 'receive_help' && type !== 'give_help') continue;
+
+    const userRef = String(tx.userId || '').trim();
+    if (!userRef) continue;
+
+    const userFromInternal = legacyByInternal.get(userRef) || null;
+    const userFromPublic = legacyByPublicCode.get(normalizeCode(userRef)) || null;
+    const legacyUser = userFromInternal || userFromPublic;
+    const userCode = normalizeCode(legacyUser?.userId || userRef);
+    if (!userCode) continue;
+    if (allowedCodes.size > 0 && !allowedCodes.has(userCode)) continue;
+
+    const v2User = v2ByCode.get(userCode) || null;
+    if (!v2User?.id) {
+      unresolved.push({ userCode, reason: 'missing_v2_user' });
+      continue;
+    }
+
+    const levelNo = normalizeLegacyLevelFromTransaction(tx);
+    const key = `${v2User.id}:${levelNo}`;
+    const desc = String(tx.description || tx.notes || '').toLowerCase();
+    const amount = Number(tx.amount || 0);
+    const amountCents = Math.round(Math.abs(amount) * 100);
+
+    const existing = aggregate.get(key) || {
+      v2UserId: v2User.id,
+      userCode,
+      levelNo,
+      receiveCount: 0,
+      receiveTotalCents: 0,
+      lockedFirstTwoCents: 0,
+      lockedQualificationCents: 0,
+      safetyDeductedCents: 0,
+      pendingGiveCents: 0,
+      givenCents: 0,
+      incomeCreditedCents: 0,
+      lastEventSeq: 0
+    };
+
+    if (type === 'receive_help' && amount > 0) {
+      existing.receiveCount += 1;
+      existing.receiveTotalCents += amountCents;
+      existing.lastEventSeq += 1;
+
+      if (desc.includes('locked first-two help at level')) {
+        existing.lockedFirstTwoCents += amountCents;
+      } else if (desc.includes('locked receive help at level')) {
+        existing.lockedQualificationCents += amountCents;
+      } else if (desc.includes('safety') && desc.includes('diversion')) {
+        existing.safetyDeductedCents += amountCents;
+      }
+    }
+
+    if (type === 'give_help' && amount < 0 && desc.includes('from locked income')) {
+      existing.givenCents += amountCents;
+      existing.lastEventSeq += 1;
+    }
+
+    aggregate.set(key, existing);
+  }
+
+  for (const row of aggregate.values()) {
+    row.pendingGiveCents = Math.max(0, row.lockedFirstTwoCents - row.givenCents);
+    row.incomeCreditedCents = Math.max(
+      0,
+      row.receiveTotalCents - row.lockedFirstTwoCents - row.lockedQualificationCents - row.safetyDeductedCents
+    );
+  }
+
+  return {
+    candidates: Array.from(aggregate.values()).sort((a, b) => a.v2UserId - b.v2UserId || a.levelNo - b.levelNo),
+    unresolved
+  };
+}
+
+function buildCandidates({ legacyUsers, legacyTrackers, legacyTransactions, v2ByCode, allowedCodes }) {
+  const trackerResult = buildCandidatesFromTrackers({
+    legacyUsers,
+    legacyTrackers,
+    v2ByCode,
+    allowedCodes
+  });
+
+  if (trackerResult.candidates.length > 0) {
+    return { ...trackerResult, sourceUsed: 'mlm_help_trackers' };
+  }
+
+  const transactionResult = buildCandidatesFromTransactions({
+    legacyUsers,
+    legacyTransactions,
+    v2ByCode,
+    allowedCodes
+  });
+
+  if (transactionResult.candidates.length > 0) {
+    return { ...transactionResult, sourceUsed: 'mlm_transactions' };
+  }
+
+  const unresolved = [...trackerResult.unresolved, ...transactionResult.unresolved];
+  return { candidates: [], unresolved, sourceUsed: 'none' };
 }
 
 async function loadExistingLevelRows(conn, candidateRows) {
@@ -430,11 +563,12 @@ async function applyMergedRows(conn, mergedRows, progressRows) {
   }
 }
 
-function summarize(mergedRows, progressRows, unresolved, args) {
+function summarize(mergedRows, progressRows, unresolved, args, sourceUsed) {
   const affectedUsers = new Set(mergedRows.map((row) => row.userCode));
   return {
     apply: args.apply,
     mergeMode: args.mergeMode,
+    sourceUsed,
     selectedUserCodes: args.userCodes,
     candidateRows: mergedRows.length,
     affectedUsers: affectedUsers.size,
@@ -466,9 +600,10 @@ async function main() {
     const stateRows = await loadStateRows(conn);
     const v2ByCode = await loadV2Users(conn);
 
-    const { candidates, unresolved } = buildCandidates({
+    const { candidates, unresolved, sourceUsed } = buildCandidates({
       legacyUsers: stateRows.legacyUsers,
       legacyTrackers: stateRows.legacyTrackers,
+      legacyTransactions: stateRows.legacyTransactions,
       v2ByCode,
       allowedCodes
     });
@@ -477,7 +612,7 @@ async function main() {
     const mergedRows = buildMergedRows(candidates, existingByKey, args.mergeMode);
     const progressRows = buildProgressRows(mergedRows);
 
-    const summary = summarize(mergedRows, progressRows, unresolved, args);
+    const summary = summarize(mergedRows, progressRows, unresolved, args, sourceUsed);
     fs.writeFileSync(path.join(evidenceDir, 'summary.json'), JSON.stringify(summary, null, 2), 'utf8');
 
     if (!args.apply) {
