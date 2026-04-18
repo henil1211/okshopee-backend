@@ -157,6 +157,7 @@ const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
 const V2_HELP_EVENT_ENDPOINT_NAME = 'v2_help_event';
 const V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME = 'v2_registration_queue_enqueue';
 const V2_REGISTRATION_QUEUE_ADMIN_READ_ENDPOINT_NAME = 'v2_registration_queue_admin_read';
+const V2_REGISTRATION_ENDPOINT_NAME = 'v2_registration';
 const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
 const V2_WALLET_READ_ENDPOINT_NAME = 'v2_wallet_read';
 const V2_TRANSACTIONS_READ_ENDPOINT_NAME = 'v2_transactions_read';
@@ -249,6 +250,12 @@ const V2_PIN_CODE_MAX_RETRIES_PER_PIN = Number.isFinite(V2_PIN_CODE_MAX_RETRIES_
   ? Math.trunc(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW)
   : 12;
 const V2_PIN_LEGACY_PROJECTION_ENABLED = String(process.env.V2_PIN_LEGACY_PROJECTION_ENABLED || 'true').trim().toLowerCase() !== 'false';
+const V2_REGISTRATION_LEGACY_PROJECTION_ENABLED = String(process.env.V2_REGISTRATION_LEGACY_PROJECTION_ENABLED || 'true').trim().toLowerCase() !== 'false';
+const V2_REGISTRATION_MODE = String(process.env.V2_REGISTRATION_MODE
+  || (V2_REGISTRATION_LEGACY_PROJECTION_ENABLED ? 'hybrid' : 'pure_v2')).trim().toLowerCase();
+const V2_REGISTRATION_PURE_V2_MODE = V2_REGISTRATION_MODE === 'pure_v2';
+const V2_AUTH_PROFILE_FALLBACK_ENABLED = String(process.env.V2_AUTH_PROFILE_FALLBACK_ENABLED || 'true').trim().toLowerCase() !== 'false';
+const V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED = String(process.env.V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const V2_REQUEST_ID_MAX_LENGTH = 100;
 const V2_IMPERSONATION_REASON_MAX_LENGTH = 255;
 const V2_STATE_WRITE_ALLOWLIST_USER = new Set([
@@ -399,6 +406,78 @@ async function ensureV2PostRegistrationRetryQueueTable() {
   }
 }
 
+async function ensureV2RegistrationDomainTables() {
+  try {
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS v2_registration_profiles (
+        user_id BIGINT UNSIGNED PRIMARY KEY,
+        login_password VARCHAR(255) NOT NULL,
+        transaction_password VARCHAR(255) NOT NULL,
+        phone VARCHAR(40) NOT NULL,
+        country VARCHAR(120) NOT NULL,
+        sponsor_user_code VARCHAR(20) NULL,
+        parent_user_code VARCHAR(20) NULL,
+        matrix_position ENUM('left','right') NULL,
+        matrix_level INT UNSIGNED NOT NULL DEFAULT 0,
+        direct_count INT UNSIGNED NOT NULL DEFAULT 0,
+        is_admin TINYINT(1) NOT NULL DEFAULT 0,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        account_status ENUM('active','temp_blocked','permanent_blocked') NOT NULL DEFAULT 'active',
+        blocked_at DATETIME(3) NULL,
+        blocked_until DATETIME(3) NULL,
+        blocked_reason VARCHAR(255) NULL,
+        deactivation_reason VARCHAR(255) NULL,
+        reactivated_at DATETIME(3) NULL,
+        activated_at DATETIME(3) NULL,
+        email_verified TINYINT(1) NOT NULL DEFAULT 0,
+        required_direct_for_next_level INT UNSIGNED NOT NULL DEFAULT 2,
+        completed_direct_for_current_level INT UNSIGNED NOT NULL DEFAULT 0,
+        total_earnings_cents BIGINT NOT NULL DEFAULT 0,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        KEY idx_v2_reg_profiles_sponsor (sponsor_user_code),
+        KEY idx_v2_reg_profiles_parent (parent_user_code),
+        CONSTRAINT fk_v2_reg_profiles_user FOREIGN KEY (user_id) REFERENCES v2_users(id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS v2_matrix_nodes (
+        user_code VARCHAR(20) PRIMARY KEY,
+        parent_user_code VARCHAR(20) NULL,
+        matrix_level INT UNSIGNED NOT NULL DEFAULT 0,
+        position ENUM('left','right') NULL,
+        left_child_user_code VARCHAR(20) NULL,
+        right_child_user_code VARCHAR(20) NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uq_v2_matrix_parent_position (parent_user_code, position),
+        KEY idx_v2_matrix_parent (parent_user_code)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  } catch (err) {
+    console.error('ensureV2RegistrationDomainTables failed:', getErrorMessage(err));
+  }
+}
+
+async function ensureV2HelpQualificationPolicyTable() {
+  try {
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS v2_help_qualification_policy (
+        id TINYINT UNSIGNED PRIMARY KEY,
+        policy_name VARCHAR(80) NOT NULL,
+        max_level SMALLINT UNSIGNED NOT NULL DEFAULT 10,
+        incremental_direct_requirements_json JSON NOT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  } catch (err) {
+    console.error('ensureV2HelpQualificationPolicyTable failed:', getErrorMessage(err));
+  }
+}
+
 async function connectMySQL() {
   pool = mysql.createPool({
     host: MYSQL_HOST,
@@ -428,6 +507,8 @@ async function connectMySQL() {
   await ensureStateStoreUpdatedAtColumn();
   await ensureV2AuthAuditTable();
   await ensureV2PostRegistrationRetryQueueTable();
+  await ensureV2RegistrationDomainTables();
+  await ensureV2HelpQualificationPolicyTable();
 
   // Debug: print current DB and columns to confirm schema matches expectations
   try {
@@ -1173,11 +1254,120 @@ async function loadLegacyUsersForAuth() {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+function mapV2RegistrationProfileRowToLegacyUser(row) {
+  if (!row) return null;
+
+  const userCode = normalizeV2UserCode(row.user_code);
+  if (!isValidV2UserCode(userCode)) return null;
+
+  const accountStatus = String(row.account_status || (row.user_status === 'active' ? 'active' : 'permanent_blocked')).trim() || 'active';
+  const isActive = Number(row.profile_is_active ?? 1) === 1 && accountStatus === 'active';
+
+  return {
+    id: row.legacy_user_id || `v2_${row.id}`,
+    userId: userCode,
+    email: String(row.email || '').trim().toLowerCase(),
+    password: String(row.login_password || ''),
+    fullName: String(row.full_name || '').trim(),
+    phone: String(row.profile_phone || '').trim(),
+    country: String(row.profile_country || '').trim(),
+    transactionPassword: String(row.transaction_password || ''),
+    sponsorId: normalizeV2UserCode(row.sponsor_user_code),
+    parentId: normalizeV2UserCode(row.parent_user_code),
+    position: row.matrix_position === 'left' || row.matrix_position === 'right' ? row.matrix_position : null,
+    level: Number(row.matrix_level || 0),
+    directCount: Number(row.direct_count || 0),
+    totalEarnings: Number(row.total_earnings_cents || 0),
+    isActive,
+    isAdmin: Number(row.profile_is_admin || 0) === 1,
+    accountStatus,
+    blockedAt: row.blocked_at || null,
+    blockedUntil: row.blocked_until || null,
+    blockedReason: row.blocked_reason || null,
+    deactivationReason: row.deactivation_reason || null,
+    reactivatedAt: row.reactivated_at || null,
+    createdAt: row.profile_created_at || row.user_created_at || null,
+    activatedAt: row.activated_at || row.profile_created_at || row.user_created_at || null,
+    requiredDirectForNextLevel: Number(row.required_direct_for_next_level || 2),
+    completedDirectForCurrentLevel: Number(row.completed_direct_for_current_level || 0),
+    emailVerified: Number(row.email_verified || 0) === 1,
+    achievements: {
+      nationalTour: false,
+      internationalTour: false,
+      familyTour: false
+    },
+    __authSource: 'v2_registration_profile'
+  };
+}
+
+async function findV2AuthUserByUserCode(userCode) {
+  if (!V2_AUTH_PROFILE_FALLBACK_ENABLED || !pool) return null;
+
+  const normalizedUserCode = normalizeV2UserCode(userCode);
+  if (!isValidV2UserCode(normalizedUserCode)) return null;
+
+  try {
+    const [rows] = await pool.execute(
+      `SELECT
+         u.id,
+         u.user_code,
+         u.legacy_user_id,
+         u.full_name,
+         u.email,
+         u.status AS user_status,
+         u.created_at AS user_created_at,
+         rp.login_password,
+         rp.transaction_password,
+         rp.phone AS profile_phone,
+         rp.country AS profile_country,
+         rp.sponsor_user_code,
+         rp.parent_user_code,
+         rp.matrix_position,
+         rp.matrix_level,
+         rp.direct_count,
+         rp.is_admin AS profile_is_admin,
+         rp.is_active AS profile_is_active,
+         rp.account_status,
+         rp.blocked_at,
+         rp.blocked_until,
+         rp.blocked_reason,
+         rp.deactivation_reason,
+         rp.reactivated_at,
+         rp.activated_at,
+         rp.required_direct_for_next_level,
+         rp.completed_direct_for_current_level,
+         rp.total_earnings_cents,
+         rp.email_verified,
+         rp.created_at AS profile_created_at
+       FROM v2_users u
+       INNER JOIN v2_registration_profiles rp ON rp.user_id = u.id
+       WHERE u.user_code = ?
+       LIMIT 1`,
+      [normalizedUserCode]
+    );
+
+    const row = Array.isArray(rows) ? rows[0] : null;
+    return mapV2RegistrationProfileRowToLegacyUser(row);
+  } catch (error) {
+    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
+      console.warn(`[v2-auth-profile] lookup failed: ${getErrorMessage(error, 'Unknown error')}`);
+    }
+    return null;
+  }
+}
+
 async function findLegacyUserByPublicUserId(userId) {
   const normalizedUserId = normalizeV2UserCode(userId);
   if (!normalizedUserId) return null;
   const users = await loadLegacyUsersForAuth();
-  return users.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId) || null;
+  const legacyUser = users.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId) || null;
+  if (legacyUser) return legacyUser;
+
+  if (V2_AUTH_PROFILE_FALLBACK_ENABLED) {
+    return findV2AuthUserByUserCode(normalizedUserId);
+  }
+
+  return null;
 }
 
 function isLegacyUserEligibleForV2Access(user) {
@@ -2465,6 +2655,1248 @@ async function readV2PinsByBuyerUserId(userId, limit = 500) {
   }));
 }
 
+function normalizeLegacyRegistrationMatrixSide(position) {
+  if (position === 'left' || position === 0 || position === '0') return 'left';
+  if (position === 'right' || position === 1 || position === '1') return 'right';
+  return null;
+}
+
+function isLegacySponsorEligibleForRegistration(user) {
+  if (!user) return false;
+  if (user.accountStatus === 'temp_blocked' || user.accountStatus === 'permanent_blocked') {
+    return true;
+  }
+  if (user.accountStatus !== 'active') return false;
+  return !!user.isActive || user.deactivationReason === 'direct_referral_deadline';
+}
+
+function findLegacyNextMatrixPlacementForRegistration(matrix, sponsorUserCode) {
+  const normalizedSponsorUserCode = normalizeV2UserCode(sponsorUserCode);
+  if (!normalizedSponsorUserCode || !Array.isArray(matrix)) return null;
+
+  const sponsorNode = matrix.find((node) => normalizeV2UserCode(node?.userId) === normalizedSponsorUserCode) || null;
+  if (!sponsorNode) return null;
+
+  const nodeMap = new Map();
+  for (const node of matrix) {
+    const nodeUserCode = normalizeV2UserCode(node?.userId);
+    if (!nodeUserCode) continue;
+    nodeMap.set(nodeUserCode, node);
+  }
+
+  const childSideMap = new Map();
+  const setChild = (parentId, side, childId) => {
+    const normalizedParent = normalizeV2UserCode(parentId);
+    const normalizedChild = normalizeV2UserCode(childId);
+    if (!normalizedParent || !normalizedChild || !side) return;
+    if (!nodeMap.has(normalizedParent) || !nodeMap.has(normalizedChild)) return;
+
+    const existing = childSideMap.get(normalizedParent) || {};
+    if (side === 'left' && !existing.left) existing.left = normalizedChild;
+    if (side === 'right' && !existing.right) existing.right = normalizedChild;
+    childSideMap.set(normalizedParent, existing);
+  };
+
+  for (const node of matrix) {
+    setChild(node?.parentId, normalizeLegacyRegistrationMatrixSide(node?.position), node?.userId);
+  }
+  for (const node of matrix) {
+    setChild(node?.userId, 'left', node?.leftChild);
+    setChild(node?.userId, 'right', node?.rightChild);
+  }
+
+  const queue = [normalizedSponsorUserCode];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const currentId = queue.shift();
+    if (!currentId || visited.has(currentId)) continue;
+    visited.add(currentId);
+
+    const currentNode = nodeMap.get(currentId);
+    if (!currentNode) continue;
+
+    const children = childSideMap.get(currentId) || {};
+    const leftChild = normalizeV2UserCode(children.left);
+    const rightChild = normalizeV2UserCode(children.right);
+
+    if (!leftChild) {
+      return { parentId: currentId, position: 'left' };
+    }
+    if (!rightChild) {
+      return { parentId: currentId, position: 'right' };
+    }
+
+    queue.push(leftChild, rightChild);
+  }
+
+  return null;
+}
+
+function generateLegacyUniqueRegistrationUserCode(users) {
+  const usedUserCodes = new Set(
+    (Array.isArray(users) ? users : [])
+      .map((user) => String(user?.userId || '').trim())
+      .filter((value) => /^\d{7}$/.test(value))
+  );
+
+  for (let attempt = 0; attempt < 50000; attempt += 1) {
+    const candidate = String(Math.floor(1000000 + Math.random() * 9000000));
+    if (!usedUserCodes.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  let maxKnown = 1000000;
+  for (const value of usedUserCodes) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > maxKnown) {
+      maxKnown = parsed;
+    }
+  }
+
+  for (let candidate = Math.max(1000001, maxKnown + 1); candidate <= 9999999; candidate += 1) {
+    const serialized = String(candidate);
+    if (!usedUserCodes.has(serialized)) {
+      return serialized;
+    }
+  }
+
+  throw createApiError(500, 'Unable to generate a unique 7-digit User ID', 'USER_ID_EXHAUSTED');
+}
+
+function buildDeterministicV2RegistrationIdempotencyKey(prefix, sourceRef) {
+  const normalizedPrefix = String(prefix || '').trim().replace(/[^a-zA-Z0-9_-]+/g, '_') || 'reg';
+  const normalizedSourceRef = String(sourceRef || '').trim();
+  const sourceToken = normalizedSourceRef.replace(/[^a-zA-Z0-9:_-]+/g, '_').slice(0, 90);
+  const seed = sourceToken || createHash('sha256').update(normalizedSourceRef).digest('hex').slice(0, 48);
+  return `${normalizedPrefix}_${seed}`.slice(0, 120);
+}
+
+async function generateV2UniqueRegistrationUserCode(connection) {
+  for (let attempt = 0; attempt < 50000; attempt += 1) {
+    const candidate = String(Math.floor(1000000 + Math.random() * 9000000));
+    const [rows] = await connection.execute(
+      `SELECT user_code
+       FROM v2_users
+       WHERE user_code = ?
+       LIMIT 1`,
+      [candidate]
+    );
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return candidate;
+    }
+  }
+
+  const [maxRows] = await connection.execute(
+    `SELECT MAX(CAST(user_code AS UNSIGNED)) AS max_code
+     FROM v2_users
+     WHERE user_code REGEXP '^[0-9]{7}$'`
+  );
+  const maxCode = Number(Array.isArray(maxRows) && maxRows[0] ? maxRows[0].max_code : 0);
+  let candidate = Number.isFinite(maxCode) && maxCode >= 1000000 ? Math.trunc(maxCode) + 1 : 1000001;
+
+  while (candidate <= 9999999) {
+    const serialized = String(candidate);
+    const [rows] = await connection.execute(
+      `SELECT user_code
+       FROM v2_users
+       WHERE user_code = ?
+       LIMIT 1`,
+      [serialized]
+    );
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return serialized;
+    }
+    candidate += 1;
+  }
+
+  throw createApiError(500, 'Unable to generate a unique 7-digit User ID', 'USER_ID_EXHAUSTED');
+}
+
+function isV2SponsorEligibleForRegistration(sponsorRow) {
+  if (!sponsorRow) return false;
+
+  const status = String(sponsorRow.status || '').trim().toLowerCase();
+  if (status !== 'active') return false;
+
+  const profileIsActive = Number(sponsorRow.profile_is_active ?? 1) === 1;
+  if (!profileIsActive) return false;
+
+  const accountStatus = String(sponsorRow.profile_account_status || 'active').trim().toLowerCase();
+  if (accountStatus === 'permanent_blocked') return false;
+  if (accountStatus === 'temp_blocked') {
+    const blockedUntilRaw = sponsorRow.profile_blocked_until;
+    if (blockedUntilRaw) {
+      const blockedUntil = new Date(blockedUntilRaw);
+      if (!Number.isNaN(blockedUntil.getTime()) && blockedUntil.getTime() > Date.now()) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+async function loadV2SponsorForRegistration(connection, sponsorUserCode) {
+  const normalizedSponsorUserCode = normalizeV2UserCode(sponsorUserCode);
+  if (!isValidV2UserCode(normalizedSponsorUserCode)) return null;
+
+  const [rows] = await connection.execute(
+    `SELECT
+       u.id,
+       u.user_code,
+       u.full_name,
+       u.status,
+       rp.is_active AS profile_is_active,
+       rp.account_status AS profile_account_status,
+       rp.blocked_until AS profile_blocked_until
+     FROM v2_users u
+     LEFT JOIN v2_registration_profiles rp ON rp.user_id = u.id
+     WHERE u.user_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [normalizedSponsorUserCode]
+  );
+
+  return Array.isArray(rows) ? rows[0] || null : null;
+}
+
+async function findV2NextMatrixPlacementForRegistration(connection, sponsorUserCode) {
+  const normalizedSponsorUserCode = normalizeV2UserCode(sponsorUserCode);
+  if (!isValidV2UserCode(normalizedSponsorUserCode)) return null;
+
+  const [rows] = await connection.execute(
+    `SELECT user_code, parent_user_code, left_child_user_code, right_child_user_code
+     FROM v2_matrix_nodes
+     FOR UPDATE`
+  );
+  const nodeRows = Array.isArray(rows) ? rows : [];
+  if (nodeRows.length === 0) {
+    return { parentId: normalizedSponsorUserCode, position: 'left' };
+  }
+
+  const byUserCode = new Map();
+  for (const row of nodeRows) {
+    const userCode = normalizeV2UserCode(row?.user_code);
+    if (!isValidV2UserCode(userCode)) continue;
+    byUserCode.set(userCode, {
+      userCode,
+      leftChildUserCode: normalizeV2UserCode(row?.left_child_user_code),
+      rightChildUserCode: normalizeV2UserCode(row?.right_child_user_code)
+    });
+  }
+
+  if (!byUserCode.has(normalizedSponsorUserCode)) {
+    return null;
+  }
+
+  const queue = [normalizedSponsorUserCode];
+  const visited = new Set();
+
+  while (queue.length > 0) {
+    const currentUserCode = queue.shift();
+    if (!currentUserCode || visited.has(currentUserCode)) continue;
+    visited.add(currentUserCode);
+
+    const node = byUserCode.get(currentUserCode);
+    if (!node) continue;
+
+    const leftChildUserCode = isValidV2UserCode(node.leftChildUserCode)
+      ? node.leftChildUserCode
+      : null;
+    const rightChildUserCode = isValidV2UserCode(node.rightChildUserCode)
+      ? node.rightChildUserCode
+      : null;
+
+    if (!leftChildUserCode) {
+      return { parentId: currentUserCode, position: 'left' };
+    }
+    if (!rightChildUserCode) {
+      return { parentId: currentUserCode, position: 'right' };
+    }
+
+    queue.push(leftChildUserCode, rightChildUserCode);
+  }
+
+  return null;
+}
+
+async function lockV2GeneratedPinForRegistration(connection, pinCode) {
+  const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+  if (!normalizedPinCode) {
+    throw createApiError(400, 'pinCode is required', 'INVALID_PIN_CODE');
+  }
+
+  const [rows] = await connection.execute(
+    `SELECT id, pin_code, status, price_cents, used_by_user_id, used_at
+     FROM v2_pins
+     WHERE pin_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [normalizedPinCode]
+  );
+  const pin = Array.isArray(rows) ? rows[0] : null;
+  if (!pin) {
+    throw createApiError(400, 'Invalid PIN code', 'INVALID_PIN_CODE');
+  }
+
+  const status = String(pin.status || '').trim().toLowerCase();
+  if (status !== 'generated') {
+    if (status === 'used') {
+      throw createApiError(409, 'PIN has already been used', 'PIN_ALREADY_USED');
+    }
+    throw createApiError(409, 'PIN is not available for registration', 'PIN_NOT_AVAILABLE');
+  }
+
+  return {
+    id: Number(pin.id || 0),
+    pinCode: normalizedPinCode,
+    priceCents: Number.isFinite(Number(pin.price_cents)) ? Math.trunc(Number(pin.price_cents)) : V2_DEFAULT_PIN_PRICE_CENTS
+  };
+}
+
+async function ensureV2UserAndWalletProvisionForRegistration(connection, legacyUser) {
+  const legacyInternalId = String(legacyUser?.id || '').trim();
+  const legacyUserCode = normalizeV2UserCode(legacyUser?.userId);
+  const fullName = String(legacyUser?.fullName || '').trim() || 'ReferNex User';
+  const email = String(legacyUser?.email || '').trim() || null;
+
+  if (!legacyInternalId || !isValidV2UserCode(legacyUserCode)) {
+    throw createApiError(500, 'Registered user is invalid for V2 provisioning', 'REGISTRATION_V2_PROVISION_INVALID');
+  }
+
+  await connection.execute(
+    `INSERT INTO v2_users (legacy_user_id, user_code, full_name, email, status)
+     VALUES (?, ?, ?, ?, 'active')
+     ON DUPLICATE KEY UPDATE
+       full_name = VALUES(full_name),
+       email = VALUES(email),
+       status = 'active',
+       updated_at = NOW(3)`,
+    [legacyInternalId, legacyUserCode, fullName.slice(0, 150), email ? email.slice(0, 190) : null]
+  );
+
+  const [v2UserRows] = await connection.execute(
+    `SELECT id
+     FROM v2_users
+     WHERE user_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [legacyUserCode]
+  );
+  const v2User = Array.isArray(v2UserRows) && v2UserRows[0] ? v2UserRows[0] : null;
+  const v2UserId = Number(v2User?.id || 0);
+  if (!v2UserId) {
+    throw createApiError(500, 'Failed to provision v2 user for registration', 'REGISTRATION_V2_USER_PROVISION_FAILED');
+  }
+
+  const walletTypes = ['fund', 'income', 'royalty'];
+  for (const walletType of walletTypes) {
+    const [existingWalletRows] = await connection.execute(
+      `SELECT id
+       FROM v2_wallet_accounts
+       WHERE user_id = ? AND wallet_type = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [v2UserId, walletType]
+    );
+    const hasWallet = Array.isArray(existingWalletRows) && existingWalletRows.length > 0;
+    if (hasWallet) {
+      continue;
+    }
+
+    const [existingGlRows] = await connection.execute(
+      `SELECT id
+       FROM v2_gl_accounts
+       WHERE owner_user_id = ? AND wallet_type = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [v2UserId, walletType]
+    );
+
+    let glAccountId = Number(Array.isArray(existingGlRows) && existingGlRows[0] ? existingGlRows[0].id : 0);
+    if (!glAccountId) {
+      const glCode = `USR_${legacyUserCode}_${String(walletType).toUpperCase()}`.slice(0, 80);
+      const glName = `${fullName} ${String(walletType).toUpperCase()} Wallet`.slice(0, 160);
+
+      await connection.execute(
+        `INSERT INTO v2_gl_accounts
+          (account_code, account_name, account_type, owner_user_id, wallet_type, is_system_account, is_active)
+         VALUES
+          (?, ?, 'LIABILITY', ?, ?, 0, 1)
+         ON DUPLICATE KEY UPDATE
+          owner_user_id = VALUES(owner_user_id),
+          wallet_type = VALUES(wallet_type),
+          is_active = 1,
+          updated_at = NOW(3)`,
+        [glCode, glName, v2UserId, walletType]
+      );
+
+      const [glRows] = await connection.execute(
+        `SELECT id
+         FROM v2_gl_accounts
+         WHERE account_code = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [glCode]
+      );
+      glAccountId = Number(Array.isArray(glRows) && glRows[0] ? glRows[0].id : 0);
+    }
+
+    if (!glAccountId) {
+      throw createApiError(500, `Failed to provision GL account for ${walletType} wallet`, 'REGISTRATION_V2_GL_PROVISION_FAILED');
+    }
+
+    await connection.execute(
+      `INSERT INTO v2_wallet_accounts
+        (user_id, wallet_type, gl_account_id, baseline_amount_cents, current_amount_cents, currency, version)
+       VALUES
+        (?, ?, ?, 0, 0, 'INR', 0)
+       ON DUPLICATE KEY UPDATE
+        gl_account_id = VALUES(gl_account_id),
+        updated_at = NOW(3)`,
+      [v2UserId, walletType, glAccountId]
+    );
+  }
+
+  return { v2UserId };
+}
+
+async function upsertV2RegistrationProfileForUser(connection, { legacyUser, v2UserId }) {
+  const legacyUserCode = normalizeV2UserCode(legacyUser?.userId);
+  if (!v2UserId || !isValidV2UserCode(legacyUserCode)) {
+    throw createApiError(500, 'Cannot upsert v2 registration profile for invalid user', 'REGISTRATION_PROFILE_INVALID');
+  }
+
+  const accountStatus = String(legacyUser?.accountStatus || 'active').trim() || 'active';
+  const safeAccountStatus = accountStatus === 'temp_blocked' || accountStatus === 'permanent_blocked'
+    ? accountStatus
+    : 'active';
+
+  await connection.execute(
+    `INSERT INTO v2_registration_profiles
+      (user_id, login_password, transaction_password, phone, country,
+       sponsor_user_code, parent_user_code, matrix_position, matrix_level,
+       direct_count, is_admin, is_active, account_status,
+       blocked_at, blocked_until, blocked_reason, deactivation_reason,
+       reactivated_at, activated_at, email_verified,
+       required_direct_for_next_level, completed_direct_for_current_level, total_earnings_cents)
+     VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+      login_password = VALUES(login_password),
+      transaction_password = VALUES(transaction_password),
+      phone = VALUES(phone),
+      country = VALUES(country),
+      sponsor_user_code = VALUES(sponsor_user_code),
+      parent_user_code = VALUES(parent_user_code),
+      matrix_position = VALUES(matrix_position),
+      matrix_level = VALUES(matrix_level),
+      direct_count = VALUES(direct_count),
+      is_admin = VALUES(is_admin),
+      is_active = VALUES(is_active),
+      account_status = VALUES(account_status),
+      blocked_at = VALUES(blocked_at),
+      blocked_until = VALUES(blocked_until),
+      blocked_reason = VALUES(blocked_reason),
+      deactivation_reason = VALUES(deactivation_reason),
+      reactivated_at = VALUES(reactivated_at),
+      activated_at = VALUES(activated_at),
+      email_verified = VALUES(email_verified),
+      required_direct_for_next_level = VALUES(required_direct_for_next_level),
+      completed_direct_for_current_level = VALUES(completed_direct_for_current_level),
+      total_earnings_cents = VALUES(total_earnings_cents),
+      updated_at = NOW(3)`,
+    [
+      v2UserId,
+      String(legacyUser?.password || ''),
+      String(legacyUser?.transactionPassword || ''),
+      String(legacyUser?.phone || '').slice(0, 40),
+      String(legacyUser?.country || '').slice(0, 120),
+      normalizeV2UserCode(legacyUser?.sponsorId),
+      normalizeV2UserCode(legacyUser?.parentId),
+      legacyUser?.position === 'left' || legacyUser?.position === 'right' ? legacyUser.position : null,
+      Number.isFinite(Number(legacyUser?.level)) ? Math.max(0, Math.trunc(Number(legacyUser.level))) : 0,
+      Number.isFinite(Number(legacyUser?.directCount)) ? Math.max(0, Math.trunc(Number(legacyUser.directCount))) : 0,
+      legacyUser?.isAdmin ? 1 : 0,
+      legacyUser?.isActive ? 1 : 0,
+      safeAccountStatus,
+      legacyUser?.blockedAt ? toMySQLDatetime(legacyUser.blockedAt) : null,
+      legacyUser?.blockedUntil ? toMySQLDatetime(legacyUser.blockedUntil) : null,
+      legacyUser?.blockedReason ? String(legacyUser.blockedReason).slice(0, 255) : null,
+      legacyUser?.deactivationReason ? String(legacyUser.deactivationReason).slice(0, 255) : null,
+      legacyUser?.reactivatedAt ? toMySQLDatetime(legacyUser.reactivatedAt) : null,
+      legacyUser?.activatedAt ? toMySQLDatetime(legacyUser.activatedAt) : null,
+      legacyUser?.emailVerified ? 1 : 0,
+      Number.isFinite(Number(legacyUser?.requiredDirectForNextLevel)) ? Math.max(0, Math.trunc(Number(legacyUser.requiredDirectForNextLevel))) : 2,
+      Number.isFinite(Number(legacyUser?.completedDirectForCurrentLevel)) ? Math.max(0, Math.trunc(Number(legacyUser.completedDirectForCurrentLevel))) : 0,
+      Number.isFinite(Number(legacyUser?.totalEarnings)) ? Math.trunc(Number(legacyUser.totalEarnings)) : 0
+    ]
+  );
+}
+
+async function upsertV2MatrixProjectionForUser(connection, legacyUser) {
+  const userCode = normalizeV2UserCode(legacyUser?.userId);
+  if (!isValidV2UserCode(userCode)) {
+    throw createApiError(500, 'Cannot upsert v2 matrix projection for invalid user', 'REGISTRATION_MATRIX_INVALID');
+  }
+
+  const parentUserCode = normalizeV2UserCode(legacyUser?.parentId);
+  const position = legacyUser?.position === 'left' || legacyUser?.position === 'right' ? legacyUser.position : null;
+  const matrixLevel = Number.isFinite(Number(legacyUser?.level)) ? Math.max(0, Math.trunc(Number(legacyUser.level))) : 0;
+
+  await connection.execute(
+    `INSERT INTO v2_matrix_nodes
+      (user_code, parent_user_code, matrix_level, position, is_active)
+     VALUES
+      (?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+      parent_user_code = VALUES(parent_user_code),
+      matrix_level = VALUES(matrix_level),
+      position = VALUES(position),
+      is_active = VALUES(is_active),
+      updated_at = NOW(3)`,
+    [userCode, parentUserCode, matrixLevel, position, legacyUser?.isActive ? 1 : 0]
+  );
+
+  if (parentUserCode && position) {
+    await connection.execute(
+      `INSERT INTO v2_matrix_nodes
+        (user_code, parent_user_code, matrix_level, position, is_active)
+       VALUES
+        (?, NULL, 0, NULL, 1)
+       ON DUPLICATE KEY UPDATE
+        user_code = VALUES(user_code)`,
+      [parentUserCode]
+    );
+
+    if (position === 'left') {
+      await connection.execute(
+        `UPDATE v2_matrix_nodes
+         SET left_child_user_code = ?, updated_at = NOW(3)
+         WHERE user_code = ?`,
+        [userCode, parentUserCode]
+      );
+    } else {
+      await connection.execute(
+        `UPDATE v2_matrix_nodes
+         SET right_child_user_code = ?, updated_at = NOW(3)
+         WHERE user_code = ?`,
+        [userCode, parentUserCode]
+      );
+    }
+  }
+}
+
+async function markV2PinUsedByRegistration(connection, { pinCode, v2UserId, requireMatch = false }) {
+  const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+  if (!normalizedPinCode || !v2UserId) return false;
+
+  try {
+    const [updateResult] = await connection.execute(
+      `UPDATE v2_pins
+       SET status = 'used', used_by_user_id = ?, used_at = NOW(3), updated_at = NOW(3)
+       WHERE pin_code = ? AND status = 'generated'`,
+      [v2UserId, normalizedPinCode]
+    );
+
+    const affected = Number(updateResult?.affectedRows || 0) > 0;
+    if (!affected && requireMatch) {
+      throw createApiError(409, 'PIN is not available for registration', 'PIN_NOT_AVAILABLE');
+    }
+
+    return affected;
+  } catch (error) {
+    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
+      throw error;
+    }
+    return false;
+  }
+}
+
+async function processV2Registration({
+  idempotencyKey,
+  fullName,
+  email,
+  password,
+  transactionPassword,
+  phone,
+  country,
+  sponsorId,
+  pinCode
+}) {
+  if (STORAGE_MODE !== 'mysql') {
+    throw createApiError(503, 'V2 registration requires STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
+  }
+
+  if (FINANCE_ENGINE_MODE !== 'v2') {
+    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/register', 'FINANCE_MODE_MISMATCH');
+  }
+
+  if (!pool) {
+    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
+  }
+
+  const normalizedFullName = String(fullName || '').trim();
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const normalizedPassword = String(password || '');
+  const normalizedTransactionPassword = String(transactionPassword || '');
+  const normalizedPhone = String(phone || '').trim();
+  const normalizedCountry = String(country || '').trim();
+  const normalizedSponsorId = String(sponsorId || '').trim();
+  const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+
+  if (!normalizedFullName) {
+    throw createApiError(400, 'fullName is required', 'INVALID_FULL_NAME');
+  }
+  if (!normalizedEmail) {
+    throw createApiError(400, 'email is required', 'INVALID_EMAIL');
+  }
+  if (!normalizedPassword) {
+    throw createApiError(400, 'password is required', 'INVALID_PASSWORD');
+  }
+  if (!normalizedTransactionPassword) {
+    throw createApiError(400, 'transactionPassword is required', 'INVALID_TRANSACTION_PASSWORD');
+  }
+  if (!normalizedPhone) {
+    throw createApiError(400, 'phone is required', 'INVALID_PHONE');
+  }
+  if (!normalizedCountry) {
+    throw createApiError(400, 'country is required', 'INVALID_COUNTRY');
+  }
+  if (!normalizedPinCode) {
+    throw createApiError(400, 'pinCode is required', 'INVALID_PIN_CODE');
+  }
+  if (normalizedSponsorId && !/^\d{7}$/.test(normalizedSponsorId)) {
+    throw createApiError(400, 'Sponsor ID must be a 7-digit user code', 'INVALID_SPONSOR_ID');
+  }
+
+  const requestHash = buildV2RequestHash({
+    endpoint: V2_REGISTRATION_ENDPOINT_NAME,
+    fullName: normalizedFullName,
+    email: normalizedEmail,
+    password: normalizedPassword,
+    transactionPassword: normalizedTransactionPassword,
+    phone: normalizedPhone,
+    country: normalizedCountry,
+    sponsorId: normalizedSponsorId || null,
+    pinCode: normalizedPinCode
+  });
+
+  const connection = await pool.getConnection();
+  let transactionOpen = false;
+  let registrationResponsePayload = null;
+  let registeredUser = null;
+  let sponsorUser = null;
+  let sponsorUserCodeForResponse = null;
+  let pinAmountForTransaction = V2_DEFAULT_PIN_PRICE_CENTS;
+
+  try {
+    await connection.beginTransaction();
+    transactionOpen = true;
+
+    const [idemRows] = await connection.execute(
+      `SELECT idempotency_key, request_hash, status, response_code, response_body, locked_until
+       FROM v2_idempotency_keys
+       WHERE idempotency_key = ?
+       FOR UPDATE`,
+      [idempotencyKey]
+    );
+    const existingIdem = Array.isArray(idemRows) && idemRows.length > 0 ? idemRows[0] : null;
+
+    if (existingIdem) {
+      if (existingIdem.request_hash !== requestHash) {
+        throw createApiError(409, 'Idempotency key reused with different payload', 'IDEMPOTENCY_PAYLOAD_MISMATCH');
+      }
+
+      if (existingIdem.status === 'completed') {
+        const replayPayload = parseIdempotencyResponseBody(existingIdem.response_body) || { ok: true };
+        await connection.commit();
+        transactionOpen = false;
+        return {
+          status: Number(existingIdem.response_code) || 200,
+          payload: { ...replayPayload, idempotentReplay: true }
+        };
+      }
+
+      const lockExpiresAt = existingIdem.locked_until ? new Date(existingIdem.locked_until).getTime() : 0;
+      if (existingIdem.status === 'processing' && Number.isFinite(lockExpiresAt) && lockExpiresAt > Date.now()) {
+        throw createApiError(409, 'Request with this Idempotency-Key is already processing', 'IDEMPOTENCY_IN_PROGRESS');
+      }
+
+      await connection.execute(
+        `UPDATE v2_idempotency_keys
+         SET endpoint_name = ?, actor_user_id = NULL, request_hash = ?, status = 'processing',
+             locked_until = DATE_ADD(NOW(3), INTERVAL ? SECOND), error_code = NULL,
+             updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [V2_REGISTRATION_ENDPOINT_NAME, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS, idempotencyKey]
+      );
+    } else {
+      await connection.execute(
+        `INSERT INTO v2_idempotency_keys
+          (idempotency_key, endpoint_name, actor_user_id, request_hash, status, locked_until)
+         VALUES
+          (?, ?, NULL, ?, 'processing', DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
+        [idempotencyKey, V2_REGISTRATION_ENDPOINT_NAME, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
+      );
+    }
+
+    const useLegacyProjection = V2_REGISTRATION_LEGACY_PROJECTION_ENABLED && !V2_REGISTRATION_PURE_V2_MODE;
+
+    const lockStateKey = async (stateKey, fallbackRaw = '[]') => {
+      const [rows] = await connection.execute(
+        `SELECT state_value
+         FROM state_store
+         WHERE state_key = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [stateKey]
+      );
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return fallbackRaw;
+      }
+      const raw = rows[0]?.state_value;
+      return typeof raw === 'string' ? raw : fallbackRaw;
+    };
+
+    let users = [];
+    let wallets = [];
+    let transactions = [];
+    let matrix = [];
+    let pins = [];
+    let notifications = [];
+    let announcements = [];
+    let safetyPool = { totalAmount: 0, transactions: [] };
+
+    let sponsorUserCodeForPlacement = normalizedSponsorId || null;
+    let parentUserCode = null;
+    let position = null;
+    let matrixDepthLevel = 0;
+
+    if (useLegacyProjection) {
+      const usersRaw = await lockStateKey('mlm_users', '[]');
+      const walletsRaw = await lockStateKey('mlm_wallets', '[]');
+      const transactionsRaw = await lockStateKey('mlm_transactions', '[]');
+      const matrixRaw = await lockStateKey('mlm_matrix', '[]');
+      const pinsRaw = await lockStateKey('mlm_pins', '[]');
+      const notificationsRaw = await lockStateKey('mlm_notifications', '[]');
+      const announcementsRaw = await lockStateKey('mlm_announcements', '[]');
+      const safetyPoolRaw = await lockStateKey('mlm_safety_pool', '{"totalAmount":0,"transactions":[]}');
+
+      users = Array.isArray(safeParseJSON(usersRaw)) ? safeParseJSON(usersRaw) : [];
+      wallets = Array.isArray(safeParseJSON(walletsRaw)) ? safeParseJSON(walletsRaw) : [];
+      transactions = Array.isArray(safeParseJSON(transactionsRaw)) ? safeParseJSON(transactionsRaw) : [];
+      matrix = Array.isArray(safeParseJSON(matrixRaw)) ? safeParseJSON(matrixRaw) : [];
+      pins = Array.isArray(safeParseJSON(pinsRaw)) ? safeParseJSON(pinsRaw) : [];
+      notifications = Array.isArray(safeParseJSON(notificationsRaw)) ? safeParseJSON(notificationsRaw) : [];
+      announcements = Array.isArray(safeParseJSON(announcementsRaw)) ? safeParseJSON(announcementsRaw) : [];
+      const safetyPoolParsed = safeParseJSON(safetyPoolRaw);
+      safetyPool = safetyPoolParsed && typeof safetyPoolParsed === 'object'
+        ? {
+          totalAmount: Number(safetyPoolParsed.totalAmount || 0),
+          transactions: Array.isArray(safetyPoolParsed.transactions) ? safetyPoolParsed.transactions : []
+        }
+        : { totalAmount: 0, transactions: [] };
+
+      const pinIndex = pins.findIndex(
+        (pin) => String(pin?.pinCode || '').trim().toUpperCase() === normalizedPinCode
+      );
+      if (pinIndex === -1) {
+        throw createApiError(400, 'Invalid PIN code', 'INVALID_PIN_CODE');
+      }
+      if (pins[pinIndex]?.status === 'suspended') {
+        throw createApiError(409, 'PIN is suspended by admin', 'PIN_SUSPENDED');
+      }
+      if (pins[pinIndex]?.status !== 'unused') {
+        throw createApiError(409, 'PIN has already been used', 'PIN_ALREADY_USED');
+      }
+
+      pinAmountForTransaction = Number(pins[pinIndex]?.amount || V2_DEFAULT_PIN_PRICE_CENTS / 100);
+
+      sponsorUser = normalizedSponsorId
+        ? users.find((user) => String(user?.userId || '').trim() === normalizedSponsorId) || null
+        : null;
+      if (normalizedSponsorId && !sponsorUser) {
+        throw createApiError(400, 'Invalid Sponsor ID', 'INVALID_SPONSOR_ID');
+      }
+      if (sponsorUser && !isLegacySponsorEligibleForRegistration(sponsorUser)) {
+        throw createApiError(409, 'Sponsor account is inactive or blocked', 'SPONSOR_NOT_ACTIVE');
+      }
+
+      const placement = sponsorUser
+        ? findLegacyNextMatrixPlacementForRegistration(matrix, sponsorUser.userId)
+        : null;
+
+      parentUserCode = placement?.parentId || null;
+      position = placement?.position || null;
+      const parentNode = parentUserCode
+        ? matrix.find((node) => normalizeV2UserCode(node?.userId) === normalizeV2UserCode(parentUserCode)) || null
+        : null;
+      matrixDepthLevel = parentNode ? (Number(parentNode.level || 0) + 1) : 0;
+
+      sponsorUserCodeForPlacement = sponsorUser ? String(sponsorUser.userId || '').trim() : null;
+      sponsorUserCodeForResponse = sponsorUserCodeForPlacement;
+
+      pins[pinIndex] = {
+        ...pins[pinIndex],
+        status: 'used'
+      };
+    } else {
+      const v2Pin = await lockV2GeneratedPinForRegistration(connection, normalizedPinCode);
+      pinAmountForTransaction = Number(v2Pin.priceCents || V2_DEFAULT_PIN_PRICE_CENTS) / 100;
+
+      if (normalizedSponsorId) {
+        const v2Sponsor = await loadV2SponsorForRegistration(connection, normalizedSponsorId);
+        if (!v2Sponsor) {
+          throw createApiError(400, 'Invalid Sponsor ID', 'INVALID_SPONSOR_ID');
+        }
+        if (!isV2SponsorEligibleForRegistration(v2Sponsor)) {
+          throw createApiError(409, 'Sponsor account is inactive or blocked', 'SPONSOR_NOT_ACTIVE');
+        }
+
+        sponsorUserCodeForPlacement = normalizeV2UserCode(v2Sponsor.user_code);
+        sponsorUserCodeForResponse = sponsorUserCodeForPlacement;
+
+        const placement = await findV2NextMatrixPlacementForRegistration(connection, sponsorUserCodeForPlacement);
+        parentUserCode = placement?.parentId || null;
+        position = placement?.position || null;
+        if (isValidV2UserCode(parentUserCode)) {
+          const [parentRows] = await connection.execute(
+            `SELECT matrix_level
+             FROM v2_matrix_nodes
+             WHERE user_code = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [parentUserCode]
+          );
+          const parentNode = Array.isArray(parentRows) ? parentRows[0] : null;
+          matrixDepthLevel = Number(parentNode?.matrix_level || 0) + 1;
+        }
+      }
+    }
+
+    const generatedUserId = useLegacyProjection
+      ? generateLegacyUniqueRegistrationUserCode(users)
+      : await generateV2UniqueRegistrationUserCode(connection);
+
+    let generatedInternalUserId;
+    if (useLegacyProjection) {
+      const existingInternalIds = new Set(users.map((user) => String(user?.id || '').trim()).filter(Boolean));
+      generatedInternalUserId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      while (!generatedInternalUserId || existingInternalIds.has(generatedInternalUserId)) {
+        generatedInternalUserId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      }
+    } else {
+      generatedInternalUserId = `v2_${generatedUserId}`;
+    }
+
+    const nowIso = new Date().toISOString();
+    registeredUser = {
+      id: generatedInternalUserId,
+      userId: generatedUserId,
+      email: normalizedEmail,
+      password: normalizedPassword,
+      fullName: normalizedFullName,
+      phone: normalizedPhone,
+      country: normalizedCountry,
+      isActive: true,
+      isAdmin: false,
+      accountStatus: 'active',
+      blockedAt: null,
+      blockedUntil: null,
+      blockedReason: null,
+      deactivationReason: null,
+      reactivatedAt: null,
+      createdAt: nowIso,
+      activatedAt: nowIso,
+      gracePeriodEnd: null,
+      sponsorId: sponsorUserCodeForPlacement,
+      parentId: parentUserCode,
+      position,
+      level: 0,
+      directCount: 0,
+      totalEarnings: 0,
+      isCapped: false,
+      capLevel: 0,
+      reEntryCount: 0,
+      cycleCount: 0,
+      requiredDirectForNextLevel: 2,
+      completedDirectForCurrentLevel: 0,
+      transactionPassword: normalizedTransactionPassword,
+      emailVerified: false,
+      achievements: {
+        nationalTour: false,
+        internationalTour: false,
+        familyTour: false
+      }
+    };
+    if (useLegacyProjection) {
+      users.push(registeredUser);
+
+      if (sponsorUser) {
+        sponsorUser.directCount = Number(sponsorUser.directCount || 0) + 1;
+      }
+
+      const existingWallet = wallets.find((wallet) => String(wallet?.userId || '').trim() === registeredUser.id);
+      if (!existingWallet) {
+        wallets.push({
+          userId: registeredUser.id,
+          depositWallet: 0,
+          fundRecoveryDue: 0,
+          fundRecoveryRecoveredTotal: 0,
+          fundRecoveryReason: null,
+          pinWallet: 0,
+          incomeWallet: 0,
+          royaltyWallet: 0,
+          matrixWallet: 0,
+          lockedIncomeWallet: 0,
+          giveHelpLocked: 0,
+          totalReceived: 0,
+          totalGiven: 0,
+          pendingSystemFee: 0,
+          lastSystemFeeDate: null,
+          rewardPoints: 0,
+          totalRewardPointsEarned: 0,
+          totalRewardPointsRedeemed: 0
+        });
+      }
+
+      const pinIndex = pins.findIndex(
+        (pin) => String(pin?.pinCode || '').trim().toUpperCase() === normalizedPinCode
+      );
+      if (pinIndex >= 0) {
+        pins[pinIndex] = {
+          ...pins[pinIndex],
+          status: 'used',
+          usedAt: nowIso,
+          usedById: registeredUser.id,
+          registrationUserId: registeredUser.id
+        };
+      }
+
+      const matrixNode = {
+        userId: generatedUserId,
+        username: normalizedFullName,
+        level: matrixDepthLevel,
+        position: position === 'right' ? 1 : 0,
+        parentId: parentUserCode || undefined,
+        isActive: true
+      };
+      matrix.push(matrixNode);
+
+      if (parentUserCode && position) {
+        const parentIndex = matrix.findIndex((node) => normalizeV2UserCode(node?.userId) === normalizeV2UserCode(parentUserCode));
+        if (parentIndex >= 0) {
+          if (position === 'left') {
+            matrix[parentIndex].leftChild = generatedUserId;
+          } else {
+            matrix[parentIndex].rightChild = generatedUserId;
+          }
+        }
+      }
+
+      transactions.push({
+        id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_pin_used`,
+        userId: registeredUser.id,
+        type: 'pin_used',
+        amount: Number.isFinite(pinAmountForTransaction) ? pinAmountForTransaction : 11,
+        pinCode: normalizedPinCode,
+        pinId: pinIndex >= 0 ? (String(pins[pinIndex]?.id || '').trim() || undefined) : undefined,
+        status: 'completed',
+        description: 'Account activation using PIN',
+        createdAt: nowIso,
+        completedAt: nowIso
+      });
+
+      const directIncome = 5;
+      const adminFee = 1;
+      if (!sponsorUser) {
+        safetyPool.totalAmount += directIncome;
+        safetyPool.transactions.push({
+          id: `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          amount: directIncome,
+          fromUserId: registeredUser.id,
+          reason: 'No sponsor - referral income',
+          createdAt: nowIso
+        });
+      }
+      safetyPool.totalAmount += adminFee;
+      safetyPool.transactions.push({
+        id: `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        amount: adminFee,
+        fromUserId: registeredUser.id,
+        reason: 'Admin fee',
+        createdAt: nowIso
+      });
+
+      notifications.push({
+        id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        userId: registeredUser.id,
+        title: 'Welcome To ReferNex',
+        message: `Welcome to ReferNex.\n\nAccount created successfully. Your User ID is ${generatedUserId}. Please check your email for your login and transaction passwords.`,
+        type: 'success',
+        isRead: false,
+        createdAt: nowIso
+      });
+
+      const nowTs = Date.now();
+      for (const announcement of announcements) {
+        if (!announcement || typeof announcement !== 'object') continue;
+        if (announcement.isRecalled) continue;
+        if (announcement.expiresAt && Date.parse(announcement.expiresAt) <= nowTs) continue;
+        if (!announcement.includeFutureUsers) continue;
+        if (registeredUser.isAdmin && announcement.includeAdmins === false) continue;
+
+        const alreadyNotified = notifications.some((notification) => (
+          String(notification?.userId || '').trim() === registeredUser.id
+          && String(notification?.announcementId || '').trim() === String(announcement.id || '').trim()
+        ));
+        if (alreadyNotified) continue;
+
+        notifications.push({
+          id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          userId: registeredUser.id,
+          title: String(announcement.title || '').trim() || 'Announcement',
+          message: String(announcement.message || '').trim() || '',
+          type: announcement.type || 'info',
+          isRead: false,
+          createdAt: nowIso,
+          announcementId: announcement.id,
+          ...(announcement.imageUrl ? { imageUrl: announcement.imageUrl } : {})
+        });
+        announcement.totalRecipients = Number(announcement.totalRecipients || 0) + 1;
+      }
+
+      const upsertStateKey = async (stateKey, value) => {
+        await connection.execute(
+          `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+          [stateKey, JSON.stringify(value), toMySQLDatetime(nowIso)]
+        );
+      };
+
+      await upsertStateKey('mlm_users', users);
+      await upsertStateKey('mlm_wallets', wallets);
+      await upsertStateKey('mlm_transactions', transactions);
+      await upsertStateKey('mlm_matrix', matrix);
+      await upsertStateKey('mlm_pins', pins);
+      await upsertStateKey('mlm_safety_pool', safetyPool);
+      await upsertStateKey('mlm_notifications', notifications);
+      await upsertStateKey('mlm_announcements', announcements);
+    }
+
+    const { v2UserId } = await ensureV2UserAndWalletProvisionForRegistration(connection, registeredUser);
+    await upsertV2RegistrationProfileForUser(connection, { legacyUser: registeredUser, v2UserId });
+    await upsertV2MatrixProjectionForUser(connection, registeredUser);
+    const mirroredPinUsed = await markV2PinUsedByRegistration(connection, {
+      pinCode: normalizedPinCode,
+      v2UserId,
+      requireMatch: V2_REGISTRATION_PURE_V2_MODE
+    });
+
+    if (!useLegacyProjection && sponsorUserCodeForPlacement) {
+      await connection.execute(
+        `UPDATE v2_registration_profiles rp
+         INNER JOIN v2_users u ON u.id = rp.user_id
+         SET rp.direct_count = rp.direct_count + 1,
+             rp.completed_direct_for_current_level = rp.completed_direct_for_current_level + 1,
+             rp.updated_at = NOW(3)
+         WHERE u.user_code = ?`,
+        [sponsorUserCodeForPlacement]
+      );
+    }
+
+    registrationResponsePayload = {
+      ok: true,
+      userId: registeredUser.userId,
+      user: {
+        userId: registeredUser.userId,
+        fullName: registeredUser.fullName,
+        email: registeredUser.email,
+        phone: registeredUser.phone,
+        country: registeredUser.country,
+        sponsorId: sponsorUserCodeForResponse || registeredUser.sponsorId,
+        parentId: registeredUser.parentId,
+        position: registeredUser.position
+      },
+      createdAt: nowIso,
+      warnings: [
+        ...(useLegacyProjection
+          ? []
+          : ['Legacy registration projection is disabled for this environment.']),
+        ...(mirroredPinUsed
+          ? []
+          : [useLegacyProjection
+            ? 'PIN was consumed in legacy projection but no matching generated v2 PIN was found.'
+            : 'PIN could not be marked as used in v2_pins.'])
+      ]
+    };
+
+    await connection.execute(
+      `UPDATE v2_idempotency_keys
+       SET status = 'completed', response_code = ?, response_body = ?,
+           locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+       WHERE idempotency_key = ?`,
+      [201, JSON.stringify(registrationResponsePayload), idempotencyKey]
+    );
+
+    await connection.commit();
+    transactionOpen = false;
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        await connection.rollback();
+      } catch {
+        // Ignore rollback secondary errors.
+      }
+    }
+
+    if (idempotencyKey && pool) {
+      try {
+        await pool.execute(
+          `UPDATE v2_idempotency_keys
+           SET status = 'failed', error_code = ?, locked_until = NULL,
+               updated_at = NOW(3), last_seen_at = NOW(3)
+           WHERE idempotency_key = ?`,
+          [String(error?.code || 'UNKNOWN_V2_ERROR').slice(0, 80), idempotencyKey]
+        );
+      } catch {
+        // Keep primary error as source of truth.
+      }
+    }
+
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  invalidateStateSnapshotCache();
+
+  const warnings = [];
+  const sourceUserCode = String(registeredUser?.userId || '').trim();
+  const sourceUserName = String(registeredUser?.fullName || '').trim();
+  const beneficiaryUserCode = String(sponsorUser?.userId || '').trim();
+  const beneficiaryUserName = String(sponsorUser?.fullName || '').trim();
+
+  if (sourceUserCode && beneficiaryUserCode) {
+    const referralSourceRef = `reg_pin_${sourceUserCode}_${beneficiaryUserCode}`;
+    const referralIdempotencyKey = buildDeterministicV2RegistrationIdempotencyKey('reg_ref', referralSourceRef);
+    try {
+      await executeV2TransactionWithRetry(
+        () => processV2ReferralCredit({
+          idempotencyKey: referralIdempotencyKey,
+          actorUserCode: sourceUserCode,
+          sourceUserCode,
+          beneficiaryUserCode,
+          allowInactiveActor: false,
+          sourceTxnId: null,
+          sourceRef: referralSourceRef,
+          eventType: 'direct_referral',
+          levelNo: 1,
+          amountCents: 500,
+          description: `Referral income from ${sourceUserName} (${sourceUserCode})`
+        }),
+        `${V2_REGISTRATION_ENDPOINT_NAME}_referral`
+      );
+    } catch (error) {
+      try {
+        await enqueueV2PostRegistrationRetryTask({
+          taskType: 'referral_credit',
+          taskKey: `referral:${referralSourceRef}:${sourceUserCode}:${beneficiaryUserCode}`,
+          registrationUserCode: sourceUserCode,
+          registrationUserName: sourceUserName,
+          targetUserCode: beneficiaryUserCode,
+          targetUserName: beneficiaryUserName,
+          payload: {
+            sourceUserCode,
+            beneficiaryUserCode,
+            sourceRef: referralSourceRef,
+            eventType: 'direct_referral',
+            levelNo: 1,
+            amountCents: 500,
+            description: `Referral income from ${sourceUserName} (${sourceUserCode})`
+          },
+          maxAttempts: V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS
+        });
+        warnings.push(`Referral credit queued for retry (${getErrorMessage(error, 'unknown error')}).`);
+      } catch (queueError) {
+        warnings.push(`Referral credit failed (${getErrorMessage(queueError, getErrorMessage(error, 'unknown error'))}).`);
+      }
+    }
+  }
+
+  if (sourceUserCode) {
+    const helpSourceRef = `reg_help_${sourceUserCode}_${sourceUserCode}`;
+    const helpIdempotencyKey = buildDeterministicV2RegistrationIdempotencyKey('reg_help', helpSourceRef);
+    try {
+      await executeV2TransactionWithRetry(
+        () => processV2HelpEvent({
+          idempotencyKey: helpIdempotencyKey,
+          actorUserCode: sourceUserCode,
+          sourceUserCode,
+          newMemberUserCode: sourceUserCode,
+          sourceRef: helpSourceRef,
+          eventType: 'activation_join',
+          allowInactiveActor: false,
+          description: `Activation help event for ${sourceUserName} (${sourceUserCode})`
+        }),
+        `${V2_REGISTRATION_ENDPOINT_NAME}_help`
+      );
+    } catch (error) {
+      try {
+        await enqueueV2PostRegistrationRetryTask({
+          taskType: 'help_event',
+          taskKey: `help:${helpSourceRef}:${sourceUserCode}:${sourceUserCode}`,
+          registrationUserCode: sourceUserCode,
+          registrationUserName: sourceUserName,
+          targetUserCode: sourceUserCode,
+          targetUserName: sourceUserName,
+          payload: {
+            sourceUserCode,
+            newMemberUserCode: sourceUserCode,
+            sourceRef: helpSourceRef,
+            eventType: 'activation_join',
+            description: `Activation help event for ${sourceUserName} (${sourceUserCode})`
+          },
+          maxAttempts: V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS
+        });
+        warnings.push(`Help event queued for retry (${getErrorMessage(error, 'unknown error')}).`);
+      } catch (queueError) {
+        warnings.push(`Help event failed (${getErrorMessage(queueError, getErrorMessage(error, 'unknown error'))}).`);
+      }
+    }
+  }
+
+  if (warnings.length > 0 && idempotencyKey && pool && registrationResponsePayload) {
+    try {
+      registrationResponsePayload = {
+        ...registrationResponsePayload,
+        warnings
+      };
+      await pool.execute(
+        `UPDATE v2_idempotency_keys
+         SET response_body = ?, updated_at = NOW(3), last_seen_at = NOW(3)
+         WHERE idempotency_key = ?`,
+        [JSON.stringify(registrationResponsePayload), idempotencyKey]
+      );
+    } catch {
+      // Keep primary response even if replay metadata update fails.
+    }
+  }
+
+  if (warnings.length > 0) {
+    void runV2PostRegistrationQueueWorkerTick();
+  }
+
+  return {
+    status: 201,
+    payload: warnings.length > 0 && registrationResponsePayload
+      ? { ...registrationResponsePayload, warnings }
+      : registrationResponsePayload || { ok: true }
+  };
+}
+
 async function processV2FundTransfer({
   idempotencyKey,
   actorUserCode,
@@ -3720,6 +5152,48 @@ async function resolveLegacyImmediateUplineFromMatrix(connection, newMemberUserC
     return { parentUserCode: null, side: null };
   }
 
+  try {
+    const [v2NodeRows] = await connection.execute(
+      `SELECT user_code, parent_user_code, position
+       FROM v2_matrix_nodes
+       WHERE user_code = ?
+       LIMIT 1`,
+      [normalizedNewMemberUserCode]
+    );
+    const v2Node = Array.isArray(v2NodeRows) ? v2NodeRows[0] : null;
+
+    if (v2Node) {
+      const parentUserCode = normalizeV2UserCode(v2Node.parent_user_code);
+      let side = normalizeV2HelpContributionSide(v2Node.position);
+      if (side === 'unknown') side = null;
+
+      if (!side && parentUserCode) {
+        const [v2ParentRows] = await connection.execute(
+          `SELECT left_child_user_code, right_child_user_code
+           FROM v2_matrix_nodes
+           WHERE user_code = ?
+           LIMIT 1`,
+          [parentUserCode]
+        );
+        const v2ParentNode = Array.isArray(v2ParentRows) ? v2ParentRows[0] : null;
+        if (v2ParentNode) {
+          const leftChild = normalizeV2UserCode(v2ParentNode.left_child_user_code);
+          const rightChild = normalizeV2UserCode(v2ParentNode.right_child_user_code);
+          if (leftChild === normalizedNewMemberUserCode) side = 'left';
+          if (rightChild === normalizedNewMemberUserCode) side = 'right';
+        }
+      }
+
+      if (isValidV2UserCode(parentUserCode)) {
+        return { parentUserCode, side };
+      }
+    }
+  } catch (error) {
+    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
+      throw error;
+    }
+  }
+
   const [rows] = await connection.execute(
     `SELECT state_value
      FROM state_store
@@ -3971,6 +5445,55 @@ function normalizeV2HelpContributionSide(value) {
 }
 
 async function loadLegacyHelpQualificationContext(connection) {
+  try {
+    const [policyRows] = await connection.execute(
+      `SELECT incremental_direct_requirements_json, max_level
+       FROM v2_help_qualification_policy
+       WHERE id = 1
+       LIMIT 1`
+    );
+    const policy = Array.isArray(policyRows) ? policyRows[0] : null;
+
+    const [profileRows] = await connection.execute(
+      `SELECT u.user_code, rp.direct_count
+       FROM v2_registration_profiles rp
+       INNER JOIN v2_users u ON u.id = rp.user_id`
+    );
+    const profileList = Array.isArray(profileRows) ? profileRows : [];
+
+    if (policy && profileList.length > 0) {
+      const directCountByUserCode = {};
+      for (const row of profileList) {
+        const userCode = normalizeV2UserCode(row?.user_code);
+        if (!isValidV2UserCode(userCode)) continue;
+        directCountByUserCode[userCode] = Math.max(0, Math.trunc(Number(row?.direct_count || 0)));
+      }
+
+      const parsedRequirements = safeParseJSON(policy.incremental_direct_requirements_json);
+      const incrementalDirectRequirements = Array.isArray(parsedRequirements)
+        ? parsedRequirements.map((value) => Math.max(0, Math.trunc(Number(value || 0))))
+        : [];
+
+      if (incrementalDirectRequirements.length > 0) {
+        return {
+          directCountByUserCode,
+          incrementalDirectRequirements
+        };
+      }
+    }
+  } catch (error) {
+    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
+      console.warn(`[v2-help-qualification] load failed: ${getErrorMessage(error, 'Unknown error')}`);
+    }
+  }
+
+  if (!V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED) {
+    return {
+      directCountByUserCode: {},
+      incrementalDirectRequirements: extractIncrementalDirectRequirementsFromLegacySettings(null, 10)
+    };
+  }
+
   const [rows] = await connection.execute(
     `SELECT state_key, state_value
      FROM state_store
@@ -4003,6 +5526,74 @@ async function buildLegacyActivationContributionPlanFromMatrixState(connection, 
     return [];
   }
 
+  const buildPlanFromNodes = (byUserCode) => {
+    const plan = [];
+    let currentChildUserCode = normalizedNewMemberUserCode;
+    let currentNode = byUserCode.get(currentChildUserCode) || null;
+    let levelNo = 1;
+
+    while (currentNode && levelNo <= 10) {
+      const parentUserCode = isValidV2UserCode(currentNode.parentUserCode)
+        ? currentNode.parentUserCode
+        : null;
+      if (!parentUserCode) break;
+
+      const parentNode = byUserCode.get(parentUserCode) || null;
+      let side = currentNode.position === 0 || currentNode.position === 'left'
+        ? 'left'
+        : currentNode.position === 1 || currentNode.position === 'right'
+          ? 'right'
+          : 'unknown';
+
+      if (parentNode) {
+        if (parentNode.leftChildUserCode === currentChildUserCode) side = 'left';
+        else if (parentNode.rightChildUserCode === currentChildUserCode) side = 'right';
+      }
+
+      plan.push({
+        beneficiaryUserCode: parentUserCode,
+        levelNo,
+        side: normalizeV2HelpContributionSide(side)
+      });
+
+      currentChildUserCode = parentUserCode;
+      currentNode = parentNode;
+      levelNo += 1;
+    }
+
+    return plan;
+  };
+
+  try {
+    const [v2Rows] = await connection.execute(
+      `SELECT user_code, parent_user_code, left_child_user_code, right_child_user_code, position
+       FROM v2_matrix_nodes`
+    );
+    if (Array.isArray(v2Rows) && v2Rows.length > 0) {
+      const byUserCode = new Map();
+      for (const node of v2Rows) {
+        const userCode = normalizeV2UserCode(node?.user_code);
+        if (!isValidV2UserCode(userCode)) continue;
+        byUserCode.set(userCode, {
+          userCode,
+          parentUserCode: normalizeV2UserCode(node?.parent_user_code),
+          leftChildUserCode: normalizeV2UserCode(node?.left_child_user_code),
+          rightChildUserCode: normalizeV2UserCode(node?.right_child_user_code),
+          position: normalizeV2HelpContributionSide(node?.position)
+        });
+      }
+
+      const v2Plan = buildPlanFromNodes(byUserCode);
+      if (v2Plan.length > 0) {
+        return v2Plan;
+      }
+    }
+  } catch (error) {
+    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
+      throw error;
+    }
+  }
+
   const [rows] = await connection.execute(
     `SELECT state_value
      FROM state_store
@@ -4028,41 +5619,7 @@ async function buildLegacyActivationContributionPlanFromMatrixState(connection, 
     });
   }
 
-  const plan = [];
-  let currentChildUserCode = normalizedNewMemberUserCode;
-  let currentNode = byUserCode.get(currentChildUserCode) || null;
-  let levelNo = 1;
-
-  while (currentNode && levelNo <= 10) {
-    const parentUserCode = isValidV2UserCode(currentNode.parentUserCode)
-      ? currentNode.parentUserCode
-      : null;
-    if (!parentUserCode) break;
-
-    const parentNode = byUserCode.get(parentUserCode) || null;
-    let side = currentNode.position === 0
-      ? 'left'
-      : currentNode.position === 1
-        ? 'right'
-        : 'unknown';
-
-    if (parentNode) {
-      if (parentNode.leftChildUserCode === currentChildUserCode) side = 'left';
-      else if (parentNode.rightChildUserCode === currentChildUserCode) side = 'right';
-    }
-
-    plan.push({
-      beneficiaryUserCode: parentUserCode,
-      levelNo,
-      side: normalizeV2HelpContributionSide(side)
-    });
-
-    currentChildUserCode = parentUserCode;
-    currentNode = parentNode;
-    levelNo += 1;
-  }
-
-  return plan;
+  return buildPlanFromNodes(byUserCode);
 }
 
 async function ensureV2HelpLevelStateRow(connection, userId, levelNo) {
@@ -5880,36 +7437,40 @@ async function authenticateUser(userId, password) {
     return { ok: false, status: 400, error: 'User ID must be exactly 7 digits' };
   }
 
+  let user = await findV2AuthUserByUserCode(normalizedUserId);
   let usersData = null;
 
-  // Try in-memory cache first
-  let user = null;
-  if (stateSnapshotCache?.snapshot?.state?.mlm_users) {
-    try {
-      usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
-      if (Array.isArray(usersData)) {
-        user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+  if (!user) {
+    // Try in-memory cache first
+    if (stateSnapshotCache?.snapshot?.state?.mlm_users) {
+      try {
+        usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
+        if (Array.isArray(usersData)) {
+          user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+        }
+      } catch {
+        user = null;
+        usersData = null;
       }
-    } catch {
-      user = null;
-      usersData = null;
+    }
+
+    // Fallback: read from MySQL
+    if (!user) {
+      const usersRaw = await readStateKeyValue('mlm_users');
+      if (!usersRaw) return { ok: false, status: 404, error: 'User ID not found' };
+      try {
+        usersData = JSON.parse(usersRaw);
+        if (Array.isArray(usersData)) {
+          user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+        }
+      } catch {
+        return { ok: false, status: 500, error: 'Failed to parse user data' };
+      }
+      if (!user) return { ok: false, status: 404, error: 'User ID not found' };
     }
   }
 
-  // Fallback: read from MySQL
-  if (!user) {
-    const usersRaw = await readStateKeyValue('mlm_users');
-    if (!usersRaw) return { ok: false, status: 404, error: 'User ID not found' };
-    try {
-      usersData = JSON.parse(usersRaw);
-      if (Array.isArray(usersData)) {
-        user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
-      }
-    } catch {
-      return { ok: false, status: 500, error: 'Failed to parse user data' };
-    }
-    if (!user) return { ok: false, status: 404, error: 'User ID not found' };
-  }
+  const isV2ProfileAuthUser = user?.__authSource === 'v2_registration_profile';
 
   if (user.accountStatus === 'permanent_blocked') {
     return {
@@ -5929,7 +7490,7 @@ async function authenticateUser(userId, password) {
   }
 
   // Auto-deactivate on login if direct-referral deadline has passed.
-  if (!user.isAdmin && user.isActive && user.activatedAt) {
+  if (!isV2ProfileAuthUser && !user.isAdmin && user.isActive && user.activatedAt) {
     const requiredDirects = 2;
     const directCount = Number.isFinite(Number(user.directCount)) ? Number(user.directCount) : 0;
     if (directCount < requiredDirects) {
@@ -6710,6 +8271,44 @@ const server = createServer(async (req, res) => {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid request body';
       sendJson(res, 400, { ok: false, error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v2/register') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
+      if (!idempotencyKey) {
+        sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
+        return;
+      }
+
+      const result = await executeV2TransactionWithRetry(
+        () => processV2Registration({
+          idempotencyKey,
+          fullName: parsed?.fullName,
+          email: parsed?.email,
+          password: parsed?.password,
+          transactionPassword: parsed?.transactionPassword,
+          phone: parsed?.phone,
+          country: parsed?.country,
+          sponsorId: parsed?.sponsorId,
+          pinCode: parsed?.pinCode
+        }),
+        V2_REGISTRATION_ENDPOINT_NAME
+      );
+
+      sendJson(res, result.status, result.payload);
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : getHttpStatusForRequestError(error));
+      const message = getErrorMessage(error, 'Failed to process registration');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_REGISTRATION_FAILED'
+      });
     }
     return;
   }
@@ -8014,9 +9613,21 @@ async function start() {
       'V2 auth flags:',
       `signedTokenEnabled=${!!V2_AUTH_TOKEN_SECRET}`,
       `legacyBearerCompat=${V2_ALLOW_LEGACY_BEARER_USER_CODE}`,
+      `profileFallback=${V2_AUTH_PROFILE_FALLBACK_ENABLED}`,
       `auditEnabled=${V2_AUTH_AUDIT_ENABLED}`,
       `issuer=${V2_AUTH_TOKEN_ISSUER}`,
       `ttlSeconds=${V2_AUTH_TOKEN_TTL_SECONDS}`
+    );
+    console.log(
+      'V2 registration flags:',
+      `mode=${V2_REGISTRATION_MODE}`,
+      `pureV2=${V2_REGISTRATION_PURE_V2_MODE}`,
+      `legacyProjection=${V2_REGISTRATION_LEGACY_PROJECTION_ENABLED}`,
+      `pinLegacyProjection=${V2_PIN_LEGACY_PROJECTION_ENABLED}`
+    );
+    console.log(
+      'V2 help qualification flags:',
+      `legacyFallback=${V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED}`
     );
     const smtpErrors = getSmtpConfigErrors();
     if (smtpErrors.length === 0) {

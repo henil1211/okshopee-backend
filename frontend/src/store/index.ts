@@ -956,6 +956,102 @@ async function fetchV2WalletAndTransactionsSnapshotForUser(
   return result.snapshot;
 }
 
+async function submitV2Registration(params: RegisterData): Promise<{
+  success: boolean;
+  message: string;
+  userId?: string;
+  user?: {
+    userId: string;
+    fullName: string;
+    email: string;
+    phone: string;
+    country: string;
+  };
+  warnings: string[];
+}> {
+  const payload = {
+    fullName: String(params.fullName || '').trim(),
+    email: String(params.email || '').trim(),
+    password: String(params.password || ''),
+    transactionPassword: String(params.transactionPassword || ''),
+    phone: normalizePhoneNumber(String(params.phone || '')),
+    country: String(params.country || '').trim(),
+    sponsorId: String(params.sponsorId || '').trim() || undefined,
+    pinCode: String(params.pinCode || '').trim().toUpperCase()
+  };
+
+  const requestId = generateClientRequestId('v2_register');
+  const idempotencyKey = generateClientIdempotencyKey();
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Idempotency-Key': idempotencyKey,
+    'X-System-Version': 'v2',
+    'X-Request-Id': requestId
+  };
+
+  const authState = useAuthStore.getState();
+  const subjectUser = authState.user;
+  const impersonatedUser = authState.impersonatedUser;
+  if (subjectUser) {
+    const bearerTokenResult = resolveV2BearerTokenOrError(subjectUser);
+    if ('token' in bearerTokenResult) {
+      headers['Authorization'] = `Bearer ${bearerTokenResult.token}`;
+      if (impersonatedUser && subjectUser.isAdmin) {
+        headers['X-Impersonate-User-Code'] = impersonatedUser.userId;
+        headers['X-Impersonation-Reason'] = 'create_id_registration';
+      }
+    }
+  }
+
+  const response = await fetch(`${getBackendApiBase()}/api/v2/register`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload)
+  });
+
+  const responsePayload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || responsePayload?.ok === false) {
+    return {
+      success: false,
+      message: normalizeV2ApiErrorMessage(response.status, responsePayload, 'Registration failed'),
+      warnings: []
+    };
+  }
+
+  const userId = typeof responsePayload?.userId === 'string' ? responsePayload.userId.trim() : '';
+  const userPayload = responsePayload?.user;
+  const userInfo = userPayload && typeof userPayload === 'object'
+    ? {
+      userId: typeof userPayload.userId === 'string' ? userPayload.userId : userId,
+      fullName: typeof userPayload.fullName === 'string' ? userPayload.fullName : payload.fullName,
+      email: typeof userPayload.email === 'string' ? userPayload.email : payload.email,
+      phone: typeof userPayload.phone === 'string' ? userPayload.phone : payload.phone,
+      country: typeof userPayload.country === 'string' ? userPayload.country : payload.country
+    }
+    : undefined;
+
+  const warnings = Array.isArray(responsePayload?.warnings)
+    ? responsePayload.warnings
+      .map((value: unknown) => String(value || '').trim())
+      .filter((value: string) => value.length > 0)
+    : [];
+
+  const message = typeof responsePayload?.message === 'string' && responsePayload.message.trim().length > 0
+    ? responsePayload.message.trim()
+    : userId
+      ? `Registration successful. Your ID is: ${userId}`
+      : 'Registration successful.';
+
+  return {
+    success: true,
+    message,
+    userId: userId || undefined,
+    user: userInfo,
+    warnings
+  };
+}
+
 async function submitV2ReferralCreditBySourceRef(params: {
   sourceUserCode: string;
   beneficiaryUserCode: string;
@@ -2374,520 +2470,60 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (AUTH_MAINTENANCE_ENABLED && !actingUser?.isAdmin) {
       return { success: false, message: AUTH_MAINTENANCE_MESSAGE };
     }
-
-    await Database.ensureFreshData({
-      keys: Database.getRegistrationFreshDataKeys(),
-      timeoutMs: 10000,
-      maxAttempts: 2,
-      retryDelayMs: 700
-    });
-
-    const registrationGate = Database.getSensitiveActionSyncGate();
-    // Allow registration if sync is just pending/slow; only block when truly offline
-    if (!registrationGate.allowed && registrationGate.status.state === 'offline') {
-      return { success: false, message: registrationGate.message };
-    }
-
     const { fullName, email, password, transactionPassword, phone, country, sponsorId, pinCode } = userData;
     const normalizedPhone = normalizePhoneNumber(phone);
 
     if (!isValidPhoneNumberForCountry(phone, country)) {
       return { success: false, message: 'Enter a valid mobile number for the selected country' };
     }
-
-    // Duplicate email/phone is allowed (multiple IDs can share contact info).
-
-    // Validate PIN - MANDATORY
     if (!pinCode) {
       return { success: false, message: 'PIN is required for registration' };
     }
+    const registerResult = await submitV2Registration({
+      fullName,
+      email,
+      password,
+      transactionPassword,
+      phone: normalizedPhone,
+      country,
+      sponsorId,
+      pinCode
+    });
 
-    const pin = Database.getPinByCode(pinCode);
-    if (!pin) {
-      return { success: false, message: 'Invalid PIN code' };
-    }
-    if (pin.status === 'suspended') {
-      return { success: false, message: 'PIN is suspended by admin' };
-    }
-    if (pin.status !== 'unused') {
-      return { success: false, message: 'PIN has already been used' };
-    }
-
-    // Validate sponsor if provided
-    let sponsor = null;
-    if (sponsorId) {
-      sponsor = Database.getUserByUserId(sponsorId);
-      if (!sponsor) {
-        return { success: false, message: 'Invalid Sponsor ID' };
-      }
-      if (!Database.isNetworkActiveUser(sponsor)) {
-        return { success: false, message: 'Sponsor account is inactive or blocked' };
-      }
+    if (!registerResult.success) {
+      return { success: false, message: registerResult.message };
     }
 
-    let newUser: User;
-    let newUserId = '';
-    let referralBeneficiaryUserCode: string | null = null;
-    let helpEventSourceUserCode: string | null = null;
-    try {
-      const result = await Database.runWithLocalStateTransaction(() => {
-        // Generate unique 7-digit ID
-        const generatedUserId = Database.generateUniqueUserId();
-
-        // Find placement in matrix (Top to Bottom, Left to Right)
-        let parentId: string | null = null;
-        let position: 'left' | 'right' | null = null;
-
-        if (sponsor) {
-          const placement = Database.findNextPosition(sponsor.userId);
-          if (placement) {
-            parentId = placement.parentId;
-            position = placement.position;
-          }
-        }
-
-        // User "level" tracks plan progress (starts at 0). Matrix depth is tracked separately on matrix nodes.
-        const matrixDepthLevel = parentId ? (Database.getMatrixNode(parentId)?.level || 0) + 1 : 0;
-
-        // Create new user - ACTIVE immediately with PIN
-        const createdUser: User = {
-          id: `user_${Date.now()}`,
-          userId: generatedUserId,
-          email,
-          password,
-          fullName,
-          phone: normalizedPhone,
-          country,
-          isActive: true, // Active immediately with PIN
-          isAdmin: false,
-          accountStatus: 'active',
-          blockedAt: null,
-          blockedUntil: null,
-          blockedReason: null,
-          deactivationReason: null,
-          reactivatedAt: null,
-          createdAt: new Date().toISOString(),
-          activatedAt: new Date().toISOString(), // Activated immediately
-          gracePeriodEnd: null,
-          sponsorId: sponsor?.userId || null,
-          parentId,
-          position,
-          level: 0,
-          directCount: 0,
-          totalEarnings: 0,
-          isCapped: false,
-          capLevel: 0,
-          reEntryCount: 0,
-          cycleCount: 0,
-          requiredDirectForNextLevel: 2,
-          completedDirectForCurrentLevel: 0,
-          transactionPassword, // Store transaction password
-          emailVerified: false, // Will be verified via OTP
-          achievements: {
-            nationalTour: false,
-            internationalTour: false,
-            familyTour: false
-          }
-        };
-
-        Database.createUser(createdUser);
-        Database.applyAnnouncementsForNewUser(createdUser.id);
-
-        // Strict PIN guard: re-check right before consuming to prevent stale/duplicate use
-        const latestPin = Database.getPinByCode(pinCode);
-        if (!latestPin || latestPin.status !== 'unused') {
-          throw new Error('PIN has already been used');
-        }
-        const consumedPin = Database.consumePin(pinCode, createdUser.id);
-        if (!consumedPin) {
-          throw new Error('PIN has already been used');
-        }
-
-        // Add to matrix
-        const matrixNode: MatrixNode = {
-          userId: generatedUserId,
-          username: fullName,
-          level: matrixDepthLevel,
-          position: position === 'left' ? 0 : 1,
-          parentId: parentId || undefined,
-          isActive: true
-        };
-        Database.addMatrixNode(matrixNode);
-
-        // Update parent's child reference
-        if (parentId && position) {
-          const matrix = Database.getMatrix();
-          const parentNode = matrix.find(m => m.userId === parentId);
-          if (parentNode) {
-            if (position === 'left') {
-              parentNode.leftChild = generatedUserId;
-            } else {
-              parentNode.rightChild = generatedUserId;
-            }
-            Database.saveMatrix(matrix);
-          }
-        }
-
-        // Update sponsor's direct count
-        if (sponsor) {
-          Database.updateUser(sponsor.id, {
-            directCount: sponsor.directCount + 1
-          });
-          Database.releaseLockedGiveHelp(sponsor.id);
-          Database.releaseLockedReceiveHelp(sponsor.id);
-        }
-
-        // Create PIN usage transaction
-        Database.createTransaction({
-          id: `tx_${Date.now()}_pin_used`,
-          userId: createdUser.id,
-          type: 'pin_used',
-          amount: 11,
-          pinCode: pin.pinCode,
-          pinId: pin.id,
-          status: 'completed',
-          description: 'Account activation using PIN',
-          createdAt: new Date().toISOString(),
-          completedAt: new Date().toISOString()
-        });
-
-        // Distribute activation amount (from PIN value)
-        const directIncome = 5;
-        const adminFee = 1;
-
-        // Referral income
-        if (sponsor) {
-          referralBeneficiaryUserCode = sponsor.userId;
-        } else {
-          Database.addToSafetyPool(directIncome, createdUser.id, 'No sponsor - referral income');
-        }
-
-        // Admin fee to safety pool
-        Database.addToSafetyPool(adminFee, createdUser.id, 'Admin fee');
-
-        // Queue help/give processing to backend V2 help-event flow.
-        helpEventSourceUserCode = createdUser.userId;
-
-        // Send welcome notification
-        Database.createNotification({
-          id: `notif_${Date.now()}`,
-          userId: createdUser.id,
-          title: 'Welcome To ReferNex',
-          message: `Welcome to ReferNex.\n\nAccount created successfully. Your User ID is ${generatedUserId}. Please check your email for your login and transaction passwords.`,
-          type: 'success',
-          isRead: false,
-          createdAt: new Date().toISOString()
-        });
-
-        return { newUser: createdUser, newUserId: generatedUserId };
-      }, {
-        syncOnCommit: true,
-        syncOptions: {
-          full: false,
-          force: true,
-          timeoutMs: 120000,
-          maxAttempts: 3,
-          retryDelayMs: 2000
-        }
-      });
-      newUser = result.newUser;
-      newUserId = result.newUserId;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '';
-      if (message && /pin/i.test(message)) {
-        return { success: false, message };
-      }
-      return { success: false, message: 'ID creation failed. Please try again after some time.' };
+    const newUserId = String(registerResult.userId || '').trim();
+    if (!newUserId) {
+      return { success: false, message: 'Registration completed but server did not return a valid User ID. Please retry.' };
     }
 
     try {
-      await Database.ensureFreshData({
+      await Database.hydrateFromServer({
         keys: Database.getRegistrationFreshDataKeys(),
-        timeoutMs: 10000,
+        strict: false,
         maxAttempts: 2,
-        retryDelayMs: 700
+        timeoutMs: 20000,
+        retryDelayMs: 900
       });
     } catch {
-      // Best-effort refresh so we can resolve the final saved user after sync.
+      // Best-effort hydration only.
     }
 
-    const canonicalRegisteredUser = (() => {
-      const byInternalId = Database.getUserById(newUser.id);
-      if (byInternalId) {
-        return Database.getUserByUserId(byInternalId.userId) || byInternalId;
-      }
-
-      const normalizedEmail = email.trim().toLowerCase();
-      const candidates = Database.getUsers()
-        .filter((candidate) => (
-          (candidate.email || '').trim().toLowerCase() === normalizedEmail
-          && normalizePhoneNumber(candidate.phone) === normalizedPhone
-          && (candidate.fullName || '').trim().toLowerCase() === fullName.trim().toLowerCase()
-          && (sponsor?.userId ? candidate.sponsorId === sponsor.userId : true)
-        ));
-
-      if (candidates.length === 0) {
-        const byGeneratedUserId = Database.getUserByUserId(newUserId);
-        return byGeneratedUserId || newUser;
-      }
-
-      const matrixUserIds = new Set(Database.getMatrix().map((node) => node.userId));
-      return [...candidates].sort((a, b) => {
-        const aMatrixScore = matrixUserIds.has(a.userId) ? 1 : 0;
-        const bMatrixScore = matrixUserIds.has(b.userId) ? 1 : 0;
-        if (aMatrixScore !== bMatrixScore) return bMatrixScore - aMatrixScore;
-
-        const aCreated = new Date(a.createdAt || 0).getTime();
-        const bCreated = new Date(b.createdAt || 0).getTime();
-        return bCreated - aCreated;
-      })[0];
-    })();
-
-    newUser = canonicalRegisteredUser;
-    newUserId = canonicalRegisteredUser.userId;
-
-    let registrationConsistencyWarning: string | null = null;
-
-    try {
-      const consistency = await Database.commitCriticalAction(
-        () => Database.ensureRegistrationConsistency({
-          userId: newUserId,
-          fullName,
-          email,
-          phone: normalizedPhone,
-          country,
-          sponsorId: sponsor?.userId || null,
-          loginPassword: password,
-          transactionPassword,
-          pinCode
-        }),
-        {
-          full: false,
-          force: true,
-          timeoutMs: 90000,
-          maxAttempts: 3,
-          retryDelayMs: 1500
-        }
-      );
-      newUser = consistency.user;
-      newUserId = consistency.user.userId;
-    } catch {
-      // Registration is already completed at this stage. Do not block user onboarding
-      // on verification sync errors; retry consistency in background.
-      const resolvedUser = Database.getUserByUserId(newUserId)
-        || Database.getUserById(newUser.id)
-        || newUser;
-      newUser = resolvedUser;
-      newUserId = resolvedUser.userId || newUserId;
-      registrationConsistencyWarning = 'Verification sync is delayed. Your registration is successful and you can login now.';
-
-      void Database.commitCriticalAction(
-        () => Database.ensureRegistrationConsistency({
-          userId: newUserId,
-          fullName,
-          email,
-          phone: normalizedPhone,
-          country,
-          sponsorId: sponsor?.userId || null,
-          loginPassword: password,
-          transactionPassword,
-          pinCode
-        }),
-        {
-          full: false,
-          force: true,
-          timeoutMs: 90000,
-          maxAttempts: 2,
-          retryDelayMs: 1500
-        }
-      ).catch(() => {
-        // Best-effort retry only.
-      });
-    }
-
-    if (import.meta.env.PROD) {
-      const registrationSyncKeys = [
-        DB_KEYS.USERS,
-        DB_KEYS.MATRIX,
-        DB_KEYS.PINS,
-        DB_KEYS.TRANSACTIONS,
-        DB_KEYS.SAFETY_POOL,
-        DB_KEYS.NOTIFICATIONS
-      ];
-
-      let registrationConfirmed = false;
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        const authCheck = await Database.authenticateUserViaBackend(newUserId, password);
-        if (authCheck.success && authCheck.user?.userId === newUserId) {
-          registrationConfirmed = true;
-          break;
-        }
-
-        try {
-          await Database.forceRemoteSyncKeysNow(registrationSyncKeys, {
-            force: true,
-            timeoutMs: 20000,
-            maxAttempts: 2,
-            retryDelayMs: 900
-          });
-        } catch {
-          // Best-effort sync retry only.
-        }
-
-        try {
-          await Database.hydrateFromServer({
-            keys: registrationSyncKeys,
-            strict: true,
-            maxAttempts: 2,
-            timeoutMs: 15000,
-            retryDelayMs: 900
-          });
-        } catch {
-          // Best-effort refresh retry only.
-        }
-      }
-
-      if (!registrationConfirmed) {
-        try {
-          await Database.hydrateFromServer({
-            keys: registrationSyncKeys,
-            strict: false,
-            maxAttempts: 1,
-            timeoutMs: 12000,
-            retryDelayMs: 700
-          });
-        } catch {
-          // Best-effort rollback-to-server snapshot only.
-        }
-
-        return {
-          success: false,
-          message: 'ID creation could not be finalized on server. No new ID was committed. Please retry.'
-        };
-      }
-    }
-
-    let referralCreditWarning: string | null = null;
-    if (referralBeneficiaryUserCode) {
-      const sourceUserCode = String(newUser.userId || '').trim();
-      const beneficiaryUserCode = String(referralBeneficiaryUserCode || '').trim();
-      const sourceRef = `reg_pin_${sourceUserCode}_${beneficiaryUserCode}`;
-
-      let referralResult = await submitV2ReferralCreditBySourceRef({
-        sourceUserCode,
-        beneficiaryUserCode,
-        amount: 5,
-        sourceRef,
-        eventType: 'direct_referral',
-        levelNo: 1,
-        description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
-      });
-
-      if (!referralResult.success) {
-        try {
-          await Database.forceRemoteSyncNowWithOptions({
-            full: false,
-            force: true,
-            timeoutMs: 30000,
-            maxAttempts: 2,
-            retryDelayMs: 1000
-          });
-          await Database.hydrateFromServer({
-            keys: [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
-            strict: true,
-            maxAttempts: 2,
-            timeoutMs: 15000,
-            retryDelayMs: 800
-          });
-          referralResult = await submitV2ReferralCreditBySourceRef({
-            sourceUserCode,
-            beneficiaryUserCode,
-            amount: 5,
-            sourceRef,
-            eventType: 'direct_referral',
-            levelNo: 1,
-            description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
-          });
-        } catch {
-          // best-effort retry only
-        }
-      }
-
-      if (!referralResult.success) {
-        enqueuePendingReferralCreditRetry({
-          sourceUserCode,
-          beneficiaryUserCode,
-          amount: 5,
-          sourceRef,
-          description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
-        });
-        referralCreditWarning = `Referral credit is queued for auto-retry (${referralResult.message}).`;
-      }
-    }
-
-    let helpEventWarning: string | null = null;
-    if (helpEventSourceUserCode) {
-      const sourceUserCode = String(helpEventSourceUserCode || '').trim();
-      const newMemberUserCode = String(newUser.userId || '').trim();
-      const sourceRef = `reg_help_${sourceUserCode}_${newMemberUserCode}`;
-
-      let helpEventResult = await submitV2HelpEventBySourceRef({
-        sourceUserCode,
-        newMemberUserCode,
-        sourceRef,
-        eventType: 'activation_join',
-        description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
-      });
-
-      if (!helpEventResult.success) {
-        try {
-          await Database.forceRemoteSyncNowWithOptions({
-            full: false,
-            force: true,
-            timeoutMs: 30000,
-            maxAttempts: 2,
-            retryDelayMs: 1000
-          });
-          await Database.hydrateFromServer({
-            keys: [DB_KEYS.USERS, DB_KEYS.MATRIX],
-            strict: true,
-            maxAttempts: 2,
-            timeoutMs: 15000,
-            retryDelayMs: 800
-          });
-          helpEventResult = await submitV2HelpEventBySourceRef({
-            sourceUserCode,
-            newMemberUserCode,
-            sourceRef,
-            eventType: 'activation_join',
-            description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
-          });
-        } catch {
-          // best-effort retry only
-        }
-      }
-
-      if (!helpEventResult.success) {
-        enqueuePendingHelpEventRetry({
-          sourceUserCode,
-          newMemberUserCode,
-          sourceRef,
-          description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
-        });
-        helpEventWarning = `Help event is queued for auto-retry (${helpEventResult.message}).`;
-      }
-    }
-
+    const emailTarget = registerResult.user?.email || email;
+    const userNameTarget = registerResult.user?.fullName || fullName;
+    const phoneTarget = registerResult.user?.phone || normalizedPhone;
     const welcomeSubject = 'Welcome To ReferNex';
     const welcomeBody = [
-      `Hello ${newUser.fullName},`,
+      `Hello ${userNameTarget},`,
       '',
       'Welcome to ReferNex. Your account is now active.',
       '',
-      `Name: ${newUser.fullName}`,
-      `User ID: ${newUser.userId}`,
-      `Email: ${newUser.email}`,
-      `Phone: ${newUser.phone}`,
+      `Name: ${userNameTarget}`,
+      `User ID: ${newUserId}`,
+      `Email: ${emailTarget}`,
+      `Phone: ${phoneTarget}`,
       '',
       `Login Password: ${password}`,
       `Transaction Password: ${transactionPassword}`,
@@ -2896,19 +2532,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     ].join('\n');
 
     void dispatchSystemEmail({
-      to: newUser.email,
+      to: emailTarget,
       subject: welcomeSubject,
       body: welcomeBody,
       purpose: 'welcome',
       timeoutMs: 5000,
       metadata: {
-        userId: newUser.userId
+        userId: newUserId
       }
     });
-    const warnings = [registrationConsistencyWarning, referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
+
+    const warnings = registerResult.warnings || [];
+    const baseRegistrationMessage = registerResult.message || `Registration successful. Your ID is: ${newUserId}`;
     const registrationMessage = warnings.length > 0
-      ? `Registration successful. Your ID is: ${newUserId}. ${warnings.join(' ')}`
-      : `Registration successful. Your ID is: ${newUserId}`;
+      ? `${baseRegistrationMessage} ${warnings.join(' ')}`
+      : baseRegistrationMessage;
 
     void processPendingPostRegistrationRetryQueue({ force: true }).catch(() => {
       // Best-effort background retry only.
