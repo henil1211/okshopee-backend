@@ -133,8 +133,16 @@ function inferPriceCents(row, expectedQty) {
   return null;
 }
 
+const PIN_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const PIN_CODE_LENGTH = 7;
+
 function generateV2PinCode() {
-  return randomBytes(8).toString('hex').toUpperCase();
+  let pin = '';
+  const maxIndex = PIN_CODE_CHARS.length;
+  for (let i = 0; i < PIN_CODE_LENGTH; i += 1) {
+    pin += PIN_CODE_CHARS.charAt(Math.floor(Math.random() * maxIndex));
+  }
+  return pin;
 }
 
 function safeParseJson(value, fallback) {

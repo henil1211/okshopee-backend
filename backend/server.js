@@ -1026,9 +1026,16 @@ function buildV2HelpPendingGiveStageCode(levelNo) {
   return `L${Math.max(1, Math.trunc(levelNo || 1))}_PENDING_GIVE`.slice(0, V2_HELP_STAGE_CODE_MAX_LENGTH);
 }
 
+const V2_PIN_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const V2_PIN_CODE_LENGTH = 7;
+
 function generateV2PinCode() {
-  // 16 hex chars == 64 bits entropy from CSPRNG.
-  return randomBytes(8).toString('hex').toUpperCase();
+  let pin = '';
+  const maxIndex = V2_PIN_CODE_CHARS.length;
+  for (let i = 0; i < V2_PIN_CODE_LENGTH; i += 1) {
+    pin += V2_PIN_CODE_CHARS.charAt(Math.floor(Math.random() * maxIndex));
+  }
+  return pin;
 }
 
 function parseBearerToken(req) {

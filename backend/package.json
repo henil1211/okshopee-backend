@@ -14,6 +14,8 @@
     "verify:wallet:gate:mysql": "node scripts/verify-wallet-ledger-resync.cjs --mysql --fail-on-mismatch",
     "audit:pin-integrity:dry": "node scripts/audit-v2-pin-purchase-integrity.cjs",
     "audit:pin-integrity:apply": "node scripts/audit-v2-pin-purchase-integrity.cjs --apply",
+    "repair:pin-format:dry": "node scripts/repair-v2-pin-code-format.cjs",
+    "repair:pin-format:apply": "node scripts/repair-v2-pin-code-format.cjs --apply",
     "backfill:pins:legacy-to-v2:dry": "node scripts/backfill-legacy-pins-to-v2.cjs",
     "backfill:pins:legacy-to-v2:apply": "node scripts/backfill-legacy-pins-to-v2.cjs --apply",
     "audit:registration-integrity:dry": "node scripts/audit-registration-integrity.cjs",
