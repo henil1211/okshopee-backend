@@ -725,12 +725,31 @@ type PendingHelpRetryTask = {
 
 type PendingPostRegistrationRetryTask = PendingReferralRetryTask | PendingHelpRetryTask;
 
+export type PostRegistrationRetryQueueItem = {
+  id: number;
+  taskKey: string;
+  taskType: 'referral_credit' | 'help_event';
+  registrationUserCode: string;
+  registrationUserName: string;
+  targetUserCode: string;
+  targetUserName: string;
+  status: 'queued' | 'processing' | 'failed' | 'completed';
+  attempts: number;
+  maxAttempts: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+  createdAt: string | null;
+};
+
 export type PostRegistrationRetryQueueStatus = {
   pendingCount: number;
   oldestPendingAgeMs: number | null;
   oldestCreatedAt: string | null;
   nextAttemptAt: string | null;
   nextAttemptInMs: number | null;
+  source: 'backend' | 'local';
+  backendReachable: boolean;
+  items: PostRegistrationRetryQueueItem[];
 };
 
 let postRegistrationRetryQueueRunning = false;
@@ -751,6 +770,207 @@ function buildPendingHelpRetryKey(payload: {
   sourceRef: string;
 }): string {
   return `help:${payload.sourceRef}:${payload.sourceUserCode}:${payload.newMemberUserCode}`;
+}
+
+function resolveRetryTaskUserName(userCode: string): string {
+  const normalized = String(userCode || '').trim();
+  if (!normalized) return '';
+  const user = Database.getUserByUserId(normalized);
+  return String(user?.fullName || '').trim();
+}
+
+function mapPendingTaskToQueueItem(task: PendingPostRegistrationRetryTask): PostRegistrationRetryQueueItem {
+  const taskType = task.kind;
+  const registrationUserCode = String(task.payload.sourceUserCode || '').trim();
+  const registrationUserName = resolveRetryTaskUserName(registrationUserCode);
+  const targetUserCode = taskType === 'referral_credit'
+    ? String(task.payload.beneficiaryUserCode || '').trim()
+    : String(task.payload.newMemberUserCode || '').trim();
+  const targetUserName = resolveRetryTaskUserName(targetUserCode);
+
+  return {
+    id: 0,
+    taskKey: task.key,
+    taskType,
+    registrationUserCode,
+    registrationUserName,
+    targetUserCode,
+    targetUserName,
+    status: 'queued',
+    attempts: task.attempts,
+    maxAttempts: 0,
+    nextAttemptAt: Number.isFinite(task.nextAttemptAt) && task.nextAttemptAt > 0
+      ? new Date(task.nextAttemptAt).toISOString()
+      : null,
+    lastError: task.lastError,
+    createdAt: task.createdAt || null
+  };
+}
+
+async function enqueuePendingPostRegistrationRetryTaskToBackend(task: PendingPostRegistrationRetryTask): Promise<boolean> {
+  if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+    return false;
+  }
+
+  const sourceUserCode = String(task.payload.sourceUserCode || '').trim();
+  if (!sourceUserCode) {
+    return false;
+  }
+
+  const registrationUserName = resolveRetryTaskUserName(sourceUserCode);
+  const targetUserCode = task.kind === 'referral_credit'
+    ? String(task.payload.beneficiaryUserCode || '').trim()
+    : String(task.payload.newMemberUserCode || '').trim();
+  const targetUserName = resolveRetryTaskUserName(targetUserCode);
+  const requestId = generateClientRequestId('registration_queue');
+
+  const basePayload: Record<string, unknown> = {
+    taskType: task.kind,
+    taskKey: task.key,
+    sourceUserCode,
+    registrationUserName,
+    targetUserCode,
+    targetUserName,
+    sourceRef: String(task.payload.sourceRef || '').trim(),
+    description: typeof task.payload.description === 'string' ? task.payload.description : undefined,
+    maxAttempts: 40
+  };
+
+  if (task.kind === 'referral_credit') {
+    basePayload.beneficiaryUserCode = String(task.payload.beneficiaryUserCode || '').trim();
+    basePayload.amountCents = Math.round(Number(task.payload.amount || 0) * 100);
+    basePayload.eventType = 'direct_referral';
+    basePayload.levelNo = 1;
+  } else {
+    basePayload.newMemberUserCode = String(task.payload.newMemberUserCode || '').trim();
+    basePayload.eventType = 'activation_join';
+  }
+
+  try {
+    const response = await fetch(`${getBackendApiBase()}/api/v2/registration-queue/tasks`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${sourceUserCode}`,
+        'X-System-Version': 'v2',
+        'X-Request-Id': requestId
+      },
+      body: JSON.stringify(basePayload)
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    return payload?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchPostRegistrationRetryQueueStatusFromBackend(limit = 25): Promise<PostRegistrationRetryQueueStatus | null> {
+  if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+    return null;
+  }
+
+  const authState = useAuthStore.getState();
+  const adminUser = authState.user;
+  if (!adminUser?.isAdmin) {
+    return null;
+  }
+
+  const bearerTokenResult = resolveV2BearerTokenOrError(adminUser);
+  if (!('token' in bearerTokenResult)) {
+    return null;
+  }
+
+  const requestId = generateClientRequestId('registration_queue_admin');
+  const safeLimit = Number.isFinite(limit)
+    ? Math.max(1, Math.min(200, Math.trunc(limit)))
+    : 25;
+
+  try {
+    const response = await fetch(`${getBackendApiBase()}/api/v2/admin/registration-queue?limit=${safeLimit}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${bearerTokenResult.token}`,
+        'X-System-Version': 'v2',
+        'X-Request-Id': requestId
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    if (payload?.ok !== true) {
+      return null;
+    }
+
+    const now = Date.now();
+    const oldestCreatedAt = typeof payload?.oldestPendingCreatedAt === 'string' && payload.oldestPendingCreatedAt
+      ? payload.oldestPendingCreatedAt
+      : null;
+    const oldestCreatedAtMs = oldestCreatedAt ? new Date(oldestCreatedAt).getTime() : NaN;
+    const oldestPendingAgeMs = Number.isFinite(oldestCreatedAtMs)
+      ? Math.max(0, now - oldestCreatedAtMs)
+      : null;
+    const nextAttemptAt = typeof payload?.nextAttemptAt === 'string' && payload.nextAttemptAt
+      ? payload.nextAttemptAt
+      : null;
+    const nextAttemptAtMs = nextAttemptAt ? new Date(nextAttemptAt).getTime() : NaN;
+    const nextAttemptInMs = Number.isFinite(nextAttemptAtMs)
+      ? Math.max(0, nextAttemptAtMs - now)
+      : null;
+
+    const rawItems: unknown[] = Array.isArray(payload?.items) ? payload.items : [];
+    const items: PostRegistrationRetryQueueItem[] = rawItems.map((item: unknown) => {
+      const queueItem = item && typeof item === 'object'
+        ? (item as Record<string, unknown>)
+        : {};
+      const taskType = String(queueItem.taskType || '').trim().toLowerCase() === 'help_event'
+        ? 'help_event'
+        : 'referral_credit';
+      const statusRaw = String(queueItem.status || '').trim().toLowerCase();
+      const status: PostRegistrationRetryQueueItem['status'] = statusRaw === 'processing'
+        ? 'processing'
+        : statusRaw === 'failed'
+          ? 'failed'
+          : statusRaw === 'completed'
+            ? 'completed'
+            : 'queued';
+
+      return {
+        id: Number(queueItem.id || 0),
+        taskKey: String(queueItem.taskKey || ''),
+        taskType,
+        registrationUserCode: String(queueItem.registrationUserCode || ''),
+        registrationUserName: String(queueItem.registrationUserName || ''),
+        targetUserCode: String(queueItem.targetUserCode || ''),
+        targetUserName: String(queueItem.targetUserName || ''),
+        status,
+        attempts: Number(queueItem.attempts || 0),
+        maxAttempts: Number(queueItem.maxAttempts || 0),
+        nextAttemptAt: typeof queueItem.nextAttemptAt === 'string' ? queueItem.nextAttemptAt : null,
+        lastError: typeof queueItem.lastError === 'string' && queueItem.lastError.trim() ? queueItem.lastError.trim() : null,
+        createdAt: typeof queueItem.createdAt === 'string' ? queueItem.createdAt : null
+      };
+    });
+
+    return {
+      pendingCount: Number(payload?.pendingCount || 0),
+      oldestPendingAgeMs,
+      oldestCreatedAt,
+      nextAttemptAt,
+      nextAttemptInMs,
+      source: 'backend',
+      backendReachable: true,
+      items
+    };
+  } catch {
+    return null;
+  }
 }
 
 function normalizePendingRetryTask(rawTask: unknown): PendingPostRegistrationRetryTask | null {
@@ -878,6 +1098,7 @@ function writePendingPostRegistrationRetryTasks(tasks: PendingPostRegistrationRe
 function upsertPendingPostRegistrationRetryTask(task: PendingPostRegistrationRetryTask): void {
   const tasks = readPendingPostRegistrationRetryTasks();
   const existingIndex = tasks.findIndex((entry) => entry.key === task.key);
+  let queuedTask = task;
   if (existingIndex >= 0) {
     const existingTask = tasks[existingIndex];
     tasks[existingIndex] = {
@@ -886,10 +1107,14 @@ function upsertPendingPostRegistrationRetryTask(task: PendingPostRegistrationRet
       attempts: existingTask.attempts,
       nextAttemptAt: Math.min(existingTask.nextAttemptAt, task.nextAttemptAt)
     };
+    queuedTask = tasks[existingIndex];
   } else {
     tasks.push(task);
   }
   writePendingPostRegistrationRetryTasks(tasks);
+  void enqueuePendingPostRegistrationRetryTaskToBackend(queuedTask).catch(() => {
+    // Local queue remains the fallback if backend enqueue fails.
+  });
 }
 
 function enqueuePendingReferralCreditRetry(payload: {
@@ -1068,7 +1293,10 @@ function getPostRegistrationRetryQueueStatusSnapshot(): PostRegistrationRetryQue
       oldestPendingAgeMs: null,
       oldestCreatedAt: null,
       nextAttemptAt: null,
-      nextAttemptInMs: null
+      nextAttemptInMs: null,
+      source: 'local',
+      backendReachable: false,
+      items: []
     };
   }
 
@@ -1088,7 +1316,14 @@ function getPostRegistrationRetryQueueStatusSnapshot(): PostRegistrationRetryQue
     oldestPendingAgeMs,
     oldestCreatedAt: oldestTask.createdAt,
     nextAttemptAt: new Date(nextAttemptTask.nextAttemptAt).toISOString(),
-    nextAttemptInMs
+    nextAttemptInMs,
+    source: 'local',
+    backendReachable: false,
+    items: tasks
+      .slice()
+      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt)
+      .slice(0, 25)
+      .map((task) => mapPendingTaskToQueueItem(task))
   };
 }
 
@@ -1096,19 +1331,33 @@ export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 15000): Pos
   const [status, setStatus] = useState<PostRegistrationRetryQueueStatus>(() => getPostRegistrationRetryQueueStatusSnapshot());
 
   useEffect(() => {
-    const updateStatus = () => {
-      setStatus(getPostRegistrationRetryQueueStatusSnapshot());
+    let isDisposed = false;
+
+    const updateStatus = async () => {
+      const localSnapshot = getPostRegistrationRetryQueueStatusSnapshot();
+      if (isDisposed) return;
+
+      const backendStatus = await fetchPostRegistrationRetryQueueStatusFromBackend(50);
+      if (isDisposed) return;
+
+      if (backendStatus) {
+        setStatus(backendStatus);
+      } else {
+        setStatus(localSnapshot);
+      }
     };
 
-    updateStatus();
+    void updateStatus();
     const intervalMs = Number.isFinite(pollIntervalMs)
       ? Math.max(5000, Math.min(60000, Math.trunc(pollIntervalMs)))
       : 15000;
-    const intervalId = setInterval(updateStatus, intervalMs);
+    const intervalId = setInterval(() => {
+      void updateStatus();
+    }, intervalMs);
 
     const handleVisibilityChange = () => {
       if (!document.hidden) {
-        updateStatus();
+        void updateStatus();
       }
     };
 
@@ -1117,6 +1366,7 @@ export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 15000): Pos
     }
 
     return () => {
+      isDisposed = true;
       clearInterval(intervalId);
       if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -1936,6 +2186,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     newUser = canonicalRegisteredUser;
     newUserId = canonicalRegisteredUser.userId;
 
+    let registrationConsistencyWarning: string | null = null;
+
     try {
       const consistency = await Database.commitCriticalAction(
         () => Database.ensureRegistrationConsistency({
@@ -1960,10 +2212,37 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       newUser = consistency.user;
       newUserId = consistency.user.userId;
     } catch {
-      return {
-        success: false,
-        message: 'Registration completed but verification failed. Please contact admin to run user recovery for this ID.'
-      };
+      // Registration is already completed at this stage. Do not block user onboarding
+      // on verification sync errors; retry consistency in background.
+      const resolvedUser = Database.getUserByUserId(newUserId)
+        || Database.getUserById(newUser.id)
+        || newUser;
+      newUser = resolvedUser;
+      newUserId = resolvedUser.userId || newUserId;
+      registrationConsistencyWarning = 'Verification sync is delayed. Your registration is successful and you can login now.';
+
+      void Database.commitCriticalAction(
+        () => Database.ensureRegistrationConsistency({
+          userId: newUserId,
+          fullName,
+          email,
+          phone: normalizedPhone,
+          country,
+          sponsorId: sponsor?.userId || null,
+          loginPassword: password,
+          transactionPassword,
+          pinCode
+        }),
+        {
+          full: false,
+          force: true,
+          timeoutMs: 90000,
+          maxAttempts: 2,
+          retryDelayMs: 1500
+        }
+      ).catch(() => {
+        // Best-effort retry only.
+      });
     }
 
     let referralCreditWarning: string | null = null;
@@ -2104,7 +2383,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         userId: newUser.userId
       }
     });
-    const warnings = [referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
+    const warnings = [registrationConsistencyWarning, referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
     const registrationMessage = warnings.length > 0
       ? `Registration successful. Your ID is: ${newUserId}. ${warnings.join(' ')}`
       : `Registration successful. Your ID is: ${newUserId}`;

@@ -5142,9 +5142,26 @@ export default function Admin() {
                     <Badge className={retryQueueStatus.pendingCount > 0 ? 'bg-amber-500/20 text-amber-300 border-amber-400/30' : 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'}>
                       {retryQueueStatus.pendingCount > 0 ? 'Pending' : 'Clear'}
                     </Badge>
+                    <Badge className={retryQueueStatus.source === 'backend' ? 'bg-sky-500/20 text-sky-300 border-sky-400/30' : 'bg-white/10 text-white/70 border-white/20'}>
+                      {retryQueueStatus.source === 'backend' ? 'Backend Queue' : 'Local Fallback'}
+                    </Badge>
                   </div>
                   <p className="text-xl sm:text-2xl font-bold text-white">{formatNumber(retryQueueStatus.pendingCount)}</p>
                   <p className="text-xs text-white/60 truncate">Oldest pending: {formatAgeLabel(retryQueueStatus.oldestPendingAgeMs)}</p>
+                  {retryQueueStatus.items.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {retryQueueStatus.items.slice(0, 3).map((item) => {
+                        const userLabel = item.registrationUserName
+                          ? `${item.registrationUserName} (${item.registrationUserCode})`
+                          : item.registrationUserCode || '-';
+                        return (
+                          <p key={`${item.taskKey}_${item.id}`} className="text-xs text-white/70 truncate">
+                            {userLabel}
+                          </p>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             </CardContent>

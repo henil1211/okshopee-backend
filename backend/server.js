@@ -155,6 +155,8 @@ const V2_WITHDRAWAL_ENDPOINT_NAME = 'v2_withdrawal';
 const V2_PIN_PURCHASE_ENDPOINT_NAME = 'v2_pin_purchase';
 const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
 const V2_HELP_EVENT_ENDPOINT_NAME = 'v2_help_event';
+const V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME = 'v2_registration_queue_enqueue';
+const V2_REGISTRATION_QUEUE_ADMIN_READ_ENDPOINT_NAME = 'v2_registration_queue_admin_read';
 const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
 const V2_WALLET_READ_ENDPOINT_NAME = 'v2_wallet_read';
 const V2_TRANSACTIONS_READ_ENDPOINT_NAME = 'v2_transactions_read';
@@ -187,6 +189,36 @@ const V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS = Number.isFinite(V2_ADMIN_A
   : 500000;
 const V2_ADMIN_ADJUSTMENT_MAX_NOTE_LENGTH = 500;
 const V2_ADMIN_ADJUSTMENT_MAX_TICKET_ID_LENGTH = 80;
+const V2_POST_REGISTRATION_QUEUE_TASK_TYPES = new Set(['referral_credit', 'help_event']);
+const V2_POST_REGISTRATION_QUEUE_MAX_USER_NAME_LENGTH = 120;
+const V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS || 40);
+const V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS = Number.isFinite(V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW)
+  && V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW >= 1
+  && V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW <= 500
+  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW)
+  : 40;
+const V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_BATCH_SIZE || 10);
+const V2_POST_REGISTRATION_QUEUE_BATCH_SIZE = Number.isFinite(V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW)
+  && V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW >= 1
+  && V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW <= 200
+  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW)
+  : 10;
+const V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS || 20000);
+const V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS = Number.isFinite(V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW)
+  && V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW >= 2000
+  && V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW <= 5 * 60 * 1000
+  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW)
+  : 20000;
+const V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS || 30000);
+const V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS = Number.isFinite(V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS_RAW)
+  && V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS_RAW >= 1000
+  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS_RAW)
+  : 30000;
+const V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS || 15 * 60 * 1000);
+const V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS = Number.isFinite(V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS_RAW)
+  && V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS_RAW >= V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS
+  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS_RAW)
+  : 15 * 60 * 1000;
 const V2_TX_RETRY_MAX_ATTEMPTS_RAW = Number(process.env.V2_TX_RETRY_MAX_ATTEMPTS || 3);
 const V2_TX_RETRY_MAX_ATTEMPTS = Number.isFinite(V2_TX_RETRY_MAX_ATTEMPTS_RAW)
   && V2_TX_RETRY_MAX_ATTEMPTS_RAW >= 1
@@ -264,6 +296,7 @@ const QUALIFICATION_LOCKED_USER_FIELDS = Object.freeze([
 
 // ─── MySQL connection pool ───────────────────────────────────────────
 let pool;
+let v2PostRegistrationQueueWorkerRunning = false;
 
 async function ensureStateStoreUpdatedAtColumn() {
   // Older databases may have state_store without updated_at; add it if missing to avoid SELECT errors.
@@ -326,6 +359,38 @@ async function ensureV2AuthAuditTable() {
   }
 }
 
+async function ensureV2PostRegistrationRetryQueueTable() {
+  try {
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS v2_post_registration_retry_queue (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        task_key VARCHAR(190) NOT NULL,
+        task_type ENUM('referral_credit','help_event') NOT NULL,
+        registration_user_code VARCHAR(20) NOT NULL,
+        registration_user_name VARCHAR(120) NULL,
+        target_user_code VARCHAR(20) NULL,
+        target_user_name VARCHAR(120) NULL,
+        payload_json JSON NOT NULL,
+        status ENUM('queued','processing','completed','failed') NOT NULL DEFAULT 'queued',
+        attempts INT UNSIGNED NOT NULL DEFAULT 0,
+        max_attempts INT UNSIGNED NOT NULL DEFAULT 40,
+        next_attempt_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        last_attempt_at DATETIME(3) NULL,
+        last_error VARCHAR(280) NULL,
+        last_error_code VARCHAR(80) NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        processed_at DATETIME(3) NULL,
+        UNIQUE KEY uq_v2_post_reg_queue_task_key (task_key),
+        KEY idx_v2_post_reg_queue_status_next (status, next_attempt_at),
+        KEY idx_v2_post_reg_queue_created (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  } catch (err) {
+    console.error('ensureV2PostRegistrationRetryQueueTable failed:', getErrorMessage(err));
+  }
+}
+
 async function connectMySQL() {
   pool = mysql.createPool({
     host: MYSQL_HOST,
@@ -354,6 +419,7 @@ async function connectMySQL() {
   // Ensure existing deployments that predate updated_at have the column.
   await ensureStateStoreUpdatedAtColumn();
   await ensureV2AuthAuditTable();
+  await ensureV2PostRegistrationRetryQueueTable();
 
   // Debug: print current DB and columns to confirm schema matches expectations
   try {
@@ -930,6 +996,14 @@ function isValidV2AdminAdjustmentReasonCode(value) {
   return /^[A-Z0-9_]{3,40}$/.test(normalized);
 }
 
+function isValidV2PostRegistrationQueueTaskType(value) {
+  return V2_POST_REGISTRATION_QUEUE_TASK_TYPES.has(String(value || '').trim().toLowerCase());
+}
+
+function normalizeV2PostRegistrationQueueUserName(value) {
+  return String(value || '').trim().slice(0, V2_POST_REGISTRATION_QUEUE_MAX_USER_NAME_LENGTH);
+}
+
 function buildV2ReferralEventKey({ sourceTxnId, beneficiaryUserCode, levelNo, eventType }) {
   return `REF:${sourceTxnId}:${beneficiaryUserCode}:${levelNo}:${eventType}`;
 }
@@ -1481,6 +1555,422 @@ async function executeV2TransactionWithRetry(executor, operationName) {
   }
 
   throw lastError || createApiError(500, `Unexpected retry wrapper exit for ${operationName}`, 'TX_RETRY_WRAPPER_ERROR');
+}
+
+function computeV2PostRegistrationQueueRetryDelayMs(attemptNo) {
+  const safeAttempt = Math.max(1, Math.trunc(Number(attemptNo) || 1));
+  const exponent = Math.max(0, Math.min(8, safeAttempt - 1));
+  const backoff = V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS * (2 ** exponent);
+  return Math.min(V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS, backoff);
+}
+
+function buildV2PostRegistrationQueueIdempotencyKey(taskType, taskKey) {
+  const digest = createHash('sha256').update(String(taskKey || '')).digest('hex').slice(0, 52);
+  return `regq_${String(taskType || 'task').slice(0, 20)}_${digest}`;
+}
+
+function parseV2PostRegistrationQueuePayload(taskType, rawPayload) {
+  const payload = rawPayload && typeof rawPayload === 'object'
+    ? rawPayload
+    : parseIdempotencyResponseBody(rawPayload);
+  if (!payload || typeof payload !== 'object') {
+    throw createApiError(400, 'Queue payload is invalid', 'INVALID_QUEUE_PAYLOAD');
+  }
+
+  if (taskType === 'referral_credit') {
+    const sourceUserCode = normalizeV2UserCode(payload.sourceUserCode);
+    const beneficiaryUserCode = normalizeV2UserCode(payload.beneficiaryUserCode);
+    const sourceRef = String(payload.sourceRef || '').trim();
+    const eventType = String(payload.eventType || 'direct_referral').trim().toLowerCase();
+    const levelNoRaw = Number(payload.levelNo == null ? 1 : payload.levelNo);
+    const amountCentsRaw = Number(payload.amountCents);
+    const description = typeof payload.description === 'string' ? payload.description.trim().slice(0, 255) : null;
+
+    if (!isValidV2UserCode(sourceUserCode) || !isValidV2UserCode(beneficiaryUserCode)) {
+      throw createApiError(400, 'Queue payload has invalid source/beneficiary user codes', 'INVALID_QUEUE_PAYLOAD');
+    }
+    if (!isValidV2ReferralSourceRef(sourceRef)) {
+      throw createApiError(400, 'Queue payload has invalid sourceRef', 'INVALID_QUEUE_PAYLOAD');
+    }
+    if (!isValidV2ReferralEventType(eventType)) {
+      throw createApiError(400, 'Queue payload has invalid eventType', 'INVALID_QUEUE_PAYLOAD');
+    }
+    if (!Number.isInteger(levelNoRaw) || levelNoRaw < 1 || levelNoRaw > V2_REFERRAL_MAX_LEVEL) {
+      throw createApiError(400, 'Queue payload has invalid levelNo', 'INVALID_QUEUE_PAYLOAD');
+    }
+    if (!Number.isInteger(amountCentsRaw) || amountCentsRaw <= 0) {
+      throw createApiError(400, 'Queue payload has invalid amountCents', 'INVALID_QUEUE_PAYLOAD');
+    }
+
+    return {
+      sourceUserCode,
+      beneficiaryUserCode,
+      sourceRef,
+      eventType,
+      levelNo: levelNoRaw,
+      amountCents: amountCentsRaw,
+      description
+    };
+  }
+
+  if (taskType === 'help_event') {
+    const sourceUserCode = normalizeV2UserCode(payload.sourceUserCode);
+    const newMemberUserCode = normalizeV2UserCode(payload.newMemberUserCode);
+    const sourceRef = String(payload.sourceRef || '').trim();
+    const eventType = String(payload.eventType || V2_HELP_EVENT_TYPE_ACTIVATION_JOIN).trim().toLowerCase();
+    const description = typeof payload.description === 'string' ? payload.description.trim().slice(0, 255) : null;
+
+    if (!isValidV2UserCode(sourceUserCode) || !isValidV2UserCode(newMemberUserCode)) {
+      throw createApiError(400, 'Queue payload has invalid source/new-member user codes', 'INVALID_QUEUE_PAYLOAD');
+    }
+    if (!isValidV2HelpEventSourceRef(sourceRef)) {
+      throw createApiError(400, 'Queue payload has invalid sourceRef', 'INVALID_QUEUE_PAYLOAD');
+    }
+    if (!isValidV2HelpEventType(eventType)) {
+      throw createApiError(400, 'Queue payload has invalid eventType', 'INVALID_QUEUE_PAYLOAD');
+    }
+
+    return {
+      sourceUserCode,
+      newMemberUserCode,
+      sourceRef,
+      eventType,
+      description
+    };
+  }
+
+  throw createApiError(400, 'Queue task type is invalid', 'INVALID_QUEUE_TASK_TYPE');
+}
+
+async function enqueueV2PostRegistrationRetryTask({
+  taskType,
+  taskKey,
+  registrationUserCode,
+  registrationUserName,
+  targetUserCode,
+  targetUserName,
+  payload,
+  maxAttempts = V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS
+}) {
+  if (STORAGE_MODE !== 'mysql') {
+    throw createApiError(503, 'V2 financial APIs require STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
+  }
+
+  if (FINANCE_ENGINE_MODE !== 'v2') {
+    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to queue registration retry tasks', 'FINANCE_MODE_MISMATCH');
+  }
+
+  if (!pool) {
+    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
+  }
+
+  const normalizedTaskType = String(taskType || '').trim().toLowerCase();
+  const normalizedTaskKey = String(taskKey || '').trim();
+  const normalizedRegistrationUserCode = normalizeV2UserCode(registrationUserCode);
+  const normalizedRegistrationUserName = normalizeV2PostRegistrationQueueUserName(registrationUserName);
+  const normalizedTargetUserCode = normalizeV2UserCode(targetUserCode || '');
+  const normalizedTargetUserName = normalizeV2PostRegistrationQueueUserName(targetUserName || '');
+  const safeMaxAttemptsRaw = Number(maxAttempts);
+  const safeMaxAttempts = Number.isFinite(safeMaxAttemptsRaw)
+    ? Math.max(1, Math.min(500, Math.trunc(safeMaxAttemptsRaw)))
+    : V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS;
+
+  if (!isValidV2PostRegistrationQueueTaskType(normalizedTaskType)) {
+    throw createApiError(400, 'taskType must be one of referral_credit|help_event', 'INVALID_QUEUE_TASK_TYPE');
+  }
+  if (!normalizedTaskKey || normalizedTaskKey.length > 190) {
+    throw createApiError(400, 'taskKey is required and must be 1-190 chars', 'INVALID_QUEUE_TASK_KEY');
+  }
+  if (!isValidV2UserCode(normalizedRegistrationUserCode)) {
+    throw createApiError(400, 'registrationUserCode is required and must be valid', 'INVALID_USER_CODE');
+  }
+
+  const normalizedPayload = parseV2PostRegistrationQueuePayload(normalizedTaskType, payload);
+  const payloadJson = JSON.stringify(normalizedPayload);
+
+  await pool.execute(
+    `INSERT INTO v2_post_registration_retry_queue
+      (task_key, task_type, registration_user_code, registration_user_name,
+       target_user_code, target_user_name, payload_json, status, attempts, max_attempts,
+       next_attempt_at, last_attempt_at, last_error, last_error_code, processed_at)
+     VALUES
+      (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, NOW(3), NULL, NULL, NULL, NULL)
+     ON DUPLICATE KEY UPDATE
+      registration_user_code = VALUES(registration_user_code),
+      registration_user_name = VALUES(registration_user_name),
+      target_user_code = VALUES(target_user_code),
+      target_user_name = VALUES(target_user_name),
+      payload_json = VALUES(payload_json),
+      max_attempts = VALUES(max_attempts),
+      status = IF(status = 'completed', 'completed', 'queued'),
+      attempts = IF(status = 'completed', attempts, 0),
+      next_attempt_at = IF(status = 'completed', next_attempt_at, NOW(3)),
+      last_attempt_at = IF(status = 'completed', last_attempt_at, NULL),
+      last_error = NULL,
+      last_error_code = NULL,
+      processed_at = IF(status = 'completed', processed_at, NULL)` ,
+    [
+      normalizedTaskKey,
+      normalizedTaskType,
+      normalizedRegistrationUserCode,
+      normalizedRegistrationUserName || null,
+      isValidV2UserCode(normalizedTargetUserCode) ? normalizedTargetUserCode : null,
+      normalizedTargetUserName || null,
+      payloadJson,
+      safeMaxAttempts
+    ]
+  );
+}
+
+async function fetchV2PostRegistrationRetryQueueStatus(limit = 25) {
+  if (!pool) {
+    return {
+      pendingCount: 0,
+      oldestPendingCreatedAt: null,
+      nextAttemptAt: null,
+      items: []
+    };
+  }
+
+  const safeLimitRaw = Number(limit);
+  const safeLimit = Number.isFinite(safeLimitRaw)
+    ? Math.max(1, Math.min(200, Math.trunc(safeLimitRaw)))
+    : 25;
+
+  const [aggregateRows] = await pool.execute(
+    `SELECT
+       COUNT(*) AS pending_count,
+       MIN(created_at) AS oldest_pending_created_at,
+       MIN(next_attempt_at) AS next_attempt_at
+     FROM v2_post_registration_retry_queue
+     WHERE status IN ('queued','processing','failed')`
+  );
+
+  const aggregate = Array.isArray(aggregateRows) && aggregateRows.length > 0 ? aggregateRows[0] : {};
+
+  const [itemRows] = await pool.execute(
+    `SELECT
+       id,
+       task_key,
+       task_type,
+       registration_user_code,
+       registration_user_name,
+       target_user_code,
+       target_user_name,
+       status,
+       attempts,
+       max_attempts,
+       next_attempt_at,
+       last_error,
+       created_at,
+       updated_at
+     FROM v2_post_registration_retry_queue
+     WHERE status IN ('queued','processing','failed')
+     ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+     LIMIT ?`,
+    [safeLimit]
+  );
+
+  return {
+    pendingCount: Number(aggregate?.pending_count || 0),
+    oldestPendingCreatedAt: aggregate?.oldest_pending_created_at ? new Date(aggregate.oldest_pending_created_at).toISOString() : null,
+    nextAttemptAt: aggregate?.next_attempt_at ? new Date(aggregate.next_attempt_at).toISOString() : null,
+    items: (Array.isArray(itemRows) ? itemRows : []).map((row) => ({
+      id: Number(row?.id || 0),
+      taskKey: String(row?.task_key || ''),
+      taskType: String(row?.task_type || ''),
+      registrationUserCode: String(row?.registration_user_code || ''),
+      registrationUserName: String(row?.registration_user_name || ''),
+      targetUserCode: String(row?.target_user_code || ''),
+      targetUserName: String(row?.target_user_name || ''),
+      status: String(row?.status || ''),
+      attempts: Number(row?.attempts || 0),
+      maxAttempts: Number(row?.max_attempts || 0),
+      nextAttemptAt: row?.next_attempt_at ? new Date(row.next_attempt_at).toISOString() : null,
+      lastError: typeof row?.last_error === 'string' ? row.last_error : '',
+      createdAt: row?.created_at ? new Date(row.created_at).toISOString() : null,
+      updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null
+    }))
+  };
+}
+
+async function claimV2PostRegistrationRetryTasks(limit = V2_POST_REGISTRATION_QUEUE_BATCH_SIZE) {
+  if (!pool) return [];
+  const safeLimit = Math.max(1, Math.min(200, Math.trunc(Number(limit) || V2_POST_REGISTRATION_QUEUE_BATCH_SIZE)));
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [rows] = await connection.execute(
+      `SELECT
+         id,
+         task_key,
+         task_type,
+         registration_user_code,
+         registration_user_name,
+         target_user_code,
+         target_user_name,
+         payload_json,
+         attempts,
+         max_attempts
+       FROM v2_post_registration_retry_queue
+       WHERE status IN ('queued','failed')
+         AND attempts < max_attempts
+         AND next_attempt_at <= NOW(3)
+       ORDER BY next_attempt_at ASC, created_at ASC, id ASC
+       LIMIT ?
+       FOR UPDATE`,
+      [safeLimit]
+    );
+
+    const tasks = Array.isArray(rows) ? rows : [];
+    if (tasks.length === 0) {
+      await connection.commit();
+      return [];
+    }
+
+    const ids = tasks.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
+    if (ids.length === 0) {
+      await connection.commit();
+      return [];
+    }
+
+    const placeholders = ids.map(() => '?').join(', ');
+    await connection.execute(
+      `UPDATE v2_post_registration_retry_queue
+       SET status = 'processing',
+           attempts = attempts + 1,
+           last_attempt_at = NOW(3),
+           updated_at = NOW(3)
+       WHERE id IN (${placeholders})`,
+      ids
+    );
+
+    await connection.commit();
+
+    return tasks.map((row) => ({
+      id: Number(row?.id || 0),
+      taskKey: String(row?.task_key || ''),
+      taskType: String(row?.task_type || ''),
+      registrationUserCode: String(row?.registration_user_code || ''),
+      registrationUserName: String(row?.registration_user_name || ''),
+      targetUserCode: String(row?.target_user_code || ''),
+      targetUserName: String(row?.target_user_name || ''),
+      payload: parseIdempotencyResponseBody(row?.payload_json),
+      attemptNo: Number(row?.attempts || 0) + 1,
+      maxAttempts: Number(row?.max_attempts || V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS)
+    }));
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch {
+      // ignore rollback secondary errors
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function processSingleV2PostRegistrationRetryTask(task) {
+  const taskType = String(task?.taskType || '').trim().toLowerCase();
+  const taskKey = String(task?.taskKey || '').trim();
+  const taskId = Number(task?.id || 0);
+  const attemptNo = Math.max(1, Number(task?.attemptNo || 1));
+  const maxAttempts = Math.max(1, Number(task?.maxAttempts || V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS));
+
+  if (!taskId || !isValidV2PostRegistrationQueueTaskType(taskType) || !taskKey) {
+    return;
+  }
+
+  try {
+    const idempotencyKey = buildV2PostRegistrationQueueIdempotencyKey(taskType, taskKey);
+
+    if (taskType === 'referral_credit') {
+      const payload = parseV2PostRegistrationQueuePayload(taskType, task.payload);
+      await executeV2TransactionWithRetry(
+        () => processV2ReferralCredit({
+          idempotencyKey,
+          actorUserCode: payload.sourceUserCode,
+          sourceUserCode: payload.sourceUserCode,
+          beneficiaryUserCode: payload.beneficiaryUserCode,
+          allowInactiveActor: true,
+          sourceTxnId: null,
+          sourceRef: payload.sourceRef,
+          eventType: payload.eventType,
+          levelNo: payload.levelNo,
+          amountCents: payload.amountCents,
+          description: payload.description
+        }),
+        `${V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME}_referral`
+      );
+    } else if (taskType === 'help_event') {
+      const payload = parseV2PostRegistrationQueuePayload(taskType, task.payload);
+      await executeV2TransactionWithRetry(
+        () => processV2HelpEvent({
+          idempotencyKey,
+          actorUserCode: payload.sourceUserCode,
+          sourceUserCode: payload.sourceUserCode,
+          newMemberUserCode: payload.newMemberUserCode,
+          sourceRef: payload.sourceRef,
+          eventType: payload.eventType,
+          allowInactiveActor: true,
+          description: payload.description
+        }),
+        `${V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME}_help`
+      );
+    }
+
+    await pool.execute(
+      `UPDATE v2_post_registration_retry_queue
+       SET status = 'completed',
+           processed_at = NOW(3),
+           last_error = NULL,
+           last_error_code = NULL,
+           updated_at = NOW(3)
+       WHERE id = ?`,
+      [taskId]
+    );
+  } catch (error) {
+    const reachedMaxAttempts = attemptNo >= maxAttempts;
+    const nextAttemptAt = reachedMaxAttempts
+      ? null
+      : new Date(Date.now() + computeV2PostRegistrationQueueRetryDelayMs(attemptNo)).toISOString();
+
+    await pool.execute(
+      `UPDATE v2_post_registration_retry_queue
+       SET status = 'failed',
+           next_attempt_at = ?,
+           last_error = ?,
+           last_error_code = ?,
+           updated_at = NOW(3)
+       WHERE id = ?`,
+      [
+        toMySQLDatetime(nextAttemptAt || new Date(Date.now() + V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS).toISOString()),
+        getErrorMessage(error, 'Queue processing failed').slice(0, 280),
+        String(error?.code || 'QUEUE_PROCESSING_FAILED').slice(0, 80),
+        taskId
+      ]
+    );
+  }
+}
+
+async function runV2PostRegistrationQueueWorkerTick() {
+  if (v2PostRegistrationQueueWorkerRunning) return;
+  if (!pool || STORAGE_MODE !== 'mysql' || FINANCE_ENGINE_MODE !== 'v2') return;
+
+  v2PostRegistrationQueueWorkerRunning = true;
+  try {
+    const tasks = await claimV2PostRegistrationRetryTasks(V2_POST_REGISTRATION_QUEUE_BATCH_SIZE);
+    for (const task of tasks) {
+      await processSingleV2PostRegistrationRetryTask(task);
+    }
+  } catch (error) {
+    console.warn(`[v2-post-registration-queue] worker tick failed: ${getErrorMessage(error)}`);
+  } finally {
+    v2PostRegistrationQueueWorkerRunning = false;
+  }
 }
 
 function normalizeV2FundTransferProgressUpdates(rawProgressUpdates, senderUserCode, receiverUserCode) {
@@ -6633,6 +7123,145 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/v2/registration-queue/tasks') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: false
+      });
+
+      const taskType = String(parsed?.taskType || '').trim().toLowerCase();
+      const sourceUserCode = normalizeV2UserCode(parsed?.sourceUserCode);
+      const registrationUserName = normalizeV2PostRegistrationQueueUserName(parsed?.registrationUserName);
+      const targetUserCode = normalizeV2UserCode(parsed?.targetUserCode || '');
+      const targetUserName = normalizeV2PostRegistrationQueueUserName(parsed?.targetUserName || '');
+      const maxAttemptsRaw = Number(parsed?.maxAttempts);
+      const maxAttempts = Number.isFinite(maxAttemptsRaw)
+        ? Math.max(1, Math.min(500, Math.trunc(maxAttemptsRaw)))
+        : V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS;
+
+      if (!isValidV2PostRegistrationQueueTaskType(taskType)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'taskType must be one of referral_credit|help_event',
+          code: 'INVALID_QUEUE_TASK_TYPE'
+        });
+        return;
+      }
+      if (!isValidV2UserCode(sourceUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'sourceUserCode is required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (authContext.actorUserCode !== sourceUserCode) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Actor is only allowed to enqueue tasks for their own sourceUserCode',
+          code: 'ACTOR_SOURCE_MISMATCH'
+        });
+        return;
+      }
+
+      let normalizedPayload;
+      let derivedTaskKey = '';
+
+      if (taskType === 'referral_credit') {
+        normalizedPayload = parseV2PostRegistrationQueuePayload(taskType, {
+          sourceUserCode,
+          beneficiaryUserCode: parsed?.beneficiaryUserCode,
+          sourceRef: parsed?.sourceRef,
+          eventType: parsed?.eventType,
+          levelNo: parsed?.levelNo,
+          amountCents: parsed?.amountCents,
+          description: parsed?.description
+        });
+        derivedTaskKey = `referral:${normalizedPayload.sourceRef}:${normalizedPayload.sourceUserCode}:${normalizedPayload.beneficiaryUserCode}`;
+      } else {
+        normalizedPayload = parseV2PostRegistrationQueuePayload(taskType, {
+          sourceUserCode,
+          newMemberUserCode: parsed?.newMemberUserCode,
+          sourceRef: parsed?.sourceRef,
+          eventType: parsed?.eventType,
+          description: parsed?.description
+        });
+        derivedTaskKey = `help:${normalizedPayload.sourceRef}:${normalizedPayload.sourceUserCode}:${normalizedPayload.newMemberUserCode}`;
+      }
+
+      const providedTaskKey = String(parsed?.taskKey || '').trim();
+      const taskKey = providedTaskKey || derivedTaskKey;
+
+      await enqueueV2PostRegistrationRetryTask({
+        taskType,
+        taskKey,
+        registrationUserCode: sourceUserCode,
+        registrationUserName,
+        targetUserCode,
+        targetUserName,
+        payload: normalizedPayload,
+        maxAttempts
+      });
+
+      void runV2PostRegistrationQueueWorkerTick();
+
+      sendJson(res, 202, {
+        ok: true,
+        taskType,
+        taskKey,
+        registrationUserCode: sourceUserCode,
+        targetUserCode: isValidV2UserCode(targetUserCode) ? targetUserCode : null,
+        queued: true,
+        maxAttempts
+      });
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to enqueue registration retry task');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'REGISTRATION_QUEUE_ENQUEUE_FAILED'
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/v2/admin/registration-queue') {
+    try {
+      await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_REGISTRATION_QUEUE_ADMIN_READ_ENDPOINT_NAME,
+        requiredRole: 'admin',
+        allowImpersonation: false
+      });
+
+      const limitRaw = Number(url.searchParams.get('limit'));
+      const limit = Number.isFinite(limitRaw)
+        ? Math.max(1, Math.min(200, Math.trunc(limitRaw)))
+        : 25;
+
+      const queueStatus = await fetchV2PostRegistrationRetryQueueStatus(limit);
+      sendJson(res, 200, {
+        ok: true,
+        ...queueStatus
+      });
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to read registration queue status');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'REGISTRATION_QUEUE_READ_FAILED'
+      });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/v2/admin/adjustments') {
     try {
       const body = await getRequestBody(req);
@@ -7151,6 +7780,20 @@ async function start() {
     setInterval(() => {
       void getStateSnapshotCached({ forceFresh: true }).catch(() => {});
     }, 5 * 60 * 1000);
+
+    if (STORAGE_MODE === 'mysql' && FINANCE_ENGINE_MODE === 'v2') {
+      console.log(
+        `Post-registration queue worker: enabled intervalMs=${V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS} batchSize=${V2_POST_REGISTRATION_QUEUE_BATCH_SIZE} maxAttempts=${V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS}`
+      );
+      setTimeout(() => {
+        void runV2PostRegistrationQueueWorkerTick();
+      }, 4000);
+      setInterval(() => {
+        void runV2PostRegistrationQueueWorkerTick();
+      }, V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS);
+    } else {
+      console.log('Post-registration queue worker: disabled (requires STORAGE_MODE=mysql and FINANCE_ENGINE_MODE=v2)');
+    }
 
     if (LEDGER_MISMATCH_ALERT_ENABLED) {
       console.log(
