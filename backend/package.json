@@ -14,6 +14,7 @@
     "verify:wallet:gate:mysql": "node scripts/verify-wallet-ledger-resync.cjs --mysql --fail-on-mismatch",
     "audit:pin-integrity:dry": "node scripts/audit-v2-pin-purchase-integrity.cjs",
     "audit:pin-integrity:apply": "node scripts/audit-v2-pin-purchase-integrity.cjs --apply",
+    "audit:registration-integrity:dry": "node scripts/audit-registration-integrity.cjs",
     "recover:registration:user:dry": "node scripts/recover-v2-user-registration.cjs --user-code 0000000",
     "recover:registration:user:apply": "node scripts/recover-v2-user-registration.cjs --apply --user-code 0000000",
     "v2:smoke:inputs": "node scripts/get-v2-smoke-inputs.cjs",
