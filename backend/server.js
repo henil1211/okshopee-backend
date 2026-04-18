@@ -50,8 +50,6 @@ const MYSQL_PORT = Number(process.env.MYSQL_PORT || 3306);
 const MYSQL_USER = process.env.MYSQL_USER || 'root';
 const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || '';
 const MYSQL_DATABASE = process.env.MYSQL_DATABASE || 'okshopee24';
-const AUTH_MAINTENANCE_ENABLED = process.env.AUTH_MAINTENANCE_ENABLED !== 'false';
-const AUTH_MAINTENANCE_MESSAGE = process.env.AUTH_MAINTENANCE_MESSAGE || 'System in under Maintainance for 72 hours, Try Again After 72 hours';
 const FINANCE_ENGINE_MODE = String(process.env.FINANCE_ENGINE_MODE || 'legacy').toLowerCase();
 const LEGACY_FINANCIAL_WRITES_ENABLED = process.env.LEGACY_FINANCIAL_WRITES_ENABLED
   ? process.env.LEGACY_FINANCIAL_WRITES_ENABLED === 'true'
@@ -1413,6 +1411,33 @@ function waitMs(durationMs) {
   });
 }
 
+const V2_READ_RETRY_MAX_ATTEMPTS = 2;
+const V2_READ_RETRY_BASE_DELAY_MS = 100;
+
+async function executeV2ReadWithRetry(executor, operationName) {
+  let attempt = 0;
+  let lastError = null;
+
+  while (attempt < V2_READ_RETRY_MAX_ATTEMPTS) {
+    attempt += 1;
+    try {
+      return await executor();
+    } catch (error) {
+      lastError = error;
+      const shouldRetry = isMySQLConnectivityError(error);
+      if (!shouldRetry || attempt >= V2_READ_RETRY_MAX_ATTEMPTS) {
+        throw error;
+      }
+
+      const waitDurationMs = V2_READ_RETRY_BASE_DELAY_MS * attempt;
+      console.warn(`[v2-read-retry] ${operationName} attempt ${attempt}/${V2_READ_RETRY_MAX_ATTEMPTS} failed with ${error?.code || error?.message || 'unknown'}; retrying in ${waitDurationMs}ms`);
+      await waitMs(waitDurationMs);
+    }
+  }
+
+  throw lastError || new Error(`Unexpected retry wrapper exit for ${operationName}`);
+}
+
 async function executeV2TransactionWithRetry(executor, operationName) {
   let attempt = 0;
   let lastError = null;
@@ -1692,11 +1717,14 @@ async function resolveV2UserForReadByCode(userCode) {
 }
 
 async function readV2WalletSnapshotByUserId(userId) {
-  const [walletRows] = await pool.execute(
-    `SELECT wallet_type, current_amount_cents, updated_at
-       FROM v2_wallet_accounts
-      WHERE user_id = ?`,
-    [userId]
+  const [walletRows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT wallet_type, current_amount_cents, updated_at
+         FROM v2_wallet_accounts
+        WHERE user_id = ?`,
+      [userId]
+    ),
+    'read_v2_wallet_snapshot'
   );
 
   const balancesCents = {
@@ -1727,32 +1755,35 @@ async function readV2WalletSnapshotByUserId(userId) {
 
 async function readV2LedgerEntriesByUserId(userId, limit = 100) {
   const safeLimit = normalizeV2ReadLimit(limit, 100, 300);
-  const [rows] = await pool.execute(
-    `SELECT
-       le.id AS ledger_entry_id,
-       le.wallet_type,
-       le.entry_side,
-       le.amount_cents,
-       lt.id AS ledger_txn_id,
-       lt.tx_uuid,
-       lt.tx_type,
-       lt.status AS ledger_status,
-       lt.description,
-       lt.reference_id,
-       lt.created_at,
-       lt.posted_at,
-       cp.user_code AS counterparty_user_code
-     FROM v2_ledger_entries le
-     INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
-     LEFT JOIN v2_ledger_entries cp_le
-       ON cp_le.ledger_txn_id = le.ledger_txn_id
-      AND cp_le.id <> le.id
-      AND cp_le.user_id IS NOT NULL
-     LEFT JOIN v2_users cp ON cp.id = cp_le.user_id
-     WHERE le.user_id = ?
-     ORDER BY lt.id DESC, le.id DESC
-     LIMIT ?`,
-    [userId, safeLimit]
+  const [rows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT
+         le.id AS ledger_entry_id,
+         le.wallet_type,
+         le.entry_side,
+         le.amount_cents,
+         lt.id AS ledger_txn_id,
+         lt.tx_uuid,
+         lt.tx_type,
+         lt.status AS ledger_status,
+         lt.description,
+         lt.reference_id,
+         lt.created_at,
+         lt.posted_at,
+         cp.user_code AS counterparty_user_code
+       FROM v2_ledger_entries le
+       INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
+       LEFT JOIN v2_ledger_entries cp_le
+         ON cp_le.ledger_txn_id = le.ledger_txn_id
+        AND cp_le.id <> le.id
+        AND cp_le.user_id IS NOT NULL
+       LEFT JOIN v2_users cp ON cp.id = cp_le.user_id
+       WHERE le.user_id = ?
+       ORDER BY lt.id DESC, le.id DESC
+       LIMIT ?`,
+      [userId, safeLimit]
+    ),
+    'read_v2_ledger_entries'
   );
 
   return (Array.isArray(rows) ? rows : []).map((row) => {
@@ -5211,10 +5242,6 @@ async function authenticateUser(userId, password) {
       return { ok: false, status: 500, error: 'Failed to parse user data' };
     }
     if (!user) return { ok: false, status: 404, error: 'User ID not found' };
-  }
-
-  if (AUTH_MAINTENANCE_ENABLED && !user.isAdmin) {
-    return { ok: false, status: 503, error: AUTH_MAINTENANCE_MESSAGE };
   }
 
   if (user.accountStatus === 'permanent_blocked') {
