@@ -2079,7 +2079,15 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
   const effectiveLockedForQualificationCents = Math.max(0, Math.max(lockedForQualificationCents, syntheticLockedReceiveCents));
   const lockedForGiveCents = Math.max(0, pendingGiveCents);
   const v2LockedTotalCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
-  const effectiveLockedTotalCents = Math.max(v2LockedTotalCents, Math.max(0, legacyLockedIncomeCents));
+  const hasV2LockSignals =
+    lockedForGiveCents > 0
+    || effectiveLockedForQualificationCents > 0
+    || lockedFirstTwoLifetimeCents > 0;
+  const effectiveLockedTotalCents = resolveEffectiveLockedIncomeCents({
+    v2LockedIncomeCents: v2LockedTotalCents,
+    legacyLockedIncomeCents,
+    hasV2LockSignals
+  });
 
   return {
     balancesCents,
@@ -2418,6 +2426,23 @@ async function readLegacyIncomeMetricsByUserCodeWithConnection(connection, userC
   return computeLegacyIncomeMetricsFromStateRows(rows, normalizedUserCode);
 }
 
+function resolveEffectiveLockedIncomeCents({
+  v2LockedIncomeCents,
+  legacyLockedIncomeCents,
+  hasV2LockSignals
+}) {
+  const v2Locked = Math.max(0, Number(v2LockedIncomeCents || 0));
+  const legacyLocked = Math.max(0, Number(legacyLockedIncomeCents || 0));
+
+  // If V2 lock state exists, trust V2 as source-of-truth and avoid stale legacy overhang.
+  if (hasV2LockSignals) {
+    return v2Locked;
+  }
+
+  // Legacy fallback remains only for users not fully represented in V2 lock state yet.
+  return Math.max(v2Locked, legacyLocked);
+}
+
 async function readV2LockedIncomeSnapshotForMutation(connection, userId, userCode = null) {
   const [lockRows] = await connection.execute(
     `SELECT
@@ -2466,7 +2491,12 @@ async function readV2LockedIncomeSnapshotForMutation(connection, userId, userCod
   const v2LockedIncomeCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
   const legacyIncomeMetrics = await readLegacyIncomeMetricsByUserCodeWithConnection(connection, userCode);
   const legacyLockedIncomeCents = Number(legacyIncomeMetrics.lockedIncomeCents || 0);
-  const totalLockedIncomeCents = Math.max(v2LockedIncomeCents, Math.max(0, legacyLockedIncomeCents));
+  const hasV2LockSignals = lockedForGiveCents > 0 || effectiveLockedForQualificationCents > 0;
+  const totalLockedIncomeCents = resolveEffectiveLockedIncomeCents({
+    v2LockedIncomeCents,
+    legacyLockedIncomeCents,
+    hasV2LockSignals
+  });
 
   return {
     lockedForQualificationCents: effectiveLockedForQualificationCents,
