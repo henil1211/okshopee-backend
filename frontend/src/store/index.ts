@@ -2168,6 +2168,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     newUser = canonicalRegisteredUser;
     newUserId = canonicalRegisteredUser.userId;
 
+    let consistencyWarning: string | null = null;
     try {
       const consistency = await Database.commitCriticalAction(
         () => Database.ensureRegistrationConsistency({
@@ -2191,11 +2192,50 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       );
       newUser = consistency.user;
       newUserId = consistency.user.userId;
-    } catch {
-      return {
-        success: false,
-        message: 'Registration completed but verification failed. Please contact admin to run user recovery for this ID.'
-      };
+    } catch (error) {
+      // Registration can already be committed even if this strict verification sync step fails.
+      // Fall back to local consistency repair and only fail if the created user is truly missing.
+      try {
+        const localConsistency = Database.ensureRegistrationConsistency({
+          userId: newUserId,
+          fullName,
+          email,
+          phone: normalizedPhone,
+          country,
+          sponsorId: sponsor?.userId || null,
+          loginPassword: password,
+          transactionPassword,
+          pinCode: normalizedPinCode
+        });
+        newUser = localConsistency.user;
+        newUserId = localConsistency.user.userId;
+        consistencyWarning = 'Verification sync is delayed; account was created and will auto-resync.';
+      } catch {
+        const canonicalUser = Database.getUserByUserId(newUserId);
+        if (canonicalUser) {
+          newUser = canonicalUser;
+          newUserId = canonicalUser.userId;
+          consistencyWarning = 'Verification sync is delayed; account was created and will auto-resync.';
+        } else {
+          const reason = error instanceof Error && error.message
+            ? ` (${error.message})`
+            : '';
+          return {
+            success: false,
+            message: `Registration completed but verification failed${reason}. Please contact admin to run user recovery for this ID.`
+          };
+        }
+      }
+
+      void Database.forceRemoteSyncNowWithOptions({
+        full: false,
+        force: true,
+        timeoutMs: 30000,
+        maxAttempts: 2,
+        retryDelayMs: 1000
+      }).catch(() => {
+        // Best-effort background sync only.
+      });
     }
 
     let referralCreditWarning: string | null = null;
@@ -2336,7 +2376,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         userId: newUser.userId
       }
     });
-    const warnings = [referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
+    const warnings = [consistencyWarning, referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
     const registrationMessage = warnings.length > 0
       ? `Registration successful. Your ID is: ${newUserId}. ${warnings.join(' ')}`
       : `Registration successful. Your ID is: ${newUserId}`;
