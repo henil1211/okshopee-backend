@@ -363,7 +363,7 @@ function buildTransactionSemanticMergeKey(tx: Transaction): string {
   ].join('|');
 }
 
-function mergeTransactionsForDisplay(params: {
+export function mergeTransactionsForDisplay(params: {
   legacyTransactions: Transaction[];
   v2Transactions: Transaction[];
 }): Transaction[] {

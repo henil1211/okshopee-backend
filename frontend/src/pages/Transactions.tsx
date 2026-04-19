@@ -2,7 +2,7 @@
 /* eslint-disable react-hooks/preserve-manual-memoization */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRef } from 'react';
-import { useAuthStore, useWalletStore } from '@/store';
+import { useAuthStore, useWalletStore, mergeTransactionsForDisplay } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -63,8 +63,13 @@ export default function Transactions() {
   useEffect(() => {
     if (!displayUser) return;
 
-    const scoped = liveTransactions.filter((tx) => tx.userId === displayUser.id);
-    setTransactions(scoped);
+    const scopedLive = liveTransactions.filter((tx) => tx.userId === displayUser.id);
+    const scopedLegacy = Database.getUserTransactions(displayUser.id);
+    const mergedStable = mergeTransactionsForDisplay({
+      legacyTransactions: scopedLegacy,
+      v2Transactions: scopedLive
+    });
+    setTransactions(mergedStable);
 
     if (isRefreshing) {
       setIsRefreshing(false);
