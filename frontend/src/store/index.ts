@@ -3879,30 +3879,6 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Reason is required' };
     }
 
-    const strictV2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(user, {
-      includeLegacyTransactions: false
-    }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
-    if (!strictV2Read.snapshot) {
-      return {
-        success: false,
-        message: strictV2Read.errorMessage || 'Unable to fetch live backend wallet. Please retry in a moment.'
-      };
-    }
-
-    const liveWallet = strictV2Read.snapshot.wallet;
-    const walletBalance = walletType === 'deposit'
-      ? Number(liveWallet.depositWallet || 0)
-      : walletType === 'income'
-        ? Number(liveWallet.incomeWallet || 0)
-        : Number(liveWallet.royaltyWallet || 0);
-
-    if (walletBalance < normalizedAmount) {
-      return {
-        success: false,
-        message: `User has only $${walletBalance.toFixed(2)} in ${walletType} wallet`
-      };
-    }
-
     const walletLabel = walletType === 'deposit'
       ? 'deposit wallet'
       : walletType === 'income'
