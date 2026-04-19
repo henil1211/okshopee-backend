@@ -3288,7 +3288,7 @@ export default function Admin() {
     if (!confirmed) return;
 
     setIsLoading(true);
-    const result = await generatePins(pinQuantity, recipient.id);
+    const result = await generatePins(pinQuantity, recipient.userId || pinRecipientId);
     setIsLoading(false);
 
     if (result.success && result.pins) {

@@ -9545,20 +9545,43 @@ class Database {
     return this.getPins().find((p) => String(p.pinCode || '').trim().toUpperCase() === normalizedPinCode);
   }
 
+  private static resolveCanonicalUserForPinRef(userRef: string): User | undefined {
+    const cleanRef = String(userRef || '').trim();
+    if (!cleanRef) return undefined;
+    const resolved = this.getUserById(cleanRef) || this.getUserByUserId(cleanRef);
+    if (!resolved) return undefined;
+    return this.getUserByUserId(resolved.userId) || resolved;
+  }
+
+  private static doesPinBelongToUserRef(pin: Pin, userRef: string): boolean {
+    const ownerRef = String(pin.ownerId || '').trim();
+    const cleanUserRef = String(userRef || '').trim();
+    if (!ownerRef || !cleanUserRef) return false;
+
+    if (ownerRef === cleanUserRef) return true;
+
+    const targetUser = this.resolveCanonicalUserForPinRef(cleanUserRef);
+    if (!targetUser) return false;
+    if (ownerRef === targetUser.id || ownerRef === targetUser.userId) return true;
+
+    const ownerUser = this.resolveCanonicalUserForPinRef(ownerRef);
+    return !!ownerUser && ownerUser.userId === targetUser.userId;
+  }
+
   static getUserPins(userId: string): Pin[] {
-    return this.getPins().filter(p => p.ownerId === userId);
+    return this.getPins().filter((p) => this.doesPinBelongToUserRef(p, userId));
   }
 
   static getUnusedPins(userId: string): Pin[] {
-    return this.getPins().filter(p => p.ownerId === userId && p.status === 'unused');
+    return this.getUserPins(userId).filter((p) => p.status === 'unused');
   }
 
   static getUsedPins(userId: string): Pin[] {
-    return this.getPins().filter(p => p.ownerId === userId && p.status === 'used');
+    return this.getUserPins(userId).filter((p) => p.status === 'used');
   }
 
   static getReceivedPins(userId: string): Pin[] {
-    return this.getPins().filter(p => p.ownerId === userId && p.transferredFrom);
+    return this.getUserPins(userId).filter((p) => !!p.transferredFrom);
   }
 
   static getSuspendedPins(): Pin[] {
@@ -9577,8 +9600,10 @@ class Database {
   static generatePins(quantity: number, ownerId: string, createdBy: string): Pin[] {
     const pins: Pin[] = [];
     const allPins = this.getPins();
-    const owner = this.getUserById(ownerId);
-    const creator = this.getUserById(createdBy);
+    const owner = this.resolveCanonicalUserForPinRef(ownerId);
+    const creator = this.resolveCanonicalUserForPinRef(createdBy);
+    const effectiveOwnerId = owner?.id || String(ownerId || '').trim();
+    const effectiveCreatorId = creator?.id || String(createdBy || '').trim();
     const shouldCreateHistory = !!owner && !!creator && owner.id !== creator.id;
 
     for (let i = 0; i < quantity; i++) {
@@ -9587,8 +9612,8 @@ class Database {
         pinCode: this.generateUniquePinCode(),
         amount: 11,
         status: 'unused',
-        ownerId,
-        createdBy,
+        ownerId: effectiveOwnerId,
+        createdBy: effectiveCreatorId,
         createdAt: new Date().toISOString()
       };
       pins.push(pin);
@@ -9647,22 +9672,22 @@ class Database {
     const pins = this.getPins();
     const index = pins.findIndex(p => p.id === pinId);
     if (index === -1) return null;
-    if (pins[index].ownerId !== fromUserId) return null;
+    const fromUser = this.resolveCanonicalUserForPinRef(fromUserId);
+    const toUser = this.resolveCanonicalUserForPinRef(toUserId);
+    if (!fromUser || !toUser) return null;
+    if (!this.doesPinBelongToUserRef(pins[index], fromUser.id)) return null;
     if (pins[index].status === 'suspended') {
       throw new Error('Suspended PIN cannot be transferred');
     }
     if (pins[index].status !== 'unused') return null;
 
     // Check if in same chain
-    if (!this.isInSameChain(fromUserId, toUserId)) {
+    if (!this.isInSameChain(fromUser.id, toUser.id)) {
       throw new Error('PIN can only be transferred to upline or downline members');
     }
 
-    const fromUser = this.getUserById(fromUserId);
-    const toUser = this.getUserById(toUserId);
-
-    pins[index].ownerId = toUserId;
-    pins[index].transferredFrom = fromUserId;
+    pins[index].ownerId = toUser.id;
+    pins[index].transferredFrom = fromUser.id;
     pins[index].transferredAt = new Date().toISOString();
 
     this.savePins(pins);
@@ -9672,9 +9697,9 @@ class Database {
       id: `pt_${Date.now()}`,
       pinId,
       pinCode: pins[index].pinCode,
-      fromUserId,
+      fromUserId: fromUser.id,
       fromUserName: fromUser?.fullName || '',
-      toUserId,
+      toUserId: toUser.id,
       toUserName: toUser?.fullName || '',
       transferredAt: new Date().toISOString()
     });
@@ -9684,14 +9709,14 @@ class Database {
 
   static reclaimPinsFromUser(targetUserId: string, adminId: string, quantity: number, reason: string): Pin[] {
     const admin = this.getUserById(adminId);
-    const targetUser = this.getUserByUserId(targetUserId) || this.getUserById(targetUserId);
+    const targetUser = this.resolveCanonicalUserForPinRef(targetUserId);
     if (!admin || !targetUser) return [];
     if (quantity < 1) return [];
 
     const pins = this.getPins();
     const now = new Date().toISOString();
     const candidates = pins
-      .filter((pin) => pin.ownerId === targetUser.id && pin.status === 'unused')
+      .filter((pin) => this.doesPinBelongToUserRef(pin, targetUser.id) && pin.status === 'unused')
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     const selected = candidates.slice(0, quantity);
     if (selected.length === 0) return [];
