@@ -79,6 +79,25 @@ export function computeSpendableIncomeBalance(wallet?: Pick<Wallet, 'incomeWalle
   return Math.max(0, incomeBalance - effectiveLocked);
 }
 
+function doesTransactionPasswordMatchUser(user: User | null | undefined, candidate: string): boolean {
+  const entered = String(candidate || '').trim();
+  if (!user || !entered) return false;
+
+  if (String(user.transactionPassword || '').trim() === entered) {
+    return true;
+  }
+
+  const publicUserId = String(user.userId || '').trim();
+  if (!publicUserId) return false;
+
+  const sameUserIdRecords = Database.getUsers().filter(
+    (row) => String(row?.userId || '').trim() === publicUserId
+  );
+  return sameUserIdRecords.some(
+    (row) => String(row?.transactionPassword || '').trim() === entered
+  );
+}
+
 function resolveV2BearerTokenOrError(subjectUser: User): { token: string } | { message: string } {
   const savedAuthSession = Database.getV2AuthSession();
   const signedAccessToken = String(savedAuthSession?.accessToken || '').trim();
@@ -2666,8 +2685,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   verifyTransactionPassword: (userId: string, transactionPassword: string): boolean => {
-    const user = Database.getUserById(userId);
-    return user?.transactionPassword === transactionPassword;
+    const user = Database.getUserById(userId) || Database.getUserByUserId(userId);
+    return doesTransactionPasswordMatchUser(user, transactionPassword);
   }
 }));
 
@@ -2885,7 +2904,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     const txPasswordForV2 = (security?.transactionPassword || '').trim();
-    if (!txPasswordForV2 || fromUser.transactionPassword !== txPasswordForV2) {
+    if (!doesTransactionPasswordMatchUser(fromUser, txPasswordForV2)) {
       return { success: false, message: 'Invalid transaction password' };
     }
 
