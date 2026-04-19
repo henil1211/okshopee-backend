@@ -65,11 +65,43 @@ export default function Register() {
   const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
   const otpResend = useOtpResend(30);
   const [isPinChecking, setIsPinChecking] = useState(false);
+  const errorBannerRef = useRef<HTMLDivElement | null>(null);
   const successBannerRef = useRef<HTMLDivElement | null>(null);
   const pinCodeRef = useRef('');
   const pinRefreshInFlight = useRef<Promise<void> | null>(null);
   const lastPinRefresh = useRef<{ code: string; at: number } | null>(null);
   const submitInFlightRef = useRef(false);
+
+  const scrollMessageBannerIntoView = (element: HTMLDivElement | null) => {
+    if (!element) return;
+
+    try {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch {
+      // best effort
+    }
+
+    let parent: HTMLElement | null = element.parentElement;
+    while (parent && parent !== document.body) {
+      const style = window.getComputedStyle(parent);
+      const overflowY = style.overflowY || style.overflow;
+      const isScrollable = /(auto|scroll)/.test(overflowY) && parent.scrollHeight > parent.clientHeight;
+      if (isScrollable) {
+        try {
+          parent.scrollTo({ top: 0, behavior: 'smooth' });
+        } catch {
+          parent.scrollTop = 0;
+        }
+        break;
+      }
+      parent = parent.parentElement;
+    }
+
+    element.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+    window.setTimeout(() => {
+      element.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+    }, 120);
+  };
 
   const isEmailValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
@@ -91,11 +123,18 @@ export default function Register() {
   useEffect(() => {
     if (!success) return;
     const scrollTask = window.requestAnimationFrame(() => {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      successBannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      scrollMessageBannerIntoView(successBannerRef.current);
     });
     return () => window.cancelAnimationFrame(scrollTask);
   }, [success]);
+
+  useEffect(() => {
+    if (!error) return;
+    const scrollTask = window.requestAnimationFrame(() => {
+      scrollMessageBannerIntoView(errorBannerRef.current);
+    });
+    return () => window.cancelAnimationFrame(scrollTask);
+  }, [error]);
 
   // Check sponsor ID when entered
   const handleSponsorIdChange = (value: string) => {
@@ -553,9 +592,11 @@ export default function Register() {
           </CardHeader>
           <CardContent>
             {error && (
-              <Alert variant="destructive" className="mb-4 bg-red-500/10 border-red-500/30">
-                <AlertDescription className="text-red-400">{error}</AlertDescription>
-              </Alert>
+              <div ref={errorBannerRef}>
+                <Alert variant="destructive" className="mb-4 bg-red-500/10 border-red-500/30">
+                  <AlertDescription className="text-red-400">{error}</AlertDescription>
+                </Alert>
+              </div>
             )}
 
             <form onSubmit={handleSubmit} className="space-y-4">

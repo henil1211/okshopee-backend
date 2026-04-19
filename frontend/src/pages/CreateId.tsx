@@ -67,6 +67,37 @@ export default function CreateId() {
   const successBannerRef = useRef<HTMLDivElement | null>(null);
   const submitInFlightRef = useRef(false);
 
+  const scrollMessageBannerIntoView = (element: HTMLDivElement | null) => {
+    if (!element) return;
+
+    try {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch {
+      // best effort
+    }
+
+    let parent: HTMLElement | null = element.parentElement;
+    while (parent && parent !== document.body) {
+      const style = window.getComputedStyle(parent);
+      const overflowY = style.overflowY || style.overflow;
+      const isScrollable = /(auto|scroll)/.test(overflowY) && parent.scrollHeight > parent.clientHeight;
+      if (isScrollable) {
+        try {
+          parent.scrollTo({ top: 0, behavior: 'smooth' });
+        } catch {
+          parent.scrollTop = 0;
+        }
+        break;
+      }
+      parent = parent.parentElement;
+    }
+
+    element.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+    window.setTimeout(() => {
+      element.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+    }, 120);
+  };
+
   const isEmailValid = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
   const countries = [
@@ -130,8 +161,7 @@ export default function CreateId() {
     if (!targetRef) return;
 
     const scrollTask = window.requestAnimationFrame(() => {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      targetRef.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      scrollMessageBannerIntoView(targetRef);
     });
 
     return () => window.cancelAnimationFrame(scrollTask);
