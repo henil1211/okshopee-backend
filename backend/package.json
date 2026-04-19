@@ -36,7 +36,9 @@
     "v2:repair:immediate-give-help:dry": "node scripts/repair-v2-immediate-give-help.js --dry-run --source-user-code 0000000",
     "v2:repair:immediate-give-help:apply": "node scripts/repair-v2-immediate-give-help.js --apply --source-user-code 0000000",
     "legacy:repair:help-overcredit:dry": "node scripts/repair-legacy-help-overcredit-by-users.cjs --users 0000000 --dry-run",
-    "legacy:repair:help-overcredit:apply": "node scripts/repair-legacy-help-overcredit-by-users.cjs --users 0000000 --apply"
+    "legacy:repair:help-overcredit:apply": "node scripts/repair-legacy-help-overcredit-by-users.cjs --users 0000000 --apply",
+    "legacy:audit:all-financial-issues": "node scripts/audit-legacy-all-financial-issues.cjs",
+    "legacy:audit:all-financial-issues:json": "node scripts/audit-legacy-all-financial-issues.cjs --json"
   },
   "dependencies": {
     "cors": "^2.8.6",
