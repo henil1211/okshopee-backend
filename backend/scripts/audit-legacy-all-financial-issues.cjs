@@ -21,6 +21,10 @@ function normalizeUserCode(value) {
 }
 
 function parseJson(value, fallback) {
+  if (value == null) return fallback;
+  if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+    return value;
+  }
   try {
     const parsed = JSON.parse(String(value || ''));
     return parsed == null ? fallback : parsed;
