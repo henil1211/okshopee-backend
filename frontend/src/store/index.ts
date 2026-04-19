@@ -2122,47 +2122,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       return { success: false, message: 'ID creation failed. Please try again after some time.' };
     }
 
-    try {
-      await Database.ensureFreshData({
-        keys: Database.getRegistrationFreshDataKeys(),
-        timeoutMs: 10000,
-        maxAttempts: 2,
-        retryDelayMs: 700
-      });
-    } catch {
-      // Best-effort refresh so we can resolve the final saved user after sync.
-    }
-
     const canonicalRegisteredUser = (() => {
+      const byGeneratedUserId = Database.getUserByUserId(newUserId);
+      if (byGeneratedUserId) {
+        return byGeneratedUserId;
+      }
+
       const byInternalId = Database.getUserById(newUser.id);
       if (byInternalId) {
         return Database.getUserByUserId(byInternalId.userId) || byInternalId;
       }
 
-      const normalizedEmail = email.trim().toLowerCase();
-      const candidates = Database.getUsers()
-        .filter((candidate) => (
-          (candidate.email || '').trim().toLowerCase() === normalizedEmail
-          && normalizePhoneNumber(candidate.phone) === normalizedPhone
-          && (candidate.fullName || '').trim().toLowerCase() === fullName.trim().toLowerCase()
-          && (sponsor?.userId ? candidate.sponsorId === sponsor.userId : true)
-        ));
-
-      if (candidates.length === 0) {
-        const byGeneratedUserId = Database.getUserByUserId(newUserId);
-        return byGeneratedUserId || newUser;
-      }
-
-      const matrixUserIds = new Set(Database.getMatrix().map((node) => node.userId));
-      return [...candidates].sort((a, b) => {
-        const aMatrixScore = matrixUserIds.has(a.userId) ? 1 : 0;
-        const bMatrixScore = matrixUserIds.has(b.userId) ? 1 : 0;
-        if (aMatrixScore !== bMatrixScore) return bMatrixScore - aMatrixScore;
-
-        const aCreated = new Date(a.createdAt || 0).getTime();
-        const bCreated = new Date(b.createdAt || 0).getTime();
-        return bCreated - aCreated;
-      })[0];
+      return newUser;
     })();
 
     newUser = canonicalRegisteredUser;
@@ -2217,13 +2188,61 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           newUserId = canonicalUser.userId;
           consistencyWarning = 'Verification sync is delayed; account was created and will auto-resync.';
         } else {
-          const reason = error instanceof Error && error.message
-            ? ` (${error.message})`
-            : '';
-          return {
-            success: false,
-            message: `Registration completed but verification failed${reason}. Please contact admin to run user recovery for this ID.`
-          };
+          // Last-mile repair: if strict sync raced with stale hydration, rebuild from staged user data.
+          try {
+            if (!Database.getUserByUserId(newUser.userId) && !Database.getUserById(newUser.id)) {
+              Database.createUser({
+                ...newUser,
+                fullName,
+                email,
+                phone: normalizedPhone,
+                country,
+                sponsorId: sponsor?.userId || null,
+                password,
+                transactionPassword,
+                isActive: true,
+                accountStatus: 'active',
+                activatedAt: newUser.activatedAt || new Date().toISOString()
+              });
+            }
+
+            if (!Database.getMatrixNode(newUser.userId)) {
+              const parentUserId = newUser.parentId || null;
+              const reconstructedNode: MatrixNode = {
+                userId: newUser.userId,
+                username: fullName,
+                level: parentUserId ? (Database.getMatrixNode(parentUserId)?.level || 0) + 1 : 0,
+                position: newUser.position === 'left' ? 0 : 1,
+                parentId: parentUserId || undefined,
+                isActive: true
+              };
+              Database.addMatrixNode(reconstructedNode);
+            }
+
+            const repairedConsistency = Database.ensureRegistrationConsistency({
+              userId: newUser.userId,
+              fullName,
+              email,
+              phone: normalizedPhone,
+              country,
+              sponsorId: sponsor?.userId || null,
+              loginPassword: password,
+              transactionPassword,
+              pinCode: normalizedPinCode
+            });
+
+            newUser = repairedConsistency.user;
+            newUserId = repairedConsistency.user.userId;
+            consistencyWarning = 'Registration was recovered after verification race; data will auto-resync.';
+          } catch {
+            const reason = error instanceof Error && error.message
+              ? ` (${error.message})`
+              : '';
+            return {
+              success: false,
+              message: `Registration completed but verification failed${reason}. Please contact admin to run user recovery for this ID.`
+            };
+          }
         }
       }
 
