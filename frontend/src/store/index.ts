@@ -990,6 +990,63 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
   };
 }
 
+async function reconcileCommittedRegistrationFromPin(pinCode: string): Promise<{
+  recovered: boolean;
+  userId?: string;
+  warning?: string;
+  blockingMessage?: string;
+}> {
+  const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+  if (!normalizedPinCode) {
+    return { recovered: false };
+  }
+
+  try {
+    await Database.forceRemoteSyncKeysNow(Database.getRegistrationFreshDataKeys(), {
+      force: true,
+      timeoutMs: 45000,
+      maxAttempts: 2,
+      retryDelayMs: 1000
+    });
+  } catch {
+    // Best-effort sync only. Continue reconciliation with locally available state.
+  }
+
+  const pin = Database.getPinByCode(normalizedPinCode);
+  if (!pin) {
+    return {
+      recovered: false,
+      blockingMessage: 'Registration status could not be verified yet. Please refresh once and check before retrying.'
+    };
+  }
+
+  if (String(pin.status || '').toLowerCase() === 'unused') {
+    return { recovered: false };
+  }
+
+  const candidateRefs = [
+    String(pin.registrationUserId || '').trim(),
+    String(pin.usedById || '').trim()
+  ].filter((value) => value.length > 0);
+
+  for (const ref of candidateRefs) {
+    const linkedUser = Database.getUserById(ref) || Database.getUserByUserId(ref);
+    const linkedUserCode = String(linkedUser?.userId || '').trim();
+    if (/^\d{7}$/.test(linkedUserCode)) {
+      return {
+        recovered: true,
+        userId: linkedUserCode,
+        warning: 'Registration was already committed on server and has been recovered after a temporary network error.'
+      };
+    }
+  }
+
+  return {
+    recovered: false,
+    blockingMessage: 'PIN is already consumed and registration may already be committed. Please wait 20-30 seconds, refresh, and do not retry with another PIN.'
+  };
+}
+
 const POST_REGISTRATION_RETRY_QUEUE_STORAGE_KEY = 'v2_post_registration_retry_queue';
 const POST_REGISTRATION_RETRY_BASE_DELAY_MS = 30_000;
 const POST_REGISTRATION_RETRY_MAX_DELAY_MS = 15 * 60 * 1000;
@@ -2030,12 +2087,34 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     let backendSideEffectWarning: string | null = null;
     let usedBackendAtomicRegistration = false;
 
-    const backendRegistration = await submitV2AtomicRegistration({
+    let backendRegistration = await submitV2AtomicRegistration({
       ...userData,
       phone: normalizedPhone,
       sponsorId: sponsor?.userId || sponsorId,
       pinCode: normalizedPinCode
     });
+
+    if (!backendRegistration.success && !backendRegistration.fallbackToLocal) {
+      const shouldTryRecovery =
+        backendRegistration.code === 'PIN_ALREADY_USED'
+        || /failed to fetch|networkerror|network request error|load failed|fetch failed/i.test(String(backendRegistration.message || ''));
+
+      if (shouldTryRecovery) {
+        const recoveredRegistration = await reconcileCommittedRegistrationFromPin(normalizedPinCode);
+        if (recoveredRegistration.recovered && recoveredRegistration.userId) {
+          backendRegistration = {
+            success: true,
+            message: 'Registration committed on server (reconciled).',
+            userId: recoveredRegistration.userId,
+            sponsorUserId: sponsor?.userId || sponsorId,
+            idempotentReplay: true,
+            sideEffectWarnings: recoveredRegistration.warning ? [recoveredRegistration.warning] : []
+          };
+        } else if (recoveredRegistration.blockingMessage) {
+          return { success: false, message: recoveredRegistration.blockingMessage };
+        }
+      }
+    }
 
     if (backendRegistration.success && backendRegistration.userId) {
       usedBackendAtomicRegistration = true;
