@@ -924,6 +924,8 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
   wallet.depositWallet = Number(walletData.fundCents || 0) / 100;
   wallet.incomeWallet = Number(walletData.incomeCents || 0) / 100;
   wallet.royaltyWallet = Number(walletData.royaltyCents || 0) / 100;
+  wallet.lockedIncomeWallet = Number(walletData.lockedIncomeCents || 0) / 100;
+  wallet.giveHelpLocked = Number(walletData.giveHelpLockedCents || 0) / 100;
 
   const v2Transactions = txRows.map((row, index) => {
     const signedAmountCents = Number(row.signedAmountCents || 0);

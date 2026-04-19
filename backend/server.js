@@ -2562,6 +2562,10 @@ async function readV2WalletSnapshotByUserId(userId) {
     income: 0,
     royalty: 0
   };
+  const lockedBalancesCents = {
+    lockedIncome: 0,
+    giveHelpLocked: 0
+  };
   let latestUpdatedAt = null;
 
   for (const row of Array.isArray(walletRows) ? walletRows : []) {
@@ -2577,8 +2581,38 @@ async function readV2WalletSnapshotByUserId(userId) {
     }
   }
 
+  try {
+    const [helpStateRows] = await executeV2ReadWithRetry(
+      () => pool.execute(
+        `SELECT
+           COALESCE(SUM(locked_qualification_cents), 0) AS locked_qualification_cents,
+           COALESCE(SUM(pending_give_cents), 0) AS pending_give_cents
+         FROM v2_help_level_state
+         WHERE user_id = ?`,
+        [userId]
+      ),
+      'read_v2_help_locked_snapshot'
+    );
+
+    const helpState = Array.isArray(helpStateRows) ? helpStateRows[0] : null;
+    const lockedQualificationCents = Number.isFinite(Number(helpState?.locked_qualification_cents))
+      ? Math.max(0, Math.trunc(Number(helpState.locked_qualification_cents)))
+      : 0;
+    const pendingGiveCents = Number.isFinite(Number(helpState?.pending_give_cents))
+      ? Math.max(0, Math.trunc(Number(helpState.pending_give_cents)))
+      : 0;
+
+    lockedBalancesCents.giveHelpLocked = pendingGiveCents;
+    lockedBalancesCents.lockedIncome = lockedQualificationCents + pendingGiveCents;
+  } catch (error) {
+    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
+      throw error;
+    }
+  }
+
   return {
     balancesCents,
+    lockedBalancesCents,
     updatedAt: latestUpdatedAt
   };
 }
@@ -8462,6 +8496,8 @@ const server = createServer(async (req, res) => {
           fundCents: walletSnapshot.balancesCents.fund,
           incomeCents: walletSnapshot.balancesCents.income,
           royaltyCents: walletSnapshot.balancesCents.royalty,
+          lockedIncomeCents: walletSnapshot.lockedBalancesCents.lockedIncome,
+          giveHelpLockedCents: walletSnapshot.lockedBalancesCents.giveHelpLocked,
           updatedAt: walletSnapshot.updatedAt
         }
       });
