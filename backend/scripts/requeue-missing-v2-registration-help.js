@@ -93,6 +93,48 @@ async function detectMissingUsers(pool, limit, { includeLegacy = false } = {}) {
     .filter(Boolean);
 }
 
+async function readDetectionScopeStats(pool, { includeLegacy = false } = {}) {
+  const includeLegacyFlag = includeLegacy ? 1 : 0;
+  const [rows] = await pool.execute(
+    `SELECT
+       COUNT(*) AS active_non_admin_total,
+       COALESCE(SUM(is_candidate), 0) AS candidate_total,
+       COALESCE(SUM(CASE WHEN is_candidate = 1 AND has_processed = 1 THEN 1 ELSE 0 END), 0) AS candidate_processed_total,
+       COALESCE(SUM(CASE WHEN is_candidate = 1 AND has_processed = 0 THEN 1 ELSE 0 END), 0) AS candidate_missing_total
+     FROM (
+       SELECT
+         u.user_code,
+         CASE
+           WHEN ? = 1
+             OR rp.user_id IS NOT NULL
+             OR EXISTS (
+               SELECT 1
+               FROM v2_post_registration_retry_queue rq
+               WHERE rq.registration_user_code = u.user_code
+             )
+           THEN 1 ELSE 0
+         END AS is_candidate,
+         CASE WHEN q.id IS NULL THEN 0 ELSE 1 END AS has_processed
+       FROM v2_users u
+       LEFT JOIN v2_registration_profiles rp ON rp.user_id = u.id
+       LEFT JOIN v2_help_events_queue q
+         ON q.event_key = CONCAT('HELP:reg_help_', u.user_code, '_', u.user_code, ':', u.user_code, ':', u.user_code, ':activation_join')
+        AND q.status = 'processed'
+       WHERE u.status = 'active'
+         AND COALESCE(rp.is_admin, 0) = 0
+     ) scoped`,
+    [includeLegacyFlag]
+  );
+
+  const row = Array.isArray(rows) && rows[0] ? rows[0] : {};
+  return {
+    activeNonAdminTotal: Number(row.active_non_admin_total || 0),
+    candidateTotal: Number(row.candidate_total || 0),
+    candidateProcessedTotal: Number(row.candidate_processed_total || 0),
+    candidateMissingTotal: Number(row.candidate_missing_total || 0)
+  };
+}
+
 async function readHelpEventStatus(pool, eventKey) {
   const [rows] = await pool.execute(
     `SELECT id, status, processed_at
@@ -188,11 +230,20 @@ async function main() {
     await ensureRetryQueueTable(pool);
 
     if (allMissing) {
+      const scopeStats = await readDetectionScopeStats(pool, { includeLegacy });
       userCodes = await detectMissingUsers(pool, limitArg, { includeLegacy });
       console.log(`[detect] scope: ${includeLegacy ? 'legacy+v2' : 'v2-registration-candidates'}`);
+      console.log(`[detect] active non-admin users: ${scopeStats.activeNonAdminTotal}`);
+      console.log(`[detect] scoped candidates: ${scopeStats.candidateTotal}`);
+      console.log(`[detect] scoped candidates already processed: ${scopeStats.candidateProcessedTotal}`);
       console.log(`[detect] missing users: ${userCodes.length}`);
       if (userCodes.length > 0) {
         console.log(`[detect] user codes: ${userCodes.join(', ')}`);
+      } else if (scopeStats.candidateTotal === 0 && !includeLegacy) {
+        console.log('[detect] note: no v2-registration candidates were found in this DB scope.');
+        console.log('[detect] note: if this environment has only legacy-seeded users, this is expected.');
+      } else if (scopeStats.candidateTotal > 0 && scopeStats.candidateMissingTotal === 0) {
+        console.log('[detect] note: all scoped candidates already have processed registration help events.');
       }
     }
 
