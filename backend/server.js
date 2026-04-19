@@ -6846,12 +6846,15 @@ const server = createServer(async (req, res) => {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
 
-      const authContext = await resolveV2RequestAuthContext({
-        req,
-        endpointName: V2_ATOMIC_REGISTRATION_ENDPOINT_NAME,
-        requiredRole: 'user',
-        allowImpersonation: true
-      });
+      const rawRegistrationBearerToken = parseBearerToken(req);
+      const authContext = rawRegistrationBearerToken
+        ? await resolveV2RequestAuthContext({
+          req,
+          endpointName: V2_ATOMIC_REGISTRATION_ENDPOINT_NAME,
+          requiredRole: 'user',
+          allowImpersonation: true
+        })
+        : null;
 
       const fullName = String(parsed?.fullName || '').trim();
       const email = String(parsed?.email || '').trim();
@@ -7056,10 +7059,13 @@ const server = createServer(async (req, res) => {
       const usersByUserId = new Map(users.map((user) => [String(user?.userId || ''), user]));
       const usersByInternalId = new Map(users.map((user) => [String(user?.id || ''), user]));
 
-      const actorUserCode = normalizeV2UserCode(authContext.actorUserCode);
-      const actorUser = usersByUserId.get(actorUserCode);
-      if (!actorUser) {
-        throw createApiError(403, 'Actor user is not available in legacy state', 'ACTOR_NOT_FOUND_IN_STATE');
+      let actorUser = null;
+      if (authContext?.actorUserCode) {
+        const actorUserCode = normalizeV2UserCode(authContext.actorUserCode);
+        actorUser = usersByUserId.get(actorUserCode) || null;
+        if (!actorUser) {
+          throw createApiError(403, 'Actor user is not available in legacy state', 'ACTOR_NOT_FOUND_IN_STATE');
+        }
       }
 
       const sponsorUser = usersByUserId.get(sponsorId);
@@ -7198,7 +7204,7 @@ const server = createServer(async (req, res) => {
       if (!pinOwnerUser?.userId) {
         throw createApiError(409, 'PIN owner mapping is invalid', 'PIN_OWNER_NOT_FOUND');
       }
-      if (String(pinOwnerUser.userId) !== String(actorUser.userId)) {
+      if (actorUser && String(pinOwnerUser.userId) !== String(actorUser.userId)) {
         throw createApiError(403, 'PIN does not belong to the authenticated actor', 'PIN_OWNER_MISMATCH');
       }
 

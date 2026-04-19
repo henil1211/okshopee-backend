@@ -779,7 +779,14 @@ class Database {
     if (session?.accessToken) {
       const tokenType = session.tokenType && session.tokenType.trim() ? session.tokenType.trim() : 'Bearer';
       headers.Authorization = `${tokenType} ${session.accessToken}`;
+      return headers;
     }
+
+    const fallbackUserCode = String(this.getCurrentUser()?.userId || '').trim();
+    if (fallbackUserCode) {
+      headers.Authorization = `Bearer ${fallbackUserCode}`;
+    }
+
     return headers;
   }
 

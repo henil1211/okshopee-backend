@@ -125,6 +125,39 @@ function resolveV2RequestHeaders(params: {
   return { headers };
 }
 
+function resolveV2RegistrationRequestHeaders(params: {
+  idempotencyKey: string;
+  requestId: string;
+  impersonationReason: string;
+}): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Idempotency-Key': params.idempotencyKey,
+    'X-System-Version': 'v2',
+    'X-Request-Id': params.requestId
+  };
+
+  const authState = useAuthStore.getState();
+  const subjectUser = authState.user;
+  const impersonatedUser = authState.impersonatedUser;
+  if (!subjectUser) {
+    return headers;
+  }
+
+  const bearerTokenResult = resolveV2BearerTokenOrError(subjectUser);
+  if (!('token' in bearerTokenResult)) {
+    return headers;
+  }
+
+  headers.Authorization = `Bearer ${bearerTokenResult.token}`;
+  if (impersonatedUser && subjectUser.isAdmin) {
+    headers['X-Impersonate-User-Code'] = impersonatedUser.userId;
+    headers['X-Impersonation-Reason'] = params.impersonationReason;
+  }
+
+  return headers;
+}
+
 function resolveV2ReadRequestHeaders(params: {
   requestId: string;
   impersonationReason: string;
@@ -933,20 +966,17 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
 }> {
   const idempotencyKey = generateClientIdempotencyKey();
   const requestId = generateClientRequestId('v2_register');
-  const resolvedHeaders = resolveV2RequestHeaders({
+  const headers = resolveV2RegistrationRequestHeaders({
     idempotencyKey,
     requestId,
     impersonationReason: 'create_id_registration'
   });
-  if (!('headers' in resolvedHeaders)) {
-    return { success: false, message: resolvedHeaders.message };
-  }
 
   let response: Response;
   try {
     response = await fetch(`${getBackendApiBase()}/api/v2/registrations`, {
       method: 'POST',
-      headers: resolvedHeaders.headers,
+      headers,
       body: JSON.stringify({
         fullName: params.fullName,
         email: params.email,
@@ -2093,13 +2123,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     let backendSideEffectWarning: string | null = null;
     let usedBackendAtomicRegistration = false;
 
-    const backendAtomicEligible = (() => {
-      if (!actingUser) return false;
-      const tokenResult = resolveV2BearerTokenOrError(actingUser);
-      return 'token' in tokenResult;
-    })();
-
-    const canAttemptBackendAtomicRegistration = backendAtomicEligible;
+    const canAttemptBackendAtomicRegistration = true;
     let backendRegistration: Awaited<ReturnType<typeof submitV2AtomicRegistration>> = {
       success: false,
       message: 'Skipped backend atomic registration for unauthenticated signup flow.',
