@@ -81,7 +81,10 @@ export default function Dashboard() {
     if (!activeUser) return null;
     return Database.getUserByUserId(activeUser.userId) || Database.getUserById(activeUser.id) || activeUser;
   }, [impersonatedUser, user]);
-  const spendableIncomeBalance = useMemo(() => computeSpendableIncomeBalance(wallet), [wallet]);
+  const spendableIncomeBalance = useMemo(
+    () => computeSpendableIncomeBalance(wallet, { lockedAlreadyExcluded: v2ReadHealthy }),
+    [wallet, v2ReadHealthy]
+  );
 
   useEffect(() => {
     if (!isAuthenticated) {

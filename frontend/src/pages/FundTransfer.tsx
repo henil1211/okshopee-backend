@@ -46,7 +46,7 @@ export default function FundTransfer() {
       ? 'Royalty Wallet'
       : 'Fund Wallet';
   const topWalletAmount = transferData.source === 'income'
-    ? formatCurrency(computeSpendableIncomeBalance(wallet))
+    ? formatCurrency(computeSpendableIncomeBalance(wallet, { lockedAlreadyExcluded: v2ReadHealthy }))
     : transferData.source === 'royalty'
       ? formatCurrency(wallet?.royaltyWallet || 0)
       : formatCurrency(wallet?.depositWallet || 0);
@@ -365,7 +365,7 @@ export default function FundTransfer() {
 
             <div className="rounded-lg border border-white/10 bg-[#1f2937] p-3">
               <p className="text-sm text-white/60">Available Fund Wallet Balance: {formatCurrency(wallet?.depositWallet || 0)}</p>
-              <p className="text-sm text-white/60">Available Income Wallet Balance: {formatCurrency(computeSpendableIncomeBalance(wallet))}</p>
+              <p className="text-sm text-white/60">Available Income Wallet Balance: {formatCurrency(computeSpendableIncomeBalance(wallet, { lockedAlreadyExcluded: v2ReadHealthy }))}</p>
               <p className="text-sm text-white/60">Available Royalty Wallet Balance: {formatCurrency(wallet?.royaltyWallet || 0)}</p>
             </div>
 

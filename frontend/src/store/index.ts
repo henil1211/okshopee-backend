@@ -187,9 +187,15 @@ function buildWalletDefaultsForV2Read(userId: string, existingWallet?: Wallet | 
   };
 }
 
-export function computeSpendableIncomeBalance(wallet?: Wallet | null): number {
+export function computeSpendableIncomeBalance(
+  wallet?: Wallet | null,
+  options?: { lockedAlreadyExcluded?: boolean }
+): number {
   if (!wallet) return 0;
   const incomeWallet = Number(wallet.incomeWallet || 0);
+  if (options?.lockedAlreadyExcluded) {
+    return Math.max(0, incomeWallet);
+  }
   const giveHelpLocked = Number(wallet.giveHelpLocked || 0);
   const lockedIncomeWallet = Number(wallet.lockedIncomeWallet || 0);
   const effectiveLockedIncome = Math.max(giveHelpLocked, lockedIncomeWallet);
@@ -2968,7 +2974,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     const sourceWalletBalance = sourceWallet === 'income'
-      ? computeSpendableIncomeBalance(strictSnapshot.wallet)
+      ? computeSpendableIncomeBalance(strictSnapshot.wallet, { lockedAlreadyExcluded: true })
       : Number(strictSnapshot.wallet.depositWallet || 0);
     if (sourceWalletBalance < amount) {
       return {
@@ -3097,7 +3103,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       const resolvedPayoutQrCode = String(payoutQrCode || '').trim();
 
       // Use income wallet for withdrawals
-      const availableWithdrawableBalance = computeSpendableIncomeBalance(wallet);
+      const availableWithdrawableBalance = computeSpendableIncomeBalance(wallet, {
+        lockedAlreadyExcluded: get().v2ReadHealthy
+      });
       if (availableWithdrawableBalance < amount) {
         return { success: false, message: 'Insufficient withdrawable balance (some amount is locked for give-help)' };
       }
