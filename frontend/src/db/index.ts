@@ -9575,6 +9575,9 @@ class Database {
   static generatePins(quantity: number, ownerId: string, createdBy: string): Pin[] {
     const pins: Pin[] = [];
     const allPins = this.getPins();
+    const owner = this.getUserById(ownerId);
+    const creator = this.getUserById(createdBy);
+    const shouldCreateHistory = !!owner && !!creator && owner.id !== creator.id;
 
     for (let i = 0; i < quantity; i++) {
       const pin: Pin = {
@@ -9588,6 +9591,20 @@ class Database {
       };
       pins.push(pin);
       allPins.push(pin);
+
+      if (shouldCreateHistory) {
+        this.createPinTransfer({
+          id: `pt_gen_${Date.now()}_${i}`,
+          pinId: pin.id,
+          pinCode: pin.pinCode,
+          fromUserId: creator.id,
+          fromUserName: creator.fullName || creator.userId,
+          toUserId: owner.id,
+          toUserName: owner.fullName || owner.userId,
+          transferredAt: pin.createdAt,
+          notes: 'Admin generated PIN'
+        });
+      }
     }
 
     this.savePins(allPins);

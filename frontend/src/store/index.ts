@@ -3250,13 +3250,37 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     const pins = Database.generatePins(quantity, ownerId, adminUser.id);
     get().loadAllPins();
+    get().loadAllUsers();
 
     try {
-      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      const synced = await Database.forceRemoteSyncKeysNow([DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS], {
+        force: true,
+        timeoutMs: 15000,
+        maxAttempts: 3,
+        retryDelayMs: 500
+      });
+
+      if (!synced) {
+        await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS] });
+        get().loadAllPins();
+        get().loadAllUsers();
+        return {
+          success: false,
+          message: 'PINs were not saved to server. Please retry after sync stabilizes.'
+        };
+      }
+
       await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
       get().loadAllPins();
+      get().loadAllUsers();
     } catch {
-      // best-effort sync
+      await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS] });
+      get().loadAllPins();
+      get().loadAllUsers();
+      return {
+        success: false,
+        message: 'PINs were generated locally but server sync failed. Please retry once and refresh.'
+      };
     }
 
     return { success: true, message: `Generated ${quantity} PIN(s)`, pins };
