@@ -28,7 +28,9 @@
     "phasea:fix:apply": "node scripts/fix-v2-phase-a-seeding.cjs --apply",
     "v2:close-fake-users": "node scripts/close-v2-users.cjs 2000002 3000003 --status closed",
     "v2:smoke:provision-dummies": "node scripts/provision-v2-help-smoke-dummies.js",
-    "v2:smoke:help-phase3": "node scripts/smoke-test-v2-help-phase3.js"
+    "v2:smoke:help-phase3": "node scripts/smoke-test-v2-help-phase3.js",
+    "v2:requeue:missing-reg-help:dry": "node scripts/requeue-missing-v2-registration-help.js --all-missing",
+    "v2:requeue:missing-reg-help:apply": "node scripts/requeue-missing-v2-registration-help.js --all-missing --apply"
   },
   "dependencies": {
     "cors": "^2.8.6",
