@@ -2093,14 +2093,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     let backendSideEffectWarning: string | null = null;
     let usedBackendAtomicRegistration = false;
 
-    let backendRegistration = await submitV2AtomicRegistration({
-      ...userData,
-      phone: normalizedPhone,
-      sponsorId: sponsor?.userId || sponsorId,
-      pinCode: normalizedPinCode
-    });
+    const canAttemptBackendAtomicRegistration = !!actingUser;
+    let backendRegistration: Awaited<ReturnType<typeof submitV2AtomicRegistration>> = {
+      success: false,
+      message: 'Skipped backend atomic registration for unauthenticated signup flow.',
+      fallbackToLocal: true
+    };
 
-    if (!backendRegistration.success && !backendRegistration.fallbackToLocal) {
+    if (canAttemptBackendAtomicRegistration) {
+      backendRegistration = await submitV2AtomicRegistration({
+        ...userData,
+        phone: normalizedPhone,
+        sponsorId: sponsor?.userId || sponsorId,
+        pinCode: normalizedPinCode
+      });
+    }
+
+    if (canAttemptBackendAtomicRegistration && !backendRegistration.success && !backendRegistration.fallbackToLocal) {
       const shouldTryRecovery =
         backendRegistration.code === 'PIN_ALREADY_USED'
         || /failed to fetch|networkerror|network request error|load failed|fetch failed/i.test(String(backendRegistration.message || ''));
