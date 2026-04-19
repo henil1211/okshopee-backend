@@ -1821,7 +1821,7 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
   const [lockedReceiveRows] = await executeV2ReadWithRetry(
     () => pool.execute(
       `SELECT
-         CONCAT('lock_', pc.id) AS ledger_entry_id,
+         CONCAT('lock_recv_', pc.id) AS ledger_entry_id,
          'locked_income' AS wallet_type,
          'credit' AS entry_side,
          pc.amount_cents,
@@ -1829,7 +1829,15 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
          lt.tx_uuid,
          lt.tx_type,
          lt.status AS ledger_status,
-         lt.description,
+         CASE
+           WHEN pc.reason = 'locked_for_give'
+             THEN CONCAT('Locked first-two help level ', pc.level_no, ' from ', src.user_code)
+           WHEN pc.reason = 'locked_for_qualification'
+             THEN CONCAT('Locked receive help level ', pc.level_no, ' from ', src.user_code)
+           WHEN pc.reason = 'safety_pool_diversion'
+             THEN CONCAT('Safety-pool diverted help level ', pc.level_no, ' from ', src.user_code)
+           ELSE CONCAT('Received help level ', pc.level_no, ' from ', src.user_code)
+         END AS description,
          lt.reference_id,
          lt.created_at,
          lt.posted_at,
@@ -1853,9 +1861,45 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
     'read_v2_locked_help_receives'
   );
 
+  const [lockedGiveRows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT
+         CONCAT('lock_give_', pc.id) AS ledger_entry_id,
+         'locked_income' AS wallet_type,
+         'debit' AS entry_side,
+         pc.amount_cents,
+         lt.id AS ledger_txn_id,
+         lt.tx_uuid,
+         lt.tx_type,
+         lt.status AS ledger_status,
+         CONCAT('Auto give help level ', pc.level_no, ' from locked income to ', ben.user_code) AS description,
+         lt.reference_id,
+         lt.created_at,
+         lt.posted_at,
+         ben.user_code AS counterparty_user_code
+       FROM v2_help_pending_contributions pc
+       INNER JOIN v2_ledger_transactions lt ON lt.id = pc.processed_txn_id
+       INNER JOIN v2_users ben ON ben.id = pc.beneficiary_user_id
+       LEFT JOIN v2_ledger_entries src_le
+         ON src_le.ledger_txn_id = pc.processed_txn_id
+        AND src_le.user_id = pc.source_user_id
+        AND src_le.entry_side = 'debit'
+       WHERE pc.source_user_id = ?
+         AND pc.level_no > 1
+         AND pc.status = 'processed'
+         AND pc.processed_txn_id IS NOT NULL
+         AND src_le.id IS NULL
+       ORDER BY lt.id DESC, pc.id DESC
+       LIMIT ?`,
+      [userId, safeLimit]
+    ),
+    'read_v2_locked_help_gives'
+  );
+
   const rows = [
     ...(Array.isArray(walletRows) ? walletRows : []),
-    ...(Array.isArray(lockedReceiveRows) ? lockedReceiveRows : [])
+    ...(Array.isArray(lockedReceiveRows) ? lockedReceiveRows : []),
+    ...(Array.isArray(lockedGiveRows) ? lockedGiveRows : [])
   ]
     .sort((left, right) => {
       const rightTs = right?.posted_at ? new Date(right.posted_at).getTime() : new Date(right?.created_at || 0).getTime();

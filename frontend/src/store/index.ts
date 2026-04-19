@@ -214,7 +214,16 @@ function mapV2ReadTypeToTransactionType(
   if (normalizedTxType === 'referral_credit') {
     if (normalizedWalletType === 'locked_income' && signedAmountCents >= 0) return 'receive_help';
     if (normalizedDescription.includes('help') && signedAmountCents >= 0) return 'receive_help';
-    if (normalizedDescription.includes('from locked income') && signedAmountCents < 0) return 'give_help';
+    if (
+      signedAmountCents < 0
+      && (
+        normalizedWalletType === 'locked_income'
+        || normalizedDescription.includes('from locked income')
+        || normalizedDescription.includes('give help')
+      )
+    ) {
+      return 'give_help';
+    }
     return signedAmountCents >= 0 ? 'direct_income' : 'income_transfer';
   }
   if (normalizedTxType === 'admin_adjustment') {
@@ -262,6 +271,8 @@ function buildV2DisplayDescription(params: {
   const counterpartyUserCode = String(params.counterpartyUserCode || '').trim();
   const counterpartyLabel = resolveUserLabelFromCode(counterpartyUserCode);
   const normalizedRawDescription = String(params.rawDescription || '').trim();
+  const helpLevelMatch = normalizedRawDescription.match(/\blevel\s+(\d+)\b/i);
+  const helpLevelText = helpLevelMatch ? ` level ${helpLevelMatch[1]}` : '';
 
   if (txType === 'fund_transfer' && counterpartyLabel) {
     const direction = params.signedAmountCents < 0 ? 'to' : 'from';
@@ -271,6 +282,25 @@ function buildV2DisplayDescription(params: {
         ? 'Royalty wallet'
         : 'Fund wallet';
     return `${walletLabel} transfer ${direction} ${counterpartyLabel}`;
+  }
+
+  if (txType === 'referral_credit' && /help/i.test(normalizedRawDescription) && counterpartyLabel) {
+    if (params.signedAmountCents >= 0) {
+      if (/locked\s+first-two\s+help/i.test(normalizedRawDescription)) {
+        return `Locked first-two help${helpLevelText} from ${counterpartyLabel}`;
+      }
+      if (/locked\s+receive\s+help/i.test(normalizedRawDescription)) {
+        return `Locked receive help${helpLevelText} from ${counterpartyLabel}`;
+      }
+      return `Received help${helpLevelText} from ${counterpartyLabel}`;
+    }
+
+    if (params.signedAmountCents < 0) {
+      if (/from\s+locked\s+income/i.test(normalizedRawDescription)) {
+        return `Auto give help${helpLevelText} from locked income to ${counterpartyLabel}`;
+      }
+      return `Give help${helpLevelText} to ${counterpartyLabel}`;
+    }
   }
 
   if (txType === 'referral_credit' && params.signedAmountCents >= 0 && counterpartyLabel) {
