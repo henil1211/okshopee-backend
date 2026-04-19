@@ -29,6 +29,62 @@ function normalizeUserCode(value) {
   return /^[a-zA-Z0-9_-]{3,20}$/.test(normalized) ? normalized : '';
 }
 
+function safeParseJson(value, fallback) {
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed == null ? fallback : parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+async function resolveParentUserCode(connection, sourceUserCode) {
+  const [matrixRows] = await connection.execute(
+    `SELECT parent_user_code
+     FROM v2_matrix_nodes
+     WHERE user_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [sourceUserCode]
+  );
+  const directParent = normalizeUserCode(
+    Array.isArray(matrixRows) && matrixRows[0] ? matrixRows[0].parent_user_code : ''
+  );
+  if (directParent) {
+    return {
+      parentUserCode: directParent,
+      resolvedFrom: 'v2_matrix_nodes'
+    };
+  }
+
+  const [stateRows] = await connection.execute(
+    `SELECT state_value
+     FROM state_store
+     WHERE state_key = 'mlm_matrix'
+     LIMIT 1
+     FOR UPDATE`
+  );
+  const matrixRaw = Array.isArray(stateRows) && stateRows[0] ? stateRows[0].state_value : null;
+  const matrix = safeParseJson(matrixRaw, []);
+
+  if (Array.isArray(matrix) && matrix.length > 0) {
+    const node = matrix.find((candidate) => normalizeUserCode(candidate?.userId) === sourceUserCode);
+    const legacyParent = normalizeUserCode(node?.parentId);
+    if (legacyParent) {
+      return {
+        parentUserCode: legacyParent,
+        resolvedFrom: 'legacy_matrix_state'
+      };
+    }
+  }
+
+  return {
+    parentUserCode: '',
+    resolvedFrom: 'unresolved'
+  };
+}
+
 function usageAndExit() {
   console.log('Usage:');
   console.log('  node scripts/repair-v2-immediate-give-help.js --source-user-code 7497863 --dry-run');
@@ -258,17 +314,13 @@ async function main() {
       return;
     }
 
-    const [matrixRows] = await connection.execute(
-      `SELECT parent_user_code
-       FROM v2_matrix_nodes
-       WHERE user_code = ?
-       LIMIT 1
-       FOR UPDATE`,
-      [sourceUserCode]
-    );
-    const parentUserCode = String(Array.isArray(matrixRows) && matrixRows[0] ? matrixRows[0].parent_user_code || '' : '').trim();
+    const parentResolution = await resolveParentUserCode(connection, sourceUserCode);
+    const parentUserCode = parentResolution.parentUserCode;
     if (!parentUserCode) {
-      throw new Error(`Parent user code missing in v2_matrix_nodes for ${sourceUserCode}`);
+      throw new Error(`Parent user code unresolved for ${sourceUserCode} (checked v2_matrix_nodes and legacy matrix state)`);
+    }
+    if (parentResolution.resolvedFrom !== 'v2_matrix_nodes') {
+      summary.notes.push(`Parent resolved from ${parentResolution.resolvedFrom}: ${parentUserCode}`);
     }
 
     const [beneficiaryRows] = await connection.execute(
