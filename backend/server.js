@@ -1723,7 +1723,7 @@ async function resolveV2UserForReadByCode(userCode) {
   };
 }
 
-async function readV2WalletSnapshotByUserId(userId) {
+async function readV2WalletSnapshotByUserId(userId, userCode = null) {
   const [walletRows] = await executeV2ReadWithRetry(
     () => pool.execute(
       `SELECT wallet_type, current_amount_cents, updated_at
@@ -1856,22 +1856,28 @@ async function readV2WalletSnapshotByUserId(userId) {
   const syntheticLockedReceiveCents = Number.isFinite(Number(syntheticLockedReceiveRow?.locked_receive_cents))
     ? Math.trunc(Number(syntheticLockedReceiveRow.locked_receive_cents))
     : 0;
+  const legacyIncomeMetrics = await readLegacyIncomeMetricsByUserCodeWithPool(userCode);
+  const legacyLockedIncomeCents = Number(legacyIncomeMetrics.lockedIncomeCents || 0);
+  const legacyTotalReceivedCents = Number(legacyIncomeMetrics.totalReceivedCents || 0);
+  const legacyTotalGivenCents = Number(legacyIncomeMetrics.totalGivenCents || 0);
   const effectiveLockedForQualificationCents = Math.max(0, Math.max(lockedForQualificationCents, syntheticLockedReceiveCents));
   const lockedForGiveCents = Math.max(0, pendingGiveCents);
+  const v2LockedTotalCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
+  const effectiveLockedTotalCents = Math.max(v2LockedTotalCents, Math.max(0, legacyLockedIncomeCents));
 
   return {
     balancesCents,
     updatedAt: latestUpdatedAt,
     lockedBreakdownCents: {
-      totalLockedIncome: Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents),
+      totalLockedIncome: effectiveLockedTotalCents,
       lockedForGive: Math.max(0, lockedForGiveCents),
       lockedForQualification: Math.max(0, effectiveLockedForQualificationCents),
       pendingGive: Math.max(0, pendingGiveCents),
       lockedFirstTwoLifetime: Math.max(0, lockedFirstTwoLifetimeCents)
     },
     lifetimeTotalsCents: {
-      totalReceived: Math.max(0, totalReceivedFromLedgerCents + syntheticLockedReceiveCents),
-      totalGiven: Math.max(0, totalGivenFromLedgerCents)
+      totalReceived: Math.max(0, Math.max(totalReceivedFromLedgerCents + syntheticLockedReceiveCents, legacyTotalReceivedCents)),
+      totalGiven: Math.max(0, Math.max(totalGivenFromLedgerCents, legacyTotalGivenCents))
     }
   };
 }
@@ -2076,7 +2082,127 @@ async function readV2PinsByUserId(userId, limit = 300) {
   });
 }
 
-async function readV2LockedIncomeSnapshotForMutation(connection, userId) {
+function computeLegacyIncomeMetricsFromStateRows(stateRows, normalizedUserCode) {
+  if (!isValidV2UserCode(normalizedUserCode)) {
+    return {
+      lockedIncomeCents: 0,
+      totalReceivedCents: 0,
+      totalGivenCents: 0
+    };
+  }
+
+  const stateMap = new Map();
+  for (const row of Array.isArray(stateRows) ? stateRows : []) {
+    stateMap.set(String(row?.state_key || ''), row?.state_value);
+  }
+
+  const usersParsed = safeParseJSON(stateMap.get('mlm_users'));
+  const txParsed = safeParseJSON(stateMap.get('mlm_transactions'));
+  const users = Array.isArray(usersParsed) ? usersParsed : [];
+  const txs = Array.isArray(txParsed) ? txParsed : [];
+
+  const matchingLegacyUserIds = new Set(
+    users
+      .filter((user) => normalizeV2UserCode(user?.userId) === normalizedUserCode)
+      .map((user) => String(user?.id || '').trim())
+      .filter(Boolean)
+  );
+
+  let lockedIncomeCents = 0;
+  let totalReceivedCents = 0;
+  let totalGivenCents = 0;
+
+  for (const tx of txs) {
+    const txUserId = String(tx?.userId || '').trim();
+    if (!txUserId) continue;
+    if (txUserId !== normalizedUserCode && !matchingLegacyUserIds.has(txUserId)) continue;
+
+    const txType = String(tx?.type || '').toLowerCase();
+    const txDesc = String(tx?.description || '').toLowerCase();
+    const amount = Number(tx?.amount ?? 0);
+    const displayAmount = Number(tx?.displayAmount ?? tx?.amount ?? 0);
+    const amountCents = Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+    const displayAmountCents = Number.isFinite(displayAmount) ? Math.round(displayAmount * 100) : amountCents;
+
+    if (txType === 'receive_help') {
+      if (txDesc.startsWith('released locked receive help')) {
+        lockedIncomeCents = Math.max(0, lockedIncomeCents - Math.abs(displayAmountCents));
+      } else if (txDesc.includes('locked first-two help') || txDesc.includes('locked receive help')) {
+        lockedIncomeCents += Math.abs(displayAmountCents);
+      }
+    } else if (txType === 'give_help' && txDesc.includes('from locked income')) {
+      lockedIncomeCents = Math.max(0, lockedIncomeCents - Math.abs(amountCents));
+    }
+
+    const isNonEarningCreditType = txType === 'activation'
+      || txType === 'income_transfer'
+      || txType === 'royalty_transfer'
+      || txType === 'pin_used'
+      || txType === 'pin_purchase'
+      || txType === 'pin_transfer'
+      || txType === 'deposit'
+      || txType === 'p2p_transfer'
+      || txType === 'reentry';
+    const isIncomeWalletAdminCredit = txType !== 'admin_credit' || txDesc.includes('income wallet');
+    const lifetimeCreditCents = txType === 'receive_help' ? Math.abs(displayAmountCents) : amountCents;
+    if (lifetimeCreditCents > 0 && !isNonEarningCreditType && isIncomeWalletAdminCredit) {
+      totalReceivedCents += lifetimeCreditCents;
+    }
+
+    if (amountCents < 0) {
+      totalGivenCents += Math.abs(amountCents);
+    }
+  }
+
+  return {
+    lockedIncomeCents: Math.max(0, lockedIncomeCents),
+    totalReceivedCents: Math.max(0, totalReceivedCents),
+    totalGivenCents: Math.max(0, totalGivenCents)
+  };
+}
+
+async function readLegacyIncomeMetricsByUserCodeWithPool(userCode) {
+  const normalizedUserCode = normalizeV2UserCode(userCode);
+  if (!isValidV2UserCode(normalizedUserCode)) {
+    return {
+      lockedIncomeCents: 0,
+      totalReceivedCents: 0,
+      totalGivenCents: 0
+    };
+  }
+
+  const [rows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT state_key, state_value
+       FROM state_store
+       WHERE state_key IN ('mlm_users', 'mlm_transactions')`
+    ),
+    'read_legacy_income_metrics_state'
+  );
+
+  return computeLegacyIncomeMetricsFromStateRows(rows, normalizedUserCode);
+}
+
+async function readLegacyIncomeMetricsByUserCodeWithConnection(connection, userCode) {
+  const normalizedUserCode = normalizeV2UserCode(userCode);
+  if (!isValidV2UserCode(normalizedUserCode)) {
+    return {
+      lockedIncomeCents: 0,
+      totalReceivedCents: 0,
+      totalGivenCents: 0
+    };
+  }
+
+  const [rows] = await connection.execute(
+    `SELECT state_key, state_value
+     FROM state_store
+     WHERE state_key IN ('mlm_users', 'mlm_transactions')`
+  );
+
+  return computeLegacyIncomeMetricsFromStateRows(rows, normalizedUserCode);
+}
+
+async function readV2LockedIncomeSnapshotForMutation(connection, userId, userCode = null) {
   const [lockRows] = await connection.execute(
     `SELECT
        COALESCE(SUM(locked_qualification_cents), 0) AS locked_qualification_cents,
@@ -2121,7 +2247,10 @@ async function readV2LockedIncomeSnapshotForMutation(connection, userId) {
 
   const effectiveLockedForQualificationCents = Math.max(0, Math.max(lockedForQualificationCents, syntheticLockedReceiveCents));
   const lockedForGiveCents = Math.max(0, pendingGiveCents);
-  const totalLockedIncomeCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
+  const v2LockedIncomeCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
+  const legacyIncomeMetrics = await readLegacyIncomeMetricsByUserCodeWithConnection(connection, userCode);
+  const legacyLockedIncomeCents = Number(legacyIncomeMetrics.lockedIncomeCents || 0);
+  const totalLockedIncomeCents = Math.max(v2LockedIncomeCents, Math.max(0, legacyLockedIncomeCents));
 
   return {
     lockedForQualificationCents: effectiveLockedForQualificationCents,
@@ -2270,7 +2399,7 @@ async function processV2FundTransfer({
       throw createApiError(403, 'Sender or receiver account is not active', 'USER_NOT_ACTIVE');
     }
     if (sourceWallet === 'income') {
-      const incomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, senderWallet.user_id);
+      const incomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, senderWallet.user_id, senderWallet.user_code);
       const spendableIncomeCents = Math.max(0, Number(senderWallet.current_amount_cents) - incomeLockSnapshot.totalLockedIncomeCents);
       if (spendableIncomeCents < amountCents) {
         throw createApiError(
@@ -2542,7 +2671,7 @@ async function processV2WithdrawalDebit({
     if (actorIncomeWallet.user_status !== 'active' && !allowInactiveActor) {
       throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
     }
-    const actorIncomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, actorIncomeWallet.user_id);
+    const actorIncomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, actorIncomeWallet.user_id, actorUserCode);
     const actorSpendableIncomeCents = Math.max(0, Number(actorIncomeWallet.current_amount_cents) - actorIncomeLockSnapshot.totalLockedIncomeCents);
     if (actorSpendableIncomeCents < amountCents) {
       throw createApiError(409, 'Insufficient spendable income wallet balance (some amount is locked)', 'INSUFFICIENT_FUNDS');
@@ -5176,7 +5305,7 @@ async function processV2AdminAdjustment({
       }
     } else {
       if (walletType === 'income') {
-        const targetIncomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, targetWallet.user_id);
+        const targetIncomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, targetWallet.user_id, targetUserCode);
         const targetSpendableIncomeCents = Math.max(0, Number(targetWallet.current_amount_cents) - targetIncomeLockSnapshot.totalLockedIncomeCents);
         if (targetSpendableIncomeCents < amountCents) {
           throw createApiError(
@@ -6492,7 +6621,7 @@ const server = createServer(async (req, res) => {
       }
 
       const user = await resolveV2UserForReadByCode(requestedUserCode);
-      const walletSnapshot = await readV2WalletSnapshotByUserId(user.userId);
+      const walletSnapshot = await readV2WalletSnapshotByUserId(user.userId, user.userCode);
 
       sendJson(res, 200, {
         ok: true,
