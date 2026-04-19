@@ -5340,6 +5340,64 @@ async function getStateSnapshotCached(options = {}) {
 
 // ─── Authentication ──────────────────────────────────────────────────
 
+function toEpochMs(value) {
+  if (!value) return 0;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function resolveLoginUserCandidate(usersData, normalizedUserId, normalizedPassword) {
+  if (!Array.isArray(usersData)) {
+    return { user: null, index: -1 };
+  }
+
+  const candidates = [];
+  for (let i = 0; i < usersData.length; i += 1) {
+    const item = usersData[i];
+    if (!item || item.userId !== normalizedUserId) continue;
+    candidates.push({ user: item, index: i });
+  }
+
+  if (candidates.length === 0) {
+    return { user: null, index: -1 };
+  }
+
+  const passwordMatches = candidates.filter(({ user }) => String(user.password || '') === normalizedPassword);
+  const pool = passwordMatches.length > 0 ? passwordMatches : candidates;
+
+  const ranked = pool
+    .map((entry) => {
+      const user = entry.user;
+      const isActiveRank = user.isActive ? 1 : 0;
+      const isBlockedRank = (user.accountStatus === 'permanent_blocked' || user.accountStatus === 'temp_blocked') ? 0 : 1;
+      const activeStatusRank = (user.accountStatus === 'active' || !user.accountStatus) ? 1 : 0;
+      const reactivatedTs = toEpochMs(user.reactivatedAt);
+      const activatedTs = toEpochMs(user.activatedAt);
+      const createdTs = toEpochMs(user.createdAt);
+      const newestTs = Math.max(reactivatedTs, activatedTs, createdTs);
+      return {
+        ...entry,
+        isActiveRank,
+        isBlockedRank,
+        activeStatusRank,
+        newestTs
+      };
+    })
+    .sort((a, b) => {
+      if (b.isActiveRank !== a.isActiveRank) return b.isActiveRank - a.isActiveRank;
+      if (b.isBlockedRank !== a.isBlockedRank) return b.isBlockedRank - a.isBlockedRank;
+      if (b.activeStatusRank !== a.activeStatusRank) return b.activeStatusRank - a.activeStatusRank;
+      if (b.newestTs !== a.newestTs) return b.newestTs - a.newestTs;
+      return b.index - a.index;
+    });
+
+  const winner = ranked[0] || null;
+  return {
+    user: winner ? winner.user : null,
+    index: winner ? winner.index : -1
+  };
+}
+
 async function authenticateUser(userId, password) {
   const normalizedUserId = typeof userId === 'string' ? userId.trim() : '';
   const normalizedPassword = typeof password === 'string' ? password : '';
@@ -5348,6 +5406,7 @@ async function authenticateUser(userId, password) {
   }
 
   let usersData = null;
+  let selectedUserIndex = -1;
 
   // Try in-memory cache first
   let user = null;
@@ -5355,11 +5414,14 @@ async function authenticateUser(userId, password) {
     try {
       usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
       if (Array.isArray(usersData)) {
-        user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+        const resolved = resolveLoginUserCandidate(usersData, normalizedUserId, normalizedPassword);
+        user = resolved.user;
+        selectedUserIndex = resolved.index;
       }
     } catch {
       user = null;
       usersData = null;
+      selectedUserIndex = -1;
     }
   }
 
@@ -5370,7 +5432,9 @@ async function authenticateUser(userId, password) {
     try {
       usersData = JSON.parse(usersRaw);
       if (Array.isArray(usersData)) {
-        user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+        const resolved = resolveLoginUserCandidate(usersData, normalizedUserId, normalizedPassword);
+        user = resolved.user;
+        selectedUserIndex = resolved.index;
       }
     } catch {
       return { ok: false, status: 500, error: 'Failed to parse user data' };
@@ -5438,7 +5502,9 @@ async function authenticateUser(userId, password) {
           user = updatedUser;
 
           if (Array.isArray(usersData)) {
-            const index = usersData.findIndex((item) => item && (item.id === updatedUser.id || item.userId === updatedUser.userId));
+            const index = (selectedUserIndex >= 0 && usersData[selectedUserIndex] && usersData[selectedUserIndex].userId === updatedUser.userId)
+              ? selectedUserIndex
+              : usersData.findIndex((item) => item && item.id === updatedUser.id);
             if (index >= 0) {
               usersData[index] = updatedUser;
               await writeStateToDB({ mlm_users: JSON.stringify(usersData) }, false);
