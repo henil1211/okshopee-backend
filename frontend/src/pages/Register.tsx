@@ -367,24 +367,21 @@ export default function Register() {
       return;
     }
 
-    if (formData.pinCode.length === 7) {
-      setIsPinChecking(true);
-      await refreshPinsForCode(formData.pinCode);
-      const latestPin = Database.getPinByCode(formData.pinCode);
-      setIsPinChecking(false);
-      if (!latestPin || latestPin.status !== 'unused') {
-        setError('Invalid or already used PIN');
-        return;
-      }
-    }
-
-    if (submitInFlightRef.current || isLoading) {
-      return;
-    }
     submitInFlightRef.current = true;
     setIsLoading(true);
 
     try {
+      if (formData.pinCode.length === 7) {
+        setIsPinChecking(true);
+        await refreshPinsForCode(formData.pinCode);
+        const latestPin = Database.getPinByCode(formData.pinCode);
+        setIsPinChecking(false);
+        if (!latestPin || latestPin.status !== 'unused') {
+          setError('Invalid or already used PIN');
+          return;
+        }
+      }
+
       const result = await register({
         fullName: formData.fullName,
         email: formData.email,

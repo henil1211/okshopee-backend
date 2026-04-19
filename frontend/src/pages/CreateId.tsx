@@ -373,24 +373,21 @@ export default function CreateId() {
       return;
     }
 
-    if (formData.pinCode) {
-      setIsPinChecking(true);
-      await refreshPins();
-      const stillUnused = isPinCurrentlyUnused(formData.pinCode);
-      setIsPinChecking(false);
-      if (!stillUnused) {
-        setError('Selected PIN is no longer available');
-        return;
-      }
-    }
-
-    if (submitInFlightRef.current || isLoading) {
-      return;
-    }
     submitInFlightRef.current = true;
     setIsLoading(true);
 
     try {
+      if (formData.pinCode) {
+        setIsPinChecking(true);
+        await refreshPins();
+        const stillUnused = isPinCurrentlyUnused(formData.pinCode);
+        setIsPinChecking(false);
+        if (!stillUnused) {
+          setError('Selected PIN is no longer available');
+          return;
+        }
+      }
+
       const result = await register({
         fullName: formData.fullName,
         email: formData.email,
