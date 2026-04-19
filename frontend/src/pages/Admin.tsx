@@ -1255,26 +1255,6 @@ export default function Admin() {
     return remHours > 0 ? `${totalDays}d ${remHours}h` : `${totalDays}d`;
   }, []);
 
-  const getRetryQueueStatusBadgeClass = useCallback((status: string): string => {
-    const normalized = String(status || '').trim().toLowerCase();
-    if (normalized === 'completed') return 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30';
-    if (normalized === 'processing') return 'bg-sky-500/20 text-sky-300 border-sky-400/30';
-    if (normalized === 'failed') return 'bg-rose-500/20 text-rose-300 border-rose-400/30';
-    return 'bg-amber-500/20 text-amber-300 border-amber-400/30';
-  }, []);
-
-  const formatNextAttemptLabel = useCallback((nextAttemptAt: string | null): string => {
-    if (!nextAttemptAt) return '-';
-    const parsedMs = new Date(nextAttemptAt).getTime();
-    if (!Number.isFinite(parsedMs)) return '-';
-
-    const deltaMs = parsedMs - Date.now();
-    const relativeLabel = deltaMs <= 0
-      ? 'due now'
-      : `in ${formatAgeLabel(deltaMs)}`;
-    return `${formatDate(nextAttemptAt)} (${relativeLabel})`;
-  }, [formatAgeLabel]);
-
   const helpFlowDebugEntries = searchedUser
     ? Database.getHelpFlowDebugForUser(searchedUser.id, helpFlowView, 50 + helpFlowDebugTick * 0)
     : [];
@@ -5162,96 +5142,14 @@ export default function Admin() {
                     <Badge className={retryQueueStatus.pendingCount > 0 ? 'bg-amber-500/20 text-amber-300 border-amber-400/30' : 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'}>
                       {retryQueueStatus.pendingCount > 0 ? 'Pending' : 'Clear'}
                     </Badge>
-                    <Badge className={retryQueueStatus.source === 'backend' ? 'bg-sky-500/20 text-sky-300 border-sky-400/30' : 'bg-white/10 text-white/70 border-white/20'}>
-                      {retryQueueStatus.source === 'backend' ? 'Backend Queue' : 'Local Fallback'}
-                    </Badge>
                   </div>
                   <p className="text-xl sm:text-2xl font-bold text-white">{formatNumber(retryQueueStatus.pendingCount)}</p>
                   <p className="text-xs text-white/60 truncate">Oldest pending: {formatAgeLabel(retryQueueStatus.oldestPendingAgeMs)}</p>
-                  {retryQueueStatus.items.length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      {retryQueueStatus.items.slice(0, 3).map((item) => {
-                        const userLabel = item.registrationUserName
-                          ? `${item.registrationUserName} (${item.registrationUserCode})`
-                          : item.registrationUserCode || '-';
-                        return (
-                          <p key={`${item.taskKey}_${item.id}`} className="text-xs text-white/70 truncate">
-                            {userLabel}
-                          </p>
-                        );
-                      })}
-                    </div>
-                  )}
                 </div>
               </div>
             </CardContent>
           </Card>
         </div>
-
-        <Card className="glass border-white/10 mb-6 sm:mb-8">
-          <CardHeader>
-            <CardTitle className="text-white flex items-center justify-between gap-3">
-              <span className="flex items-center gap-2">
-                <Clock className="w-5 h-5 text-amber-300" />
-                Registration Retry Queue
-              </span>
-              <Badge className={retryQueueStatus.source === 'backend' ? 'bg-sky-500/20 text-sky-300 border-sky-400/30' : 'bg-white/10 text-white/70 border-white/20'}>
-                {retryQueueStatus.source === 'backend' ? 'Backend Queue' : 'Local Fallback'}
-              </Badge>
-            </CardTitle>
-            <p className="text-sm text-white/60">
-              Showing {formatNumber(retryQueueStatus.items.length)} queued tasks. Oldest pending: {formatAgeLabel(retryQueueStatus.oldestPendingAgeMs)}.
-            </p>
-          </CardHeader>
-          <CardContent>
-            {retryQueueStatus.items.length === 0 ? (
-              <p className="text-sm text-emerald-300">No queued registration retry tasks right now.</p>
-            ) : (
-              <div className="overflow-x-auto admin-table-scroll">
-                <table className="w-full admin-table">
-                  <thead>
-                    <tr className="border-b border-white/10">
-                      <th className="text-left py-3 px-4 text-white/60 font-medium">User</th>
-                      <th className="text-left py-3 px-4 text-white/60 font-medium">Task</th>
-                      <th className="text-left py-3 px-4 text-white/60 font-medium">Status</th>
-                      <th className="text-left py-3 px-4 text-white/60 font-medium">Attempts</th>
-                      <th className="text-left py-3 px-4 text-white/60 font-medium">Next Attempt</th>
-                      <th className="text-left py-3 px-4 text-white/60 font-medium">Last Error</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {retryQueueStatus.items.map((item) => {
-                      const registrationLabel = item.registrationUserName
-                        ? `${item.registrationUserName} (${item.registrationUserCode})`
-                        : item.registrationUserCode || '-';
-                      const attemptsLabel = item.maxAttempts > 0
-                        ? `${formatNumber(item.attempts)}/${formatNumber(item.maxAttempts)}`
-                        : `${formatNumber(item.attempts)}`;
-                      const taskLabel = item.taskType === 'help_event' ? 'Help Event' : 'Referral Credit';
-
-                      return (
-                        <tr key={`${item.taskKey}_${item.id}`} className="border-b border-white/5 hover:bg-white/5">
-                          <td className="py-3 px-4 text-white/80">{registrationLabel}</td>
-                          <td className="py-3 px-4 text-white/70">{taskLabel}</td>
-                          <td className="py-3 px-4">
-                            <Badge className={getRetryQueueStatusBadgeClass(item.status)}>
-                              {item.status}
-                            </Badge>
-                          </td>
-                          <td className="py-3 px-4 text-white/70">{attemptsLabel}</td>
-                          <td className="py-3 px-4 text-white/70">{formatNextAttemptLabel(item.nextAttemptAt)}</td>
-                          <td className="py-3 px-4 text-white/70 max-w-[320px] truncate" title={item.lastError || ''}>
-                            {item.lastError || '-'}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </CardContent>
-        </Card>
 
         {missingMatrixUsersReport && (
           <Card className="glass border-white/10 mb-6 sm:mb-8">
