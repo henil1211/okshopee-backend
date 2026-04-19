@@ -71,6 +71,14 @@ function normalizeV2ApiErrorMessage(status: number, payload: Record<string, unkn
 
 const V2_TRANSFER_SYNC_REQUIRED_MESSAGE = 'Live V2 sync is unavailable. Transfer data may be stale. Please refresh and try again.';
 
+export function computeSpendableIncomeBalance(wallet?: Pick<Wallet, 'incomeWallet' | 'giveHelpLocked' | 'lockedIncomeWallet'> | null): number {
+  const incomeBalance = Number(wallet?.incomeWallet || 0);
+  const giveHelpLocked = Number(wallet?.giveHelpLocked || 0);
+  const lockedReceiveHelp = Number(wallet?.lockedIncomeWallet || 0);
+  const effectiveLocked = Math.max(giveHelpLocked, lockedReceiveHelp);
+  return Math.max(0, incomeBalance - effectiveLocked);
+}
+
 function resolveV2BearerTokenOrError(subjectUser: User): { token: string } | { message: string } {
   const savedAuthSession = Database.getV2AuthSession();
   const signedAccessToken = String(savedAuthSession?.accessToken || '').trim();
@@ -2865,7 +2873,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     const sourceWalletBalance = sourceWallet === 'income'
-      ? Number(strictSnapshot.wallet.incomeWallet || 0)
+      ? computeSpendableIncomeBalance(strictSnapshot.wallet)
       : Number(strictSnapshot.wallet.depositWallet || 0);
     if (sourceWalletBalance < amount) {
       return {
@@ -2997,7 +3005,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       const resolvedPayoutQrCode = String(payoutQrCode || '').trim();
 
       // Use income wallet for withdrawals
-      const availableWithdrawableBalance = Math.max(0, wallet.incomeWallet - (wallet.giveHelpLocked || 0));
+      const availableWithdrawableBalance = computeSpendableIncomeBalance(wallet);
       if (availableWithdrawableBalance < amount) {
         return { success: false, message: 'Insufficient withdrawable balance (some amount is locked for give-help)' };
       }

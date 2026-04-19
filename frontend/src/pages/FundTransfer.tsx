@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowUpRight, Eye, EyeOff, LogOut, RefreshCw, Shield, Wallet } from 'lucide-react';
 
-import { useAuthStore, useWalletStore, useOtpStore, useSyncRefreshKey } from '@/store';
+import { useAuthStore, useWalletStore, useOtpStore, useSyncRefreshKey, computeSpendableIncomeBalance } from '@/store';
 import Database from '@/db';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -46,7 +46,7 @@ export default function FundTransfer() {
       ? 'Royalty Wallet'
       : 'Fund Wallet';
   const topWalletAmount = transferData.source === 'income'
-    ? formatCurrency(wallet?.incomeWallet || 0)
+    ? formatCurrency(computeSpendableIncomeBalance(wallet))
     : transferData.source === 'royalty'
       ? formatCurrency(wallet?.royaltyWallet || 0)
       : formatCurrency(wallet?.depositWallet || 0);
@@ -365,7 +365,7 @@ export default function FundTransfer() {
 
             <div className="rounded-lg border border-white/10 bg-[#1f2937] p-3">
               <p className="text-sm text-white/60">Available Fund Wallet Balance: {formatCurrency(wallet?.depositWallet || 0)}</p>
-              <p className="text-sm text-white/60">Available Income Wallet Balance: {formatCurrency(wallet?.incomeWallet || 0)}</p>
+              <p className="text-sm text-white/60">Available Income Wallet Balance: {formatCurrency(computeSpendableIncomeBalance(wallet))}</p>
               <p className="text-sm text-white/60">Available Royalty Wallet Balance: {formatCurrency(wallet?.royaltyWallet || 0)}</p>
             </div>
 

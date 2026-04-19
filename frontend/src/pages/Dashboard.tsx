@@ -1,5 +1,5 @@
 ﻿import { useEffect, useState, useRef, useMemo } from 'react';
-import { useAuthStore, useWalletStore, useMatrixStore, useOtpStore, useSyncRefreshKey, useNotificationStore } from '@/store';
+import { useAuthStore, useWalletStore, useMatrixStore, useOtpStore, useSyncRefreshKey, useNotificationStore, computeSpendableIncomeBalance } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -81,6 +81,8 @@ export default function Dashboard() {
     if (!activeUser) return null;
     return Database.getUserByUserId(activeUser.userId) || Database.getUserById(activeUser.id) || activeUser;
   }, [impersonatedUser, user]);
+  const spendableIncomeBalance = useMemo(() => computeSpendableIncomeBalance(wallet), [wallet]);
+
   useEffect(() => {
     if (!isAuthenticated) {
       navigate('/login');
@@ -732,7 +734,7 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="pt-0 flex-1 flex flex-col justify-start">
-              <p className="text-3xl font-bold text-white">{showCurrency(wallet?.incomeWallet)}</p>
+              <p className="text-3xl font-bold text-white">{showCurrency(spendableIncomeBalance)}</p>
               <p className="text-xs text-white/50 mt-1">Available amount for withdrawal and P2P Transfers.</p>
             </CardContent>
           </Card>
