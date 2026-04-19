@@ -129,13 +129,24 @@ async function main() {
          pc.processed_at,
          pc.processed_txn_id,
          COALESCE(ss.pending_give_cents, 0) AS source_pending_give_cents,
-         lt.id AS ledger_txn_exists
+         lt.id AS ledger_txn_exists,
+         lt.description AS ledger_description,
+         COALESCE(le.income_wallet_credit_cents, 0) AS income_wallet_credit_cents,
+         COALESCE(le.income_wallet_entry_count, 0) AS income_wallet_entry_count
        FROM v2_help_pending_contributions pc
        INNER JOIN v2_users src ON src.id = pc.source_user_id
        INNER JOIN v2_users ben ON ben.id = pc.beneficiary_user_id
        LEFT JOIN v2_help_level_state ss
          ON ss.user_id = pc.source_user_id AND ss.level_no = pc.level_no
        LEFT JOIN v2_ledger_transactions lt ON lt.id = pc.processed_txn_id
+       LEFT JOIN (
+         SELECT
+           ledger_txn_id,
+           COALESCE(SUM(CASE WHEN wallet_type = 'income' THEN amount_cents ELSE 0 END), 0) AS income_wallet_credit_cents,
+           COALESCE(SUM(CASE WHEN wallet_type = 'income' AND user_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS income_wallet_entry_count
+         FROM v2_ledger_entries
+         GROUP BY ledger_txn_id
+       ) le ON le.ledger_txn_id = pc.processed_txn_id
        WHERE 1 = 1${contribFilter.clause}
        ORDER BY pc.id DESC
        LIMIT ?`,
@@ -172,6 +183,8 @@ async function main() {
     const pendingReadyContributions = [];
     const pendingWaitingContributions = [];
     const processedBrokenContributions = [];
+    const processedCreditedContributions = [];
+    const processedLockedOrDivertedContributions = [];
 
     const affectedSourceCounts = new Map();
     const affectedBeneficiaryCounts = new Map();
@@ -219,6 +232,8 @@ async function main() {
       if (status === 'processed') {
         const processedTxnId = Number(row.processed_txn_id || 0);
         const ledgerExists = Number(row.ledger_txn_exists || 0) > 0;
+        const incomeWalletCreditCents = Number(row.income_wallet_credit_cents || 0);
+        const incomeWalletEntryCount = Number(row.income_wallet_entry_count || 0);
         if (!processedTxnId || !ledgerExists) {
           processedBrokenContributions.push({
             ...base,
@@ -227,6 +242,19 @@ async function main() {
           });
           pushByKeyCount(affectedSourceCounts, sourceUserCode);
           pushByKeyCount(affectedBeneficiaryCounts, beneficiaryUserCode);
+        } else {
+          const processedEntry = {
+            ...base,
+            processedTxnId,
+            incomeWalletCreditCents,
+            incomeWalletEntryCount,
+            settlementHint: truncate(String(row.ledger_description || ''), 180) || null
+          };
+          if (incomeWalletCreditCents > 0 && incomeWalletEntryCount > 0) {
+            processedCreditedContributions.push(processedEntry);
+          } else {
+            processedLockedOrDivertedContributions.push(processedEntry);
+          }
         }
       }
     }
@@ -286,7 +314,9 @@ async function main() {
         staleQueuedEvents: staleQueuedEvents.length
       },
       informational: {
-        pendingWaitingContributions: pendingWaitingContributions.length
+        pendingWaitingContributions: pendingWaitingContributions.length,
+        processedCreditedContributions: processedCreditedContributions.length,
+        processedLockedOrDivertedContributions: processedLockedOrDivertedContributions.length
       },
       topAffectedSources: sortedCountEntries(affectedSourceCounts, 25),
       topAffectedBeneficiaries: sortedCountEntries(affectedBeneficiaryCounts, 25)
@@ -298,6 +328,8 @@ async function main() {
         failedContributions: failedContributions.slice(0, 100),
         pendingReadyContributions: pendingReadyContributions.slice(0, 100),
         processedBrokenContributions: processedBrokenContributions.slice(0, 100),
+        processedCreditedContributions: processedCreditedContributions.slice(0, 100),
+        processedLockedOrDivertedContributions: processedLockedOrDivertedContributions.slice(0, 100),
         failedQueueEvents: failedQueueEvents.slice(0, 100),
         staleQueuedEvents: staleQueuedEvents.slice(0, 100),
         pendingWaitingContributions: pendingWaitingContributions.slice(0, 100)
@@ -333,6 +365,22 @@ async function main() {
       console.log(`[sample] stale queued events older than ${staleMinutes}m:`);
       for (const item of report.samples.staleQueuedEvents.slice(0, 15)) {
         console.log(`- ${item.eventKey} age=${item.ageMinutes}m source=${item.sourceUserCode} member=${item.newMemberUserCode}`);
+      }
+    }
+
+    if (users.length > 0 && report.samples.processedLockedOrDivertedContributions.length > 0) {
+      console.log('');
+      console.log('[sample] processed contributions with no income wallet credit (typically locked/diverted):');
+      for (const item of report.samples.processedLockedOrDivertedContributions.slice(0, 20)) {
+        console.log(`- ${item.sourceUserCode} -> ${item.beneficiaryUserCode} level ${item.levelNo} amount ${item.amountCents}c tx=${item.processedTxnId} hint=${item.settlementHint || 'N/A'}`);
+      }
+    }
+
+    if (users.length > 0 && report.samples.processedCreditedContributions.length > 0) {
+      console.log('');
+      console.log('[sample] processed contributions credited to income wallet:');
+      for (const item of report.samples.processedCreditedContributions.slice(0, 20)) {
+        console.log(`- ${item.sourceUserCode} -> ${item.beneficiaryUserCode} level ${item.levelNo} amount ${item.amountCents}c credit=${item.incomeWalletCreditCents}c tx=${item.processedTxnId}`);
       }
     }
 
