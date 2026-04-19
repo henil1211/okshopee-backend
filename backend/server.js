@@ -1366,6 +1366,200 @@ async function resolveV2RequestAuthContext({
   };
 }
 
+function normalizeLegacyWalletAmountToCents(amount) {
+  const numericAmount = Number(amount || 0);
+  if (!Number.isFinite(numericAmount)) return 0;
+  return Math.max(0, Math.trunc(Math.round(numericAmount * 100)));
+}
+
+async function readLegacyWalletForV2Provision(legacyUser, normalizedUserCode) {
+  const cachedWalletsRaw = stateSnapshotCache?.snapshot?.state?.mlm_wallets;
+  let wallets = [];
+
+  if (typeof cachedWalletsRaw === 'string') {
+    const parsed = safeParseJSON(cachedWalletsRaw);
+    if (Array.isArray(parsed)) {
+      wallets = parsed;
+    }
+  }
+
+  if (!Array.isArray(wallets) || wallets.length === 0) {
+    const walletsRaw = await readStateKeyValue('mlm_wallets');
+    const parsed = typeof walletsRaw === 'string' ? safeParseJSON(walletsRaw) : [];
+    wallets = Array.isArray(parsed) ? parsed : [];
+  }
+
+  const legacyInternalId = String(legacyUser?.id || '').trim();
+  return wallets.find((wallet) => String(wallet?.userId || '').trim() === legacyInternalId)
+    || wallets.find((wallet) => String(wallet?.userId || '').trim() === normalizedUserCode)
+    || null;
+}
+
+async function ensureV2ReadUserProvisioned(userCode) {
+  if (STORAGE_MODE !== 'mysql' || !pool) return null;
+
+  const normalizedUserCode = normalizeV2UserCode(userCode);
+  if (!isValidV2UserCode(normalizedUserCode)) return null;
+
+  const existingUsers = await loadV2UsersByCodes([normalizedUserCode]);
+  const existingUser = existingUsers.get(normalizedUserCode) || null;
+  if (existingUser) {
+    return {
+      userId: Number(existingUser.id),
+      userCode: normalizedUserCode,
+      provisioned: false
+    };
+  }
+
+  const legacyUser = await findLegacyUserByPublicUserId(normalizedUserCode);
+  if (!legacyUser) {
+    return null;
+  }
+
+  const legacyWallet = await readLegacyWalletForV2Provision(legacyUser, normalizedUserCode);
+  const provisionStatus = isLegacyUserEligibleForV2Access(legacyUser) ? 'active' : 'blocked';
+  const fullName = String(legacyUser?.fullName || normalizedUserCode).trim().slice(0, 150) || normalizedUserCode;
+  const email = String(legacyUser?.email || '').trim().slice(0, 190) || null;
+  const legacyUserId = String(legacyUser?.id || '').trim() || null;
+
+  const walletSpecs = [
+    { walletType: 'fund', openingCents: normalizeLegacyWalletAmountToCents(legacyWallet?.depositWallet) },
+    { walletType: 'income', openingCents: normalizeLegacyWalletAmountToCents(legacyWallet?.incomeWallet) },
+    { walletType: 'royalty', openingCents: normalizeLegacyWalletAmountToCents(legacyWallet?.royaltyWallet) }
+  ];
+
+  let connection;
+  let transactionOpen = false;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionOpen = true;
+
+    const [lockedRows] = await connection.execute(
+      `SELECT id, user_code
+         FROM v2_users
+        WHERE user_code = ?
+        LIMIT 1
+        FOR UPDATE`,
+      [normalizedUserCode]
+    );
+
+    let v2User = Array.isArray(lockedRows) && lockedRows.length > 0 ? lockedRows[0] : null;
+    if (!v2User) {
+      await connection.execute(
+        `INSERT INTO v2_users
+          (legacy_user_id, user_code, full_name, email, status)
+         VALUES
+          (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+          full_name = VALUES(full_name),
+          email = VALUES(email),
+          status = VALUES(status),
+          updated_at = NOW(3)`,
+        [legacyUserId, normalizedUserCode, fullName, email, provisionStatus]
+      );
+
+      const [reloadedRows] = await connection.execute(
+        `SELECT id, user_code
+           FROM v2_users
+          WHERE user_code = ?
+          LIMIT 1
+          FOR UPDATE`,
+        [normalizedUserCode]
+      );
+      v2User = Array.isArray(reloadedRows) && reloadedRows.length > 0 ? reloadedRows[0] : null;
+    }
+
+    if (!v2User) {
+      throw createApiError(500, 'Failed to provision v2 user for read model recovery', 'V2_PROVISION_USER_LOAD_FAILED');
+    }
+
+    const v2UserId = Number(v2User.id);
+    for (const walletSpec of walletSpecs) {
+      const accountCode = `USR_${normalizedUserCode}_${String(walletSpec.walletType).toUpperCase()}`.slice(0, 80);
+      const accountName = `${normalizedUserCode} ${walletSpec.walletType} wallet`.slice(0, 160);
+
+      await connection.execute(
+        `INSERT INTO v2_gl_accounts
+          (account_code, account_name, account_type, owner_user_id, wallet_type, is_system_account, is_active)
+         VALUES
+          (?, ?, 'LIABILITY', ?, ?, 0, 1)
+         ON DUPLICATE KEY UPDATE
+          account_name = VALUES(account_name),
+          account_type = VALUES(account_type),
+          owner_user_id = VALUES(owner_user_id),
+          wallet_type = VALUES(wallet_type),
+          is_system_account = 0,
+          is_active = 1`,
+        [accountCode, accountName, v2UserId, walletSpec.walletType]
+      );
+
+      const [glRows] = await connection.execute(
+        `SELECT id
+           FROM v2_gl_accounts
+          WHERE account_code = ?
+          LIMIT 1
+          FOR UPDATE`,
+        [accountCode]
+      );
+      const glAccount = Array.isArray(glRows) && glRows.length > 0 ? glRows[0] : null;
+      if (!glAccount) {
+        throw createApiError(500, 'Failed to provision user GL account for v2 read model recovery', 'V2_PROVISION_GL_LOAD_FAILED');
+      }
+
+      await connection.execute(
+        `INSERT INTO v2_wallet_accounts
+          (user_id, wallet_type, gl_account_id, baseline_amount_cents, current_amount_cents, currency, version)
+         VALUES
+          (?, ?, ?, ?, ?, 'INR', 0)
+         ON DUPLICATE KEY UPDATE
+          gl_account_id = VALUES(gl_account_id),
+          updated_at = NOW(3)`,
+        [
+          v2UserId,
+          walletSpec.walletType,
+          Number(glAccount.id),
+          walletSpec.openingCents,
+          walletSpec.openingCents
+        ]
+      );
+    }
+
+    await connection.execute(
+      `INSERT INTO v2_help_progress_state
+        (user_id, current_stage_code, receive_count_in_stage, receive_total_cents_in_stage,
+         next_required_give_cents, pending_give_cents, last_progress_event_seq, baseline_snapshot_at)
+       VALUES
+        (?, 'BASELINE', 0, 0, 0, 0, 0, NOW(3))
+       ON DUPLICATE KEY UPDATE
+        user_id = user_id`,
+      [v2UserId]
+    );
+
+    await connection.commit();
+    transactionOpen = false;
+
+    return {
+      userId: v2UserId,
+      userCode: normalizedUserCode,
+      provisioned: true
+    };
+  } catch (error) {
+    if (transactionOpen && connection) {
+      try {
+        await connection.rollback();
+      } catch {
+        // ignore rollback failures for read-model recovery
+      }
+    }
+    throw error;
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+}
+
 function stableSerialize(value) {
   if (Array.isArray(value)) {
     return `[${value.map((item) => stableSerialize(item)).join(',')}]`;
@@ -1720,8 +1914,21 @@ async function resolveV2UserForReadByCode(userCode) {
     throw createApiError(400, 'userCode is required and must be 3-20 chars [a-zA-Z0-9_-]', 'INVALID_USER_CODE');
   }
 
-  const usersByCode = await loadV2UsersByCodes([normalizedUserCode]);
-  const user = usersByCode.get(normalizedUserCode) || null;
+  let usersByCode = await loadV2UsersByCodes([normalizedUserCode]);
+  let user = usersByCode.get(normalizedUserCode) || null;
+  if (!user) {
+    const provisionedUser = await ensureV2ReadUserProvisioned(normalizedUserCode);
+    if (provisionedUser?.userId) {
+      return {
+        userId: Number(provisionedUser.userId),
+        userCode: normalizedUserCode
+      };
+    }
+
+    usersByCode = await loadV2UsersByCodes([normalizedUserCode]);
+    user = usersByCode.get(normalizedUserCode) || null;
+  }
+
   if (!user) {
     throw createApiError(404, 'Requested user was not found in v2_users', 'V2_USER_NOT_FOUND');
   }
