@@ -545,6 +545,35 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
     } satisfies Transaction;
   }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
+  const totalReceivedFromTx = v2Transactions.reduce((sum, tx) => {
+    const creditAmount = Number(tx.amount ?? 0);
+    if (!Number.isFinite(creditAmount) || creditAmount <= 0) return sum;
+
+    const txType = String(tx.type || '').toLowerCase();
+    const desc = String(tx.description || '').toLowerCase();
+    const isEarningCredit = txType === 'direct_income'
+      || txType === 'level_income'
+      || txType === 'receive_help'
+      || txType === 'royalty_income';
+    if (!isEarningCredit) return sum;
+
+    // Avoid double-counting lock-release movement as new earnings.
+    if (txType === 'receive_help' && desc.startsWith('released locked receive help')) {
+      return sum;
+    }
+
+    return sum + creditAmount;
+  }, 0);
+
+  const totalReceivedCentsFromWallet = Number(walletData.totalReceivedCents || 0);
+  wallet.totalReceived = Number.isFinite(totalReceivedCentsFromWallet) && totalReceivedCentsFromWallet > 0
+    ? totalReceivedCentsFromWallet / 100
+    : Math.max(0, Math.round(totalReceivedFromTx * 100) / 100);
+  const totalGivenCentsFromWallet = Number(walletData.totalGivenCents || 0);
+  if (Number.isFinite(totalGivenCentsFromWallet) && totalGivenCentsFromWallet >= 0) {
+    wallet.totalGiven = totalGivenCentsFromWallet / 100;
+  }
+
   const transactions = options?.includeLegacyTransactions === false
     ? v2Transactions
     : mergeTransactionsForDisplay({
@@ -3016,15 +3045,6 @@ export const usePinStore = create<PinState>((set, get) => ({
       return { success: false, message: 'User not found' };
     }
     const settings = Database.getSettings();
-    const amount = quantity * settings.pinAmount;
-    Database.repairFundWalletConsistency(effectiveUserId);
-    const wallet = Database.getWallet(effectiveUserId);
-    if (!wallet) {
-      return { success: false, message: 'Wallet not found' };
-    }
-    if (wallet.depositWallet < amount) {
-      return { success: false, message: 'Insufficient fund wallet balance for direct buy' };
-    }
 
     try {
       const idempotencyKey = generateClientIdempotencyKey();

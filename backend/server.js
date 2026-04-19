@@ -23,11 +23,17 @@ const __dirname = path.dirname(__filename);
 
 // Load exactly one env file to avoid silent overrides between environments.
 const NODE_ENV = String(process.env.NODE_ENV || 'development').toLowerCase();
-const ENV_FILE_CANDIDATES = NODE_ENV === 'production'
-  ? [path.join(__dirname, '.env')]
-  : NODE_ENV === 'test'
-    ? [path.join(__dirname, '.env.test'), path.join(__dirname, '.env')]
-    : [path.join(__dirname, '.env.local'), path.join(__dirname, '.env')];
+const EXPLICIT_ENV_FILE = String(process.env.ENV_FILE || process.env.ENV_FILE_PATH || '').trim();
+const RESOLVED_EXPLICIT_ENV_FILE = EXPLICIT_ENV_FILE
+  ? (path.isAbsolute(EXPLICIT_ENV_FILE) ? EXPLICIT_ENV_FILE : path.join(__dirname, EXPLICIT_ENV_FILE))
+  : '';
+const ENV_FILE_CANDIDATES = RESOLVED_EXPLICIT_ENV_FILE
+  ? [RESOLVED_EXPLICIT_ENV_FILE]
+  : NODE_ENV === 'production'
+    ? [path.join(__dirname, '.env')]
+    : NODE_ENV === 'test'
+      ? [path.join(__dirname, '.env.test'), path.join(__dirname, '.env')]
+      : [path.join(__dirname, '.env'), path.join(__dirname, '.env.local')];
 const ENV_FILE_PATH = ENV_FILE_CANDIDATES.find((candidate) => existsSync(candidate));
 
 if (ENV_FILE_PATH) {
@@ -1740,6 +1746,67 @@ async function readV2WalletSnapshotByUserId(userId) {
     'read_v2_help_lock_snapshot'
   );
 
+  const [lifetimeRows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT
+         COALESCE(SUM(
+           CASE
+             WHEN le.entry_side = 'credit'
+              AND lt.status = 'posted'
+              AND (
+                (
+                  lt.tx_type = 'referral_credit'
+                  AND le.wallet_type IN ('income', 'locked_income')
+                  AND LOWER(COALESCE(lt.description, '')) NOT LIKE 'released locked receive help%'
+                )
+                OR (
+                  lt.tx_type = 'admin_adjustment'
+                  AND le.wallet_type = 'royalty'
+                )
+              )
+             THEN le.amount_cents
+             ELSE 0
+           END
+         ), 0) AS total_received_cents,
+         COALESCE(SUM(
+           CASE
+             WHEN le.entry_side = 'debit'
+              AND lt.status = 'posted'
+              AND (
+                (lt.tx_type = 'referral_credit' AND le.wallet_type IN ('income', 'locked_income'))
+                OR (lt.tx_type IN ('fund_transfer', 'withdrawal', 'admin_adjustment') AND le.wallet_type = 'income')
+              )
+             THEN le.amount_cents
+             ELSE 0
+           END
+         ), 0) AS total_given_cents
+       FROM v2_ledger_entries le
+       INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
+       WHERE le.user_id = ?`,
+      [userId]
+    ),
+    'read_v2_wallet_lifetime_totals'
+  );
+
+  const [syntheticLockedReceiveRows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT
+         COALESCE(SUM(pc.amount_cents), 0) AS locked_receive_cents
+       FROM v2_help_pending_contributions pc
+       LEFT JOIN v2_ledger_entries income_le
+         ON income_le.ledger_txn_id = pc.processed_txn_id
+        AND income_le.user_id = pc.beneficiary_user_id
+        AND income_le.wallet_type = 'income'
+        AND income_le.entry_side = 'credit'
+       WHERE pc.beneficiary_user_id = ?
+         AND pc.status = 'processed'
+         AND pc.processed_txn_id IS NOT NULL
+         AND income_le.id IS NULL`,
+      [userId]
+    ),
+    'read_v2_wallet_synthetic_locked_receives'
+  );
+
   const balancesCents = {
     fund: 0,
     income: 0,
@@ -1761,6 +1828,10 @@ async function readV2WalletSnapshotByUserId(userId) {
   }
 
   const lockRow = Array.isArray(lockRows) && lockRows.length > 0 ? lockRows[0] : null;
+  const lifetimeRow = Array.isArray(lifetimeRows) && lifetimeRows.length > 0 ? lifetimeRows[0] : null;
+  const syntheticLockedReceiveRow = Array.isArray(syntheticLockedReceiveRows) && syntheticLockedReceiveRows.length > 0
+    ? syntheticLockedReceiveRows[0]
+    : null;
   const lockedFirstTwoLifetimeCents = Number.isFinite(Number(lockRow?.locked_first_two_cents))
     ? Math.trunc(Number(lockRow.locked_first_two_cents))
     : 0;
@@ -1769,6 +1840,15 @@ async function readV2WalletSnapshotByUserId(userId) {
     : 0;
   const pendingGiveCents = Number.isFinite(Number(lockRow?.pending_give_cents))
     ? Math.trunc(Number(lockRow.pending_give_cents))
+    : 0;
+  const totalReceivedFromLedgerCents = Number.isFinite(Number(lifetimeRow?.total_received_cents))
+    ? Math.trunc(Number(lifetimeRow.total_received_cents))
+    : 0;
+  const totalGivenFromLedgerCents = Number.isFinite(Number(lifetimeRow?.total_given_cents))
+    ? Math.trunc(Number(lifetimeRow.total_given_cents))
+    : 0;
+  const syntheticLockedReceiveCents = Number.isFinite(Number(syntheticLockedReceiveRow?.locked_receive_cents))
+    ? Math.trunc(Number(syntheticLockedReceiveRow.locked_receive_cents))
     : 0;
   const lockedForGiveCents = Math.max(0, pendingGiveCents);
 
@@ -1781,6 +1861,10 @@ async function readV2WalletSnapshotByUserId(userId) {
       lockedForQualification: Math.max(0, lockedForQualificationCents),
       pendingGive: Math.max(0, pendingGiveCents),
       lockedFirstTwoLifetime: Math.max(0, lockedFirstTwoLifetimeCents)
+    },
+    lifetimeTotalsCents: {
+      totalReceived: Math.max(0, totalReceivedFromLedgerCents + syntheticLockedReceiveCents),
+      totalGiven: Math.max(0, totalGivenFromLedgerCents)
     }
   };
 }
@@ -6301,6 +6385,8 @@ const server = createServer(async (req, res) => {
           lockedForGiveCents: walletSnapshot.lockedBreakdownCents.lockedForGive,
           lockedForQualificationCents: walletSnapshot.lockedBreakdownCents.lockedForQualification,
           pendingGiveCents: walletSnapshot.lockedBreakdownCents.pendingGive,
+          totalReceivedCents: walletSnapshot.lifetimeTotalsCents.totalReceived,
+          totalGivenCents: walletSnapshot.lifetimeTotalsCents.totalGiven,
           updatedAt: walletSnapshot.updatedAt
         }
       });
