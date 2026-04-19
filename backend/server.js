@@ -1760,6 +1760,11 @@ async function readV2WalletSnapshotByUserId(userId) {
                   AND LOWER(COALESCE(lt.description, '')) NOT LIKE 'released locked receive help%'
                 )
                 OR (
+                  lt.tx_type = 'fund_transfer'
+                  AND le.wallet_type = 'income'
+                  AND LOWER(COALESCE(lt.description, '')) LIKE '%help%'
+                )
+                OR (
                   lt.tx_type = 'admin_adjustment'
                   AND le.wallet_type = 'royalty'
                 )

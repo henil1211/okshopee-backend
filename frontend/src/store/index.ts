@@ -213,6 +213,9 @@ function mapV2ReadTypeToTransactionType(
   const normalizedDescription = String(rawDescription || '').toLowerCase();
 
   if (normalizedTxType === 'fund_transfer') {
+    if (normalizedWalletType === 'income' && signedAmountCents >= 0) {
+      return normalizedDescription.includes('help') ? 'receive_help' : 'direct_income';
+    }
     if (normalizedWalletType === 'income' && signedAmountCents < 0) return 'income_transfer';
     return 'p2p_transfer';
   }
@@ -282,6 +285,12 @@ function buildV2DisplayDescription(params: {
   const helpLevelText = helpLevelMatch ? ` level ${helpLevelMatch[1]}` : '';
 
   if (txType === 'fund_transfer' && counterpartyLabel) {
+    if (walletType === 'income' && /help/i.test(normalizedRawDescription)) {
+      return params.signedAmountCents >= 0
+        ? `Received help${helpLevelText} from ${counterpartyLabel}`
+        : `Give help${helpLevelText} to ${counterpartyLabel}`;
+    }
+
     const direction = params.signedAmountCents < 0 ? 'to' : 'from';
     const walletLabel = walletType === 'income'
       ? 'Income wallet'
@@ -3082,7 +3091,7 @@ export const usePinStore = create<PinState>((set, get) => ({
 
       try {
         await Database.hydrateFromServer({
-          keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS, DB_KEYS.PINS, DB_KEYS.PIN_PURCHASE_REQUESTS],
+          keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS, DB_KEYS.PIN_PURCHASE_REQUESTS],
           strict: true,
           maxAttempts: 3,
           timeoutMs: 20000,
@@ -3090,6 +3099,53 @@ export const usePinStore = create<PinState>((set, get) => ({
         });
       } catch {
         // Best-effort refresh. Purchase has already been committed server-side.
+      }
+
+      const purchasedPinCodes = Array.isArray(payload?.pinCodes)
+        ? payload.pinCodes
+            .map((entry: unknown) => String(entry || '').trim().toUpperCase())
+            .filter((entry: string) => /^[A-Z0-9]{6,12}$/.test(entry))
+        : [];
+
+      if (purchasedPinCodes.length > 0) {
+        const existingPins = Database.getPins();
+        const existingCodes = new Set(existingPins.map((pin) => String(pin.pinCode || '').trim().toUpperCase()));
+        const postedAt = typeof payload?.postedAt === 'string' && payload.postedAt
+          ? payload.postedAt
+          : new Date().toISOString();
+        const pinAmount = Number.isFinite(Number(payload?.pinPriceCents))
+          ? Number(payload.pinPriceCents) / 100
+          : settings.pinAmount;
+
+        let appended = false;
+        purchasedPinCodes.forEach((pinCode: string, index: number) => {
+          if (existingCodes.has(pinCode)) return;
+          existingPins.push({
+            id: `v2_pin_${pinCode}_${Date.now()}_${index}`,
+            pinCode,
+            amount: pinAmount,
+            status: 'unused',
+            ownerId: effectiveUserId,
+            createdBy: buyerUser.id,
+            createdAt: postedAt
+          });
+          existingCodes.add(pinCode);
+          appended = true;
+        });
+
+        if (appended) {
+          Database.savePins(existingPins);
+          try {
+            await Database.forceRemoteSyncKeysNow([DB_KEYS.PINS], {
+              force: true,
+              timeoutMs: 15000,
+              maxAttempts: 2,
+              retryDelayMs: 1000
+            });
+          } catch {
+            // best-effort sync of purchased pin inventory
+          }
+        }
       }
 
       get().loadPins(effectiveUserId);
