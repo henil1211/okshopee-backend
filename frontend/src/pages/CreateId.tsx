@@ -63,6 +63,7 @@ export default function CreateId() {
   const lastPinRefresh = useRef<number>(0);
   const selectedPinRef = useRef('');
   const displayUserIdRef = useRef<string | null>(null);
+  const errorBannerRef = useRef<HTMLDivElement | null>(null);
   const successBannerRef = useRef<HTMLDivElement | null>(null);
   const submitInFlightRef = useRef(false);
 
@@ -123,13 +124,18 @@ export default function CreateId() {
   }, [formData.pinCode]);
 
   useEffect(() => {
-    if (!successUserId) return;
+    const targetRef = successUserId
+      ? successBannerRef.current
+      : (error ? errorBannerRef.current : null);
+    if (!targetRef) return;
+
     const scrollTask = window.requestAnimationFrame(() => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
-      successBannerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      targetRef.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
+
     return () => window.cancelAnimationFrame(scrollTask);
-  }, [successUserId]);
+  }, [successUserId, error]);
 
   const refreshPins = async () => {
     const now = Date.now();
@@ -430,9 +436,11 @@ export default function CreateId() {
           </CardHeader>
           <CardContent>
             {error && (
-              <Alert variant="destructive" className="mb-4 bg-red-500/10 border-red-500/30">
-                <AlertDescription className="text-red-400">{error}</AlertDescription>
-              </Alert>
+              <div ref={errorBannerRef}>
+                <Alert variant="destructive" className="mb-4 bg-red-500/10 border-red-500/30">
+                  <AlertDescription className="text-red-400">{error}</AlertDescription>
+                </Alert>
+              </div>
             )}
 
             {successUserId && (
