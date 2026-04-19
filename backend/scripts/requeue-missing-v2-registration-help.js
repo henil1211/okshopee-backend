@@ -135,6 +135,40 @@ async function readDetectionScopeStats(pool, { includeLegacy = false } = {}) {
   };
 }
 
+async function readScopedCandidateStatuses(pool, limit, { includeLegacy = false } = {}) {
+  const safeLimit = Math.max(1, Math.min(2000, Number(limit) || 200));
+  const includeLegacyFlag = includeLegacy ? 1 : 0;
+  const [rows] = await pool.execute(
+    `SELECT
+       u.user_code,
+       CASE WHEN q.id IS NULL THEN 0 ELSE 1 END AS has_processed
+     FROM v2_users u
+     LEFT JOIN v2_registration_profiles rp ON rp.user_id = u.id
+     LEFT JOIN v2_help_events_queue q
+       ON q.event_key = CONCAT('HELP:reg_help_', u.user_code, '_', u.user_code, ':', u.user_code, ':', u.user_code, ':activation_join')
+      AND q.status = 'processed'
+     WHERE u.status = 'active'
+       AND COALESCE(rp.is_admin, 0) = 0
+       AND (
+         ? = 1
+         OR rp.user_id IS NOT NULL
+         OR EXISTS (
+           SELECT 1
+           FROM v2_post_registration_retry_queue rq
+           WHERE rq.registration_user_code = u.user_code
+         )
+       )
+     ORDER BY u.id ASC
+     LIMIT ?`,
+    [includeLegacyFlag, safeLimit]
+  );
+
+  return (Array.isArray(rows) ? rows : []).map((row) => ({
+    userCode: normalizeUserCode(row?.user_code),
+    hasProcessed: Number(row?.has_processed || 0) === 1
+  })).filter((row) => !!row.userCode);
+}
+
 async function readHelpEventStatus(pool, eventKey) {
   const [rows] = await pool.execute(
     `SELECT id, status, processed_at
@@ -231,12 +265,23 @@ async function main() {
 
     if (allMissing) {
       const scopeStats = await readDetectionScopeStats(pool, { includeLegacy });
+      const scopedCandidateRows = await readScopedCandidateStatuses(pool, limitArg, { includeLegacy });
       userCodes = await detectMissingUsers(pool, limitArg, { includeLegacy });
       console.log(`[detect] scope: ${includeLegacy ? 'legacy+v2' : 'v2-registration-candidates'}`);
       console.log(`[detect] active non-admin users: ${scopeStats.activeNonAdminTotal}`);
       console.log(`[detect] scoped candidates: ${scopeStats.candidateTotal}`);
       console.log(`[detect] scoped candidates already processed: ${scopeStats.candidateProcessedTotal}`);
       console.log(`[detect] missing users: ${userCodes.length}`);
+      if (scopedCandidateRows.length > 0) {
+        const processedUsers = scopedCandidateRows.filter((row) => row.hasProcessed).map((row) => row.userCode);
+        const missingUsers = scopedCandidateRows.filter((row) => !row.hasProcessed).map((row) => row.userCode);
+        if (processedUsers.length > 0) {
+          console.log(`[detect] processed candidate users: ${processedUsers.join(', ')}`);
+        }
+        if (missingUsers.length > 0) {
+          console.log(`[detect] unprocessed candidate users: ${missingUsers.join(', ')}`);
+        }
+      }
       if (userCodes.length > 0) {
         console.log(`[detect] user codes: ${userCodes.join(', ')}`);
       } else if (scopeStats.candidateTotal === 0 && !includeLegacy) {
