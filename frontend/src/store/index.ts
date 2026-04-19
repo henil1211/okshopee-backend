@@ -128,6 +128,7 @@ function resolveV2RequestHeaders(params: {
 function resolveV2ReadRequestHeaders(params: {
   requestId: string;
   impersonationReason: string;
+  overrideImpersonateUserCode?: string;
 }): { headers: Record<string, string> } | { message: string } {
   const authState = useAuthStore.getState();
   const subjectUser = authState.user;
@@ -149,8 +150,14 @@ function resolveV2ReadRequestHeaders(params: {
     'X-Request-Id': params.requestId
   };
 
-  if (impersonatedUser && subjectUser.isAdmin) {
-    headers['X-Impersonate-User-Code'] = impersonatedUser.userId;
+  const explicitImpersonateUserCode = String(params.overrideImpersonateUserCode || '').trim();
+  const fallbackImpersonateUserCode = impersonatedUser && subjectUser.isAdmin
+    ? String(impersonatedUser.userId || '').trim()
+    : '';
+  const effectiveImpersonateUserCode = explicitImpersonateUserCode || fallbackImpersonateUserCode;
+
+  if (subjectUser.isAdmin && effectiveImpersonateUserCode && effectiveImpersonateUserCode !== subjectUser.userId) {
+    headers['X-Impersonate-User-Code'] = effectiveImpersonateUserCode;
     headers['X-Impersonation-Reason'] = params.impersonationReason;
   }
 
@@ -388,9 +395,13 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
   }
 
   const requestId = generateClientRequestId('v2_wallet_read');
+  const authState = useAuthStore.getState();
+  const subjectUserCode = String(authState.user?.userId || '').trim();
+  const shouldImpersonateTarget = !!authState.user?.isAdmin && !!subjectUserCode && subjectUserCode !== userCode;
   const resolvedHeaders = resolveV2ReadRequestHeaders({
     requestId,
-    impersonationReason: 'wallet_read_refresh'
+    impersonationReason: 'wallet_read_refresh',
+    overrideImpersonateUserCode: shouldImpersonateTarget ? userCode : undefined
   });
   if (!('headers' in resolvedHeaders)) {
     return {
@@ -3647,11 +3658,6 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'User not found' };
     }
 
-    const wallet = Database.getWallet(user.id);
-    if (!wallet) {
-      return { success: false, message: 'User wallet not found' };
-    }
-
     const normalizedAmount = Math.round(Number(amount || 0) * 100) / 100;
     if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
       return { success: false, message: 'Enter a valid amount' };
@@ -3662,11 +3668,22 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Reason is required' };
     }
 
+    const strictV2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(user, {
+      includeLegacyTransactions: false
+    }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
+    if (!strictV2Read.snapshot) {
+      return {
+        success: false,
+        message: strictV2Read.errorMessage || 'Unable to fetch live backend wallet. Please retry in a moment.'
+      };
+    }
+
+    const liveWallet = strictV2Read.snapshot.wallet;
     const walletBalance = walletType === 'deposit'
-      ? Number(wallet.depositWallet || 0)
+      ? Number(liveWallet.depositWallet || 0)
       : walletType === 'income'
-        ? Number(wallet.incomeWallet || 0)
-        : Number(wallet.royaltyWallet || 0);
+        ? Number(liveWallet.incomeWallet || 0)
+        : Number(liveWallet.royaltyWallet || 0);
 
     if (walletBalance < normalizedAmount) {
       return {
@@ -3675,67 +3692,52 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       };
     }
 
-    const now = new Date().toISOString();
     const walletLabel = walletType === 'deposit'
       ? 'deposit wallet'
       : walletType === 'income'
         ? 'income wallet'
         : 'royalty wallet';
+    const walletTypeForV2: 'fund' | 'income' | 'royalty' = walletType === 'deposit' ? 'fund' : walletType;
+    const amountCents = Math.trunc(normalizedAmount * 100);
 
-    await Database.runWithLocalStateTransaction(async () => {
-      if (walletType === 'deposit') {
-        Database.updateWallet(user.id, {
-          depositWallet: Math.max(0, Number(wallet.depositWallet || 0) - normalizedAmount)
-        });
-      } else if (walletType === 'income') {
-        Database.updateWallet(user.id, {
-          incomeWallet: Math.max(0, Number(wallet.incomeWallet || 0) - normalizedAmount)
-        });
-      } else {
-        Database.updateWallet(user.id, {
-          royaltyWallet: Math.max(0, Number(wallet.royaltyWallet || 0) - normalizedAmount),
-          totalReceived: Math.max(0, Number(wallet.totalReceived || 0) - normalizedAmount)
-        });
-      }
-
-      Database.addToSafetyPool(
-        normalizedAmount,
-        adminUser.id,
-        `Admin debit from ${walletLabel}: ${user.fullName} (${user.userId}) - ${trimmedReason}`
-      );
-
-      Database.createTransaction({
-        id: `tx_${Date.now()}_admin_debit_manual`,
-        userId: user.id,
-        type: 'admin_debit',
-        amount: -normalizedAmount,
-        status: 'completed',
-        description: `Admin debited from ${walletLabel}: ${trimmedReason}`,
-        createdAt: now,
-        completedAt: now,
-        adminReason: trimmedReason,
-        processedByAdminUserId: adminUser.id
-      });
-    }, {
-      syncOnCommit: true,
-      syncOptions: {
-        full: false,
-        force: true,
-        timeoutMs: 30000,
-        maxAttempts: 3,
-        retryDelayMs: 1500
-      }
+    const v2Adjustment = await submitV2AdminAdjustment({
+      targetUserCode: user.userId,
+      approverUserCode: adminUser.userId,
+      walletType: walletTypeForV2,
+      direction: 'debit',
+      amountCents,
+      reasonCode: 'SAFETY_POOL_DEBIT',
+      ticketId: `SP_DEBIT_${Date.now()}_${user.userId}`.slice(0, 80),
+      note: trimmedReason,
+      description: `Safety pool debit from ${user.userId} (${walletTypeForV2})`
     });
 
-    if (walletType === 'income') {
-      Database.repairIncomeWalletConsistency(user.id);
+    if (!v2Adjustment.success) {
+      return { success: false, message: v2Adjustment.message };
     }
-    if (walletType === 'deposit') {
-      Database.repairFundWalletConsistency(user.id);
-    }
-    if (walletType === 'royalty') {
-      Database.repairRoyaltyWalletConsistency(user.id);
-    }
+
+    Database.addToSafetyPool(
+      normalizedAmount,
+      adminUser.id,
+      `Admin debit from ${walletLabel}: ${user.fullName} (${user.userId}) - ${trimmedReason}`
+    );
+
+    await Database.forceRemoteSyncKeysNow([DB_KEYS.SAFETY_POOL], {
+      force: true,
+      timeoutMs: 30000,
+      maxAttempts: 3,
+      retryDelayMs: 1500
+    }).catch(() => false);
+
+    await Database.hydrateFromServer({
+      keys: [DB_KEYS.SAFETY_POOL],
+      strict: false,
+      maxAttempts: 2,
+      timeoutMs: 12000,
+      retryDelayMs: 800
+    }).catch(() => {
+      // Best-effort refresh only.
+    });
 
     get().loadAllUsers();
     get().loadAllTransactions();
