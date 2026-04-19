@@ -1416,9 +1416,8 @@ class Database {
       if (!uid) continue;
       if (seenUserIds.has(uid)) {
         const prevIdx = seenUserIds.get(uid)!;
-        const prevScore = this.getDuplicateResolutionScore(normalized[prevIdx]);
-        const currScore = this.getDuplicateResolutionScore(normalized[i]);
-        if (currScore > prevScore) {
+        const cmp = this.compareDuplicateUsers(normalized[prevIdx], normalized[i]);
+        if (cmp > 0) {
           duplicateIndices.add(prevIdx);
           seenUserIds.set(uid, i);
         } else {
@@ -1467,18 +1466,62 @@ class Database {
     let score = 0;
     if ((user.userId || '').trim() === '1000001') score += 1_000_000_000;
     if (user.isAdmin) score += 100_000_000;
-    if ((user.accountStatus || 'active') === 'active' && !!user.isActive) {
-      score += 12_000_000;
-    } else if ((user.accountStatus || 'active') === 'active' && user.deactivationReason === 'direct_referral_deadline') {
-      score += 500_000;
-    } else {
-      score -= 5_000_000;
+
+    // Prefer truly active rows over stale auto-deactivated duplicates.
+    if (user.accountStatus === 'active' && user.isActive) {
+      score += 20_000_000;
+    } else if (user.accountStatus === 'active' && user.deactivationReason === 'direct_referral_deadline') {
+      score += 5_000_000;
     }
+
+    if (this.isNetworkActiveUser(user)) score += 10_000_000;
     score += Math.max(0, user.directCount || 0) * 10_000;
     score += txCount * 100;
     score += Math.floor(walletMagnitude);
     if (matrixUserIds?.has(user.userId)) score += 50_000;
+
+    // Small freshness bias so recent reactivation/activation records are favored.
+    const freshnessTs = this.getUserFreshnessEpochMs(user);
+    if (freshnessTs > 0) {
+      score += Math.floor(freshnessTs / (1000 * 60 * 60));
+    }
+
     return score;
+  }
+
+  private static toEpochMs(value?: string | null): number {
+    if (!value) return 0;
+    const ts = new Date(value).getTime();
+    return Number.isFinite(ts) ? ts : 0;
+  }
+
+  private static getUserFreshnessEpochMs(user?: User | null): number {
+    if (!user) return 0;
+    return Math.max(
+      this.toEpochMs(user.reactivatedAt || null),
+      this.toEpochMs(user.activatedAt || null),
+      this.toEpochMs(user.createdAt || null)
+    );
+  }
+
+  private static compareDuplicateUsers(
+    left: User,
+    right: User,
+    txCountByUserId?: Map<string, number>,
+    walletByUserId?: Map<string, Wallet>,
+    matrixUserIds?: Set<string>
+  ): number {
+    const scoreDiff = this.getDuplicateResolutionScore(right, txCountByUserId, walletByUserId, matrixUserIds)
+      - this.getDuplicateResolutionScore(left, txCountByUserId, walletByUserId, matrixUserIds);
+    if (scoreDiff !== 0) return scoreDiff;
+
+    const freshnessDiff = this.getUserFreshnessEpochMs(right) - this.getUserFreshnessEpochMs(left);
+    if (freshnessDiff !== 0) return freshnessDiff;
+
+    const activeDiff = Number(!!right.isActive) - Number(!!left.isActive);
+    if (activeDiff !== 0) return activeDiff;
+
+    return String(right.id || '').localeCompare(String(left.id || ''));
   }
 
   static getUserByUserId(userId: string): User | undefined {
@@ -1496,12 +1539,7 @@ class Database {
     const matrixUserIds = new Set(this.getMatrix().map((node) => node.userId));
 
     return [...matches].sort((a, b) => {
-      const scoreDiff = this.getDuplicateResolutionScore(b, txCountByUserId, walletByUserId, matrixUserIds)
-        - this.getDuplicateResolutionScore(a, txCountByUserId, walletByUserId, matrixUserIds);
-      if (scoreDiff !== 0) return scoreDiff;
-      const aCreated = new Date(a.createdAt || 0).getTime();
-      const bCreated = new Date(b.createdAt || 0).getTime();
-      return bCreated - aCreated;
+      return this.compareDuplicateUsers(a, b, txCountByUserId, walletByUserId, matrixUserIds);
     })[0];
   }
 
@@ -7587,6 +7625,7 @@ class Database {
   static getLockedIncomeBreakdown(userId: string): LockedIncomeBreakdownItem[] {
     const user = this.getUserById(userId);
     if (!user) return [];
+    const wallet = this.getWallet(userId);
 
     const currentDirect = this.getEffectiveDirectCount(user);
     const rows: LockedIncomeBreakdownItem[] = [];
@@ -7708,7 +7747,41 @@ class Database {
       });
     }
 
-    return rows.sort((a, b) => a.level - b.level);
+    const sortedRows = rows.sort((a, b) => a.level - b.level);
+
+    // Migration-safe reconciliation:
+    // If wallet-level locked total is greater than transaction-derived breakdown,
+    // surface the gap in level 1 first-two lock so users see the full locked amount.
+    const walletLockedTotal = Math.max(0, Number(wallet?.lockedIncomeWallet || 0));
+    const derivedLockedTotal = sortedRows.reduce((sum, item) => sum + Math.max(0, Number(item.lockedAmount || 0)), 0);
+    const lockedGap = Math.max(0, Math.round((walletLockedTotal - derivedLockedTotal) * 100) / 100);
+
+    if (lockedGap > 0.0001) {
+      const lockedGapText = `$${lockedGap.toFixed(2)}`;
+      const levelOneRequiredDirect = this.getCumulativeDirectRequired(1);
+      const levelOneRemaining = Math.max(0, levelOneRequiredDirect - currentDirect);
+      const existingLevelOne = sortedRows.find((item) => item.level === 1);
+
+      if (existingLevelOne) {
+        existingLevelOne.lockedAmount = Math.round((existingLevelOne.lockedAmount + lockedGap) * 100) / 100;
+        existingLevelOne.lockedFirstTwoAmount = Math.round((existingLevelOne.lockedFirstTwoAmount + lockedGap) * 100) / 100;
+        existingLevelOne.reason = `${existingLevelOne.reason} Includes ${lockedGapText} restored locked amount from migration baseline.`.trim();
+      } else {
+        sortedRows.unshift({
+          level: 1,
+          lockedAmount: lockedGap,
+          lockedFirstTwoAmount: lockedGap,
+          lockedQualificationAmount: 0,
+          requiredDirect: levelOneRequiredDirect,
+          currentDirect,
+          remainingDirect: levelOneRemaining,
+          qualified: levelOneRemaining === 0,
+          reason: `Locked because first two received helps at this level are reserved for auto give-help settlement. Includes ${lockedGapText} restored locked amount from migration baseline.`
+        });
+      }
+    }
+
+    return sortedRows.sort((a, b) => a.level - b.level);
   }
 
   private static isTourQualifiedForLevel(user: User, tracker: UserHelpTracker, level: number): boolean {
@@ -10190,40 +10263,18 @@ class Database {
     this.setStorageItem(DB_KEYS.OTP_RECORDS, JSON.stringify(records));
   }
 
-  private static resolveOtpSubjectCandidates(subject: string): string[] {
-    const normalized = String(subject || '').trim();
-    const candidates = new Set<string>();
-    if (normalized) candidates.add(normalized);
-
-    const byInternalId = normalized ? this.getUserById(normalized) : null;
-    if (byInternalId?.id) candidates.add(String(byInternalId.id).trim());
-    if (byInternalId?.userId) candidates.add(String(byInternalId.userId).trim());
-
-    const byPublicUserId = normalized ? this.getUserByUserId(normalized) : null;
-    if (byPublicUserId?.id) candidates.add(String(byPublicUserId.id).trim());
-    if (byPublicUserId?.userId) candidates.add(String(byPublicUserId.userId).trim());
-
-    return Array.from(candidates).filter((value) => value.length > 0);
-  }
-
   static generateOtp(userId: string, email: string, purpose: OtpRecord['purpose']): OtpRecord {
-    const otpSubjectCandidates = this.resolveOtpSubjectCandidates(userId);
-    const otpSubject =
-      otpSubjectCandidates.find((candidate) => /^\d{7}$/.test(candidate))
-      || otpSubjectCandidates[0]
-      || String(userId || '').trim();
-
     // Invalidate existing OTPs for this user/purpose
     const records = this.getOtpRecords();
     const updated = records.map(r =>
-      (otpSubjectCandidates.includes(String(r.userId || '').trim()) && r.purpose === purpose && !r.isUsed)
+      (r.userId === userId && r.purpose === purpose && !r.isUsed)
         ? { ...r, isUsed: true }
         : r
     );
 
     const otp: OtpRecord = {
       id: `otp_${Date.now()}`,
-      userId: otpSubject,
+      userId,
       email,
       otp: generateOTP(),
       purpose,
@@ -10238,51 +10289,19 @@ class Database {
   }
 
   static verifyOtp(userId: string, otp: string, purpose: OtpRecord['purpose']): boolean {
-    const normalizedOtp = String(otp || '').trim();
-    if (!normalizedOtp) return false;
-
     const records = this.getOtpRecords();
-    const otpSubjectCandidates = this.resolveOtpSubjectCandidates(userId);
-    if (otpSubjectCandidates.length === 0) {
-      otpSubjectCandidates.push(String(userId || '').trim());
-    }
-    const isUsableOtpRecord = (r: OtpRecord): boolean => {
-      const recordOtp = String(r.otp || '').trim();
-      if (recordOtp !== normalizedOtp) return false;
-      if (r.purpose !== purpose) return false;
-      if (r.isUsed) return false;
-      if (new Date(r.expiresAt) <= new Date()) return false;
-      return true;
-    };
+    const record = records.find(
+      r => r.userId === userId &&
+        r.otp === otp &&
+        r.purpose === purpose &&
+        !r.isUsed &&
+        new Date(r.expiresAt) > new Date()
+    );
 
-    let recordIndex = records.findIndex((r) => (
-      otpSubjectCandidates.includes(String(r.userId || '').trim()) && isUsableOtpRecord(r)
-    ));
-
-    // Fallback: if user-reference matching fails, allow matching by the same user's email.
-    // This handles edge cases where user references diverge across cached identity snapshots.
-    if (recordIndex === -1) {
-      const resolvedUser =
-        this.getUserById(userId)
-        || this.getUserByUserId(userId)
-        || this.getUserByEmail(userId);
-      const expectedEmail = String(resolvedUser?.email || '').trim().toLowerCase();
-      if (expectedEmail) {
-        const emailMatchedRecordIndex = records.findIndex((r) => {
-          const recordEmail = String(r.email || '').trim().toLowerCase();
-          if (!recordEmail || recordEmail !== expectedEmail) return false;
-          return isUsableOtpRecord(r);
-        });
-        if (emailMatchedRecordIndex >= 0) {
-          recordIndex = emailMatchedRecordIndex;
-        }
-      }
-    }
-
-    if (recordIndex === -1) return false;
+    if (!record) return false;
 
     // Mark as used
-    records[recordIndex].isUsed = true;
+    record.isUsed = true;
     this.saveOtpRecords(records);
     return true;
   }
