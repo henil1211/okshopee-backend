@@ -6665,6 +6665,108 @@ const server = createServer(async (req, res) => {
         totalRewardPointsRedeemed: 0
       });
 
+      const toNonNegativeCents = (amount) => {
+        const normalized = Number(amount);
+        if (!Number.isFinite(normalized)) return 0;
+        return Math.max(0, Math.trunc(Math.round(normalized * 100)));
+      };
+
+      const ensureV2UserAndWallets = async (legacyUser, legacyWallet) => {
+        const userCode = normalizeV2UserCode(legacyUser?.userId);
+        if (!isValidV2UserCode(userCode)) {
+          throw createApiError(400, 'Invalid legacy user mapping for v2 provisioning', 'V2_PROVISION_USER_CODE_INVALID');
+        }
+
+        const legacyUserId = String(legacyUser?.id || '').trim() || null;
+        const fullNameValue = String(legacyUser?.fullName || userCode).trim().slice(0, 150) || userCode;
+        const emailValue = String(legacyUser?.email || '').trim().slice(0, 190) || null;
+        const v2Status = isLegacyUserEligibleForV2Access(legacyUser) ? 'active' : 'blocked';
+
+        await connection.execute(
+          `INSERT INTO v2_users
+            (legacy_user_id, user_code, full_name, email, status)
+           VALUES
+            (?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE
+            full_name = VALUES(full_name),
+            email = VALUES(email),
+            status = VALUES(status),
+            updated_at = NOW(3)`,
+          [legacyUserId, userCode, fullNameValue, emailValue, v2Status]
+        );
+
+        const [v2UserRows] = await connection.execute(
+          `SELECT id, user_code
+           FROM v2_users
+           WHERE user_code = ?
+           LIMIT 1
+           FOR UPDATE`,
+          [userCode]
+        );
+        const v2User = Array.isArray(v2UserRows) ? v2UserRows[0] : null;
+        if (!v2User) {
+          throw createApiError(500, 'Failed to load provisioned v2 user', 'V2_PROVISION_USER_LOAD_FAILED');
+        }
+
+        const walletBlueprints = [
+          { walletType: 'fund', openingCents: toNonNegativeCents(legacyWallet?.depositWallet) },
+          { walletType: 'income', openingCents: toNonNegativeCents(legacyWallet?.incomeWallet) },
+          { walletType: 'royalty', openingCents: toNonNegativeCents(legacyWallet?.royaltyWallet) }
+        ];
+
+        for (const walletSpec of walletBlueprints) {
+          const accountCode = `USR_${userCode}_${String(walletSpec.walletType).toUpperCase()}`.slice(0, 80);
+          const accountName = `${userCode} ${walletSpec.walletType} wallet`.slice(0, 160);
+
+          await connection.execute(
+            `INSERT INTO v2_gl_accounts
+              (account_code, account_name, account_type, owner_user_id, wallet_type, is_system_account, is_active)
+             VALUES
+              (?, ?, 'LIABILITY', ?, ?, 0, 1)
+             ON DUPLICATE KEY UPDATE
+              account_name = VALUES(account_name),
+              account_type = VALUES(account_type),
+              owner_user_id = VALUES(owner_user_id),
+              wallet_type = VALUES(wallet_type),
+              is_system_account = 0,
+              is_active = 1`,
+            [accountCode, accountName, Number(v2User.id), walletSpec.walletType]
+          );
+
+          const [glRows] = await connection.execute(
+            `SELECT id
+             FROM v2_gl_accounts
+             WHERE account_code = ?
+             LIMIT 1
+             FOR UPDATE`,
+            [accountCode]
+          );
+          const glAccount = Array.isArray(glRows) ? glRows[0] : null;
+          if (!glAccount) {
+            throw createApiError(500, 'Failed to load user GL account for v2 provisioning', 'V2_PROVISION_GL_LOAD_FAILED');
+          }
+
+          await connection.execute(
+            `INSERT INTO v2_wallet_accounts
+              (user_id, wallet_type, gl_account_id, baseline_amount_cents, current_amount_cents, currency, version)
+             VALUES
+              (?, ?, ?, ?, ?, 'INR', 0)
+             ON DUPLICATE KEY UPDATE
+              gl_account_id = VALUES(gl_account_id),
+              updated_at = NOW(3)`,
+            [
+              Number(v2User.id),
+              walletSpec.walletType,
+              Number(glAccount.id),
+              walletSpec.openingCents,
+              walletSpec.openingCents
+            ]
+          );
+        }
+
+        return { userId: Number(v2User.id), userCode };
+      };
+
       connection = await pool.getConnection();
       await connection.beginTransaction();
       transactionOpen = true;
@@ -6994,6 +7096,39 @@ const server = createServer(async (req, res) => {
         createdAt: nowIso
       });
 
+      const walletByInternalId = new Map(
+        wallets.map((wallet) => [String(wallet?.userId || ''), wallet])
+      );
+
+      await ensureV2UserAndWallets(
+        sponsorUser,
+        walletByInternalId.get(String(sponsorUser.id)) || null
+      );
+
+      await ensureV2UserAndWallets(
+        createdUser,
+        walletByInternalId.get(String(createdUser.id)) || null
+      );
+
+      const contributionPlan = await buildLegacyActivationContributionPlanFromMatrixState(connection, createdUser.userId);
+      const provisionedBeneficiaryCodes = new Set();
+      for (const step of Array.isArray(contributionPlan) ? contributionPlan : []) {
+        const beneficiaryUserCode = normalizeV2UserCode(step?.beneficiaryUserCode);
+        if (!isValidV2UserCode(beneficiaryUserCode) || provisionedBeneficiaryCodes.has(beneficiaryUserCode)) {
+          continue;
+        }
+        const beneficiaryLegacyUser = usersByUserId.get(beneficiaryUserCode);
+        if (!beneficiaryLegacyUser) {
+          continue;
+        }
+
+        await ensureV2UserAndWallets(
+          beneficiaryLegacyUser,
+          walletByInternalId.get(String(beneficiaryLegacyUser.id)) || null
+        );
+        provisionedBeneficiaryCodes.add(beneficiaryUserCode);
+      }
+
       const nowDb = toMySQLDatetime(nowIso);
       const upsertStateKey = async (key, value) => {
         await connection.execute(
@@ -7015,12 +7150,61 @@ const server = createServer(async (req, res) => {
       transactionOpen = false;
       invalidateStateSnapshotCache();
 
+      const sideEffectWarnings = [];
+      let referralResult = null;
+      let helpEventResult = null;
+
+      const referralSourceRef = `reg_pin_${createdUser.userId}_${sponsorUser.userId}`;
+      const referralIdempotencyKey = `reg_ref_${createdUser.userId}_${sponsorUser.userId}_${pinCode}`.slice(0, 128);
+      try {
+        const referralOutcome = await processV2ReferralCredit({
+          idempotencyKey: referralIdempotencyKey,
+          actorUserCode: createdUser.userId,
+          sourceUserCode: createdUser.userId,
+          beneficiaryUserCode: sponsorUser.userId,
+          allowInactiveActor: false,
+          sourceRef: referralSourceRef,
+          eventType: 'direct_referral',
+          levelNo: 1,
+          amountCents: 500,
+          description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`
+        });
+        referralResult = referralOutcome?.payload || null;
+      } catch (sideEffectError) {
+        const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle referral income');
+        sideEffectWarnings.push(`Referral settlement pending: ${warningMessage}`);
+      }
+
+      const helpSourceRef = `reg_help_${createdUser.userId}_${createdUser.userId}`;
+      const helpIdempotencyKey = `reg_help_${createdUser.userId}_${pinCode}`.slice(0, 128);
+      try {
+        const helpOutcome = await processV2HelpEvent({
+          idempotencyKey: helpIdempotencyKey,
+          actorUserCode: createdUser.userId,
+          sourceUserCode: createdUser.userId,
+          newMemberUserCode: createdUser.userId,
+          sourceRef: helpSourceRef,
+          eventType: 'activation_join',
+          allowInactiveActor: false,
+          description: `Activation help event for ${createdUser.fullName} (${createdUser.userId})`
+        });
+        helpEventResult = helpOutcome?.payload || null;
+      } catch (sideEffectError) {
+        const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle help event');
+        sideEffectWarnings.push(`Help settlement pending: ${warningMessage}`);
+      }
+
       sendJson(res, 200, {
         ok: true,
         idempotentReplay: false,
         userId: createdUser.userId,
         sponsorUserId: sponsorUser.userId,
-        pinCode
+        pinCode,
+        referralSettled: !!referralResult,
+        helpSettled: !!helpEventResult,
+        sideEffectWarnings,
+        referralResult,
+        helpEventResult
       });
     } catch (error) {
       if (transactionOpen && connection) {

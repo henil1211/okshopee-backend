@@ -920,6 +920,7 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
   userId?: string;
   sponsorUserId?: string;
   idempotentReplay?: boolean;
+  sideEffectWarnings?: string[];
   code?: string;
   status?: number;
   fallbackToLocal?: boolean;
@@ -982,7 +983,10 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
     message: 'Registration committed on server.',
     userId,
     sponsorUserId: typeof payload?.sponsorUserId === 'string' ? payload.sponsorUserId : undefined,
-    idempotentReplay: typeof payload?.idempotentReplay === 'boolean' ? payload.idempotentReplay : false
+    idempotentReplay: typeof payload?.idempotentReplay === 'boolean' ? payload.idempotentReplay : false,
+    sideEffectWarnings: Array.isArray(payload?.sideEffectWarnings)
+      ? payload.sideEffectWarnings.filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0)
+      : []
   };
 }
 
@@ -2023,6 +2027,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     let newUserId = '';
     let referralBeneficiaryUserCode: string | null = null;
     let helpEventSourceUserCode: string | null = null;
+    let backendSideEffectWarning: string | null = null;
     let usedBackendAtomicRegistration = false;
 
     const backendRegistration = await submitV2AtomicRegistration({
@@ -2035,12 +2040,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (backendRegistration.success && backendRegistration.userId) {
       usedBackendAtomicRegistration = true;
       newUserId = backendRegistration.userId;
-      const isReplay = backendRegistration.idempotentReplay === true;
+      const backendWarnings = Array.isArray(backendRegistration.sideEffectWarnings)
+        ? backendRegistration.sideEffectWarnings.filter((warning) => typeof warning === 'string' && warning.trim().length > 0)
+        : [];
+      if (backendWarnings.length > 0) {
+        backendSideEffectWarning = backendWarnings.join(' ');
+      }
 
-      referralBeneficiaryUserCode = isReplay
-        ? null
-        : (backendRegistration.sponsorUserId || sponsor?.userId || null);
-      helpEventSourceUserCode = isReplay ? null : backendRegistration.userId;
+      // Backend atomic registration settles referral/help server-side.
+      referralBeneficiaryUserCode = null;
+      helpEventSourceUserCode = null;
 
       try {
         await Database.forceRemoteSyncKeysNow(Database.getRegistrationFreshDataKeys(), {
@@ -2296,231 +2305,255 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     newUserId = canonicalRegisteredUser.userId;
 
     let consistencyWarning: string | null = null;
-    try {
-      const consistency = await Database.commitCriticalAction(
-        () => Database.ensureRegistrationConsistency({
-          userId: newUserId,
-          fullName,
-          email,
-          phone: normalizedPhone,
-          country,
-          sponsorId: sponsor?.userId || null,
-          loginPassword: password,
-          transactionPassword,
-          pinCode: normalizedPinCode
-        }),
-        {
-          full: false,
-          force: true,
-          timeoutMs: 90000,
-          maxAttempts: 3,
-          retryDelayMs: 1500
-        }
-      );
-      newUser = consistency.user;
-      newUserId = consistency.user.userId;
-    } catch (error) {
-      // Registration can already be committed even if this strict verification sync step fails.
-      // Fall back to local consistency repair and only fail if the created user is truly missing.
+    if (usedBackendAtomicRegistration) {
       try {
-        const localConsistency = Database.ensureRegistrationConsistency({
-          userId: newUserId,
-          fullName,
-          email,
-          phone: normalizedPhone,
-          country,
-          sponsorId: sponsor?.userId || null,
-          loginPassword: password,
-          transactionPassword,
-          pinCode: normalizedPinCode
+        await Database.hydrateFromServer({
+          keys: Database.getRegistrationFreshDataKeys(),
+          strict: false,
+          maxAttempts: 2,
+          timeoutMs: 30000,
+          retryDelayMs: 1000
         });
-        newUser = localConsistency.user;
-        newUserId = localConsistency.user.userId;
-        consistencyWarning = 'Verification sync is delayed; account was created and will auto-resync.';
       } catch {
-        const canonicalUser = Database.getUserByUserId(newUserId);
-        if (canonicalUser) {
-          newUser = canonicalUser;
-          newUserId = canonicalUser.userId;
+        // Best-effort refresh only. Continue with server-authoritative ID.
+      }
+
+      const serverUser = Database.getUserByUserId(newUserId);
+      if (serverUser) {
+        newUser = serverUser;
+        newUserId = serverUser.userId;
+      } else {
+        consistencyWarning = 'Registration committed on server. Data sync is delayed and will auto-resync shortly.';
+      }
+    } else {
+      try {
+        const consistency = await Database.commitCriticalAction(
+          () => Database.ensureRegistrationConsistency({
+            userId: newUserId,
+            fullName,
+            email,
+            phone: normalizedPhone,
+            country,
+            sponsorId: sponsor?.userId || null,
+            loginPassword: password,
+            transactionPassword,
+            pinCode: normalizedPinCode
+          }),
+          {
+            full: false,
+            force: true,
+            timeoutMs: 90000,
+            maxAttempts: 3,
+            retryDelayMs: 1500
+          }
+        );
+        newUser = consistency.user;
+        newUserId = consistency.user.userId;
+      } catch (error) {
+        // Registration can already be committed even if this strict verification sync step fails.
+        // Fall back to local consistency repair and only fail if the created user is truly missing.
+        try {
+          const localConsistency = Database.ensureRegistrationConsistency({
+            userId: newUserId,
+            fullName,
+            email,
+            phone: normalizedPhone,
+            country,
+            sponsorId: sponsor?.userId || null,
+            loginPassword: password,
+            transactionPassword,
+            pinCode: normalizedPinCode
+          });
+          newUser = localConsistency.user;
+          newUserId = localConsistency.user.userId;
           consistencyWarning = 'Verification sync is delayed; account was created and will auto-resync.';
-        } else {
-          // Last-mile repair: if strict sync raced with stale hydration, rebuild from staged user data.
-          try {
-            if (!Database.getUserByUserId(newUser.userId) && !Database.getUserById(newUser.id)) {
-              Database.createUser({
-                ...newUser,
+        } catch {
+          const canonicalUser = Database.getUserByUserId(newUserId);
+          if (canonicalUser) {
+            newUser = canonicalUser;
+            newUserId = canonicalUser.userId;
+            consistencyWarning = 'Verification sync is delayed; account was created and will auto-resync.';
+          } else {
+            // Last-mile repair: if strict sync raced with stale hydration, rebuild from staged user data.
+            try {
+              if (!Database.getUserByUserId(newUser.userId) && !Database.getUserById(newUser.id)) {
+                Database.createUser({
+                  ...newUser,
+                  fullName,
+                  email,
+                  phone: normalizedPhone,
+                  country,
+                  sponsorId: sponsor?.userId || null,
+                  password,
+                  transactionPassword,
+                  isActive: true,
+                  accountStatus: 'active',
+                  activatedAt: newUser.activatedAt || new Date().toISOString()
+                });
+              }
+
+              if (!Database.getMatrixNode(newUser.userId)) {
+                const parentUserId = newUser.parentId || null;
+                const reconstructedNode: MatrixNode = {
+                  userId: newUser.userId,
+                  username: fullName,
+                  level: parentUserId ? (Database.getMatrixNode(parentUserId)?.level || 0) + 1 : 0,
+                  position: newUser.position === 'left' ? 0 : 1,
+                  parentId: parentUserId || undefined,
+                  isActive: true
+                };
+                Database.addMatrixNode(reconstructedNode);
+              }
+
+              const repairedConsistency = Database.ensureRegistrationConsistency({
+                userId: newUser.userId,
                 fullName,
                 email,
                 phone: normalizedPhone,
                 country,
                 sponsorId: sponsor?.userId || null,
-                password,
+                loginPassword: password,
                 transactionPassword,
-                isActive: true,
-                accountStatus: 'active',
-                activatedAt: newUser.activatedAt || new Date().toISOString()
+                pinCode: normalizedPinCode
               });
-            }
 
-            if (!Database.getMatrixNode(newUser.userId)) {
-              const parentUserId = newUser.parentId || null;
-              const reconstructedNode: MatrixNode = {
-                userId: newUser.userId,
-                username: fullName,
-                level: parentUserId ? (Database.getMatrixNode(parentUserId)?.level || 0) + 1 : 0,
-                position: newUser.position === 'left' ? 0 : 1,
-                parentId: parentUserId || undefined,
-                isActive: true
+              newUser = repairedConsistency.user;
+              newUserId = repairedConsistency.user.userId;
+              consistencyWarning = 'Registration was recovered after verification race; data will auto-resync.';
+            } catch {
+              const reason = error instanceof Error && error.message
+                ? ` (${error.message})`
+                : '';
+              return {
+                success: false,
+                message: `Registration completed but verification failed${reason}. Please contact admin to run user recovery for this ID.`
               };
-              Database.addMatrixNode(reconstructedNode);
             }
-
-            const repairedConsistency = Database.ensureRegistrationConsistency({
-              userId: newUser.userId,
-              fullName,
-              email,
-              phone: normalizedPhone,
-              country,
-              sponsorId: sponsor?.userId || null,
-              loginPassword: password,
-              transactionPassword,
-              pinCode: normalizedPinCode
-            });
-
-            newUser = repairedConsistency.user;
-            newUserId = repairedConsistency.user.userId;
-            consistencyWarning = 'Registration was recovered after verification race; data will auto-resync.';
-          } catch {
-            const reason = error instanceof Error && error.message
-              ? ` (${error.message})`
-              : '';
-            return {
-              success: false,
-              message: `Registration completed but verification failed${reason}. Please contact admin to run user recovery for this ID.`
-            };
           }
         }
-      }
 
-      void Database.forceRemoteSyncNowWithOptions({
-        full: false,
-        force: true,
-        timeoutMs: 30000,
-        maxAttempts: 2,
-        retryDelayMs: 1000
-      }).catch(() => {
-        // Best-effort background sync only.
-      });
+        void Database.forceRemoteSyncNowWithOptions({
+          full: false,
+          force: true,
+          timeoutMs: 30000,
+          maxAttempts: 2,
+          retryDelayMs: 1000
+        }).catch(() => {
+          // Best-effort background sync only.
+        });
+      }
     }
 
     let referralCreditWarning: string | null = null;
-    if (referralBeneficiaryUserCode) {
-      const sourceUserCode = String(newUser.userId || '').trim();
-      const beneficiaryUserCode = String(referralBeneficiaryUserCode || '').trim();
-      const sourceRef = `reg_pin_${sourceUserCode}_${beneficiaryUserCode}`;
+    let helpEventWarning: string | null = null;
+    if (!usedBackendAtomicRegistration) {
+      if (referralBeneficiaryUserCode) {
+        const sourceUserCode = String(newUser.userId || '').trim();
+        const beneficiaryUserCode = String(referralBeneficiaryUserCode || '').trim();
+        const sourceRef = `reg_pin_${sourceUserCode}_${beneficiaryUserCode}`;
 
-      let referralResult = await submitV2ReferralCreditBySourceRef({
-        sourceUserCode,
-        beneficiaryUserCode,
-        amount: 5,
-        sourceRef,
-        eventType: 'direct_referral',
-        levelNo: 1,
-        description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
-      });
-
-      if (!referralResult.success) {
-        try {
-          await Database.forceRemoteSyncNowWithOptions({
-            full: false,
-            force: true,
-            timeoutMs: 30000,
-            maxAttempts: 2,
-            retryDelayMs: 1000
-          });
-          await Database.hydrateFromServer({
-            keys: [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
-            strict: true,
-            maxAttempts: 2,
-            timeoutMs: 15000,
-            retryDelayMs: 800
-          });
-          referralResult = await submitV2ReferralCreditBySourceRef({
-            sourceUserCode,
-            beneficiaryUserCode,
-            amount: 5,
-            sourceRef,
-            eventType: 'direct_referral',
-            levelNo: 1,
-            description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
-          });
-        } catch {
-          // best-effort retry only
-        }
-      }
-
-      if (!referralResult.success) {
-        enqueuePendingReferralCreditRetry({
+        let referralResult = await submitV2ReferralCreditBySourceRef({
           sourceUserCode,
           beneficiaryUserCode,
           amount: 5,
           sourceRef,
+          eventType: 'direct_referral',
+          levelNo: 1,
           description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
         });
-        referralCreditWarning = `Referral credit is queued for auto-retry (${referralResult.message}).`;
-      }
-    }
 
-    let helpEventWarning: string | null = null;
-    if (helpEventSourceUserCode) {
-      const sourceUserCode = String(helpEventSourceUserCode || '').trim();
-      const newMemberUserCode = String(newUser.userId || '').trim();
-      const sourceRef = `reg_help_${sourceUserCode}_${newMemberUserCode}`;
+        if (!referralResult.success) {
+          try {
+            await Database.forceRemoteSyncNowWithOptions({
+              full: false,
+              force: true,
+              timeoutMs: 30000,
+              maxAttempts: 2,
+              retryDelayMs: 1000
+            });
+            await Database.hydrateFromServer({
+              keys: [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
+              strict: true,
+              maxAttempts: 2,
+              timeoutMs: 15000,
+              retryDelayMs: 800
+            });
+            referralResult = await submitV2ReferralCreditBySourceRef({
+              sourceUserCode,
+              beneficiaryUserCode,
+              amount: 5,
+              sourceRef,
+              eventType: 'direct_referral',
+              levelNo: 1,
+              description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
+            });
+          } catch {
+            // best-effort retry only
+          }
+        }
 
-      let helpEventResult = await submitV2HelpEventBySourceRef({
-        sourceUserCode,
-        newMemberUserCode,
-        sourceRef,
-        eventType: 'activation_join',
-        description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
-      });
-
-      if (!helpEventResult.success) {
-        try {
-          await Database.forceRemoteSyncNowWithOptions({
-            full: false,
-            force: true,
-            timeoutMs: 30000,
-            maxAttempts: 2,
-            retryDelayMs: 1000
-          });
-          await Database.hydrateFromServer({
-            keys: [DB_KEYS.USERS, DB_KEYS.MATRIX],
-            strict: true,
-            maxAttempts: 2,
-            timeoutMs: 15000,
-            retryDelayMs: 800
-          });
-          helpEventResult = await submitV2HelpEventBySourceRef({
+        if (!referralResult.success) {
+          enqueuePendingReferralCreditRetry({
             sourceUserCode,
-            newMemberUserCode,
+            beneficiaryUserCode,
+            amount: 5,
             sourceRef,
-            eventType: 'activation_join',
-            description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+            description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
           });
-        } catch {
-          // best-effort retry only
+          referralCreditWarning = `Referral credit is queued for auto-retry (${referralResult.message}).`;
         }
       }
 
-      if (!helpEventResult.success) {
-        enqueuePendingHelpEventRetry({
+      if (helpEventSourceUserCode) {
+        const sourceUserCode = String(helpEventSourceUserCode || '').trim();
+        const newMemberUserCode = String(newUser.userId || '').trim();
+        const sourceRef = `reg_help_${sourceUserCode}_${newMemberUserCode}`;
+
+        let helpEventResult = await submitV2HelpEventBySourceRef({
           sourceUserCode,
           newMemberUserCode,
           sourceRef,
+          eventType: 'activation_join',
           description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
         });
-        helpEventWarning = `Help event is queued for auto-retry (${helpEventResult.message}).`;
+
+        if (!helpEventResult.success) {
+          try {
+            await Database.forceRemoteSyncNowWithOptions({
+              full: false,
+              force: true,
+              timeoutMs: 30000,
+              maxAttempts: 2,
+              retryDelayMs: 1000
+            });
+            await Database.hydrateFromServer({
+              keys: [DB_KEYS.USERS, DB_KEYS.MATRIX],
+              strict: true,
+              maxAttempts: 2,
+              timeoutMs: 15000,
+              retryDelayMs: 800
+            });
+            helpEventResult = await submitV2HelpEventBySourceRef({
+              sourceUserCode,
+              newMemberUserCode,
+              sourceRef,
+              eventType: 'activation_join',
+              description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+            });
+          } catch {
+            // best-effort retry only
+          }
+        }
+
+        if (!helpEventResult.success) {
+          enqueuePendingHelpEventRetry({
+            sourceUserCode,
+            newMemberUserCode,
+            sourceRef,
+            description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+          });
+          helpEventWarning = `Help event is queued for auto-retry (${helpEventResult.message}).`;
+        }
       }
     }
 
@@ -2551,7 +2584,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         userId: newUser.userId
       }
     });
-    const warnings = [consistencyWarning, referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
+    const warnings = [backendSideEffectWarning, consistencyWarning, referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
     const registrationMessage = warnings.length > 0
       ? `Registration successful. Your ID is: ${newUserId}. ${warnings.join(' ')}`
       : `Registration successful. Your ID is: ${newUserId}`;
