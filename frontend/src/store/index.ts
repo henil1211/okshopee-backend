@@ -2093,7 +2093,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     let backendSideEffectWarning: string | null = null;
     let usedBackendAtomicRegistration = false;
 
-    const canAttemptBackendAtomicRegistration = !!actingUser;
+    const backendAtomicEligible = (() => {
+      if (!actingUser) return false;
+      const tokenResult = resolveV2BearerTokenOrError(actingUser);
+      return 'token' in tokenResult;
+    })();
+
+    const canAttemptBackendAtomicRegistration = backendAtomicEligible;
     let backendRegistration: Awaited<ReturnType<typeof submitV2AtomicRegistration>> = {
       success: false,
       message: 'Skipped backend atomic registration for unauthenticated signup flow.',
@@ -2107,6 +2113,21 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         sponsorId: sponsor?.userId || sponsorId,
         pinCode: normalizedPinCode
       });
+
+      const backendMessage = String(backendRegistration.message || '').toLowerCase();
+      const isAuthSessionError =
+        backendRegistration.status === 401
+        || backendRegistration.status === 403
+        || backendMessage.includes('authentication session expired')
+        || backendMessage.includes('please login again')
+        || backendMessage.includes('v2 session is missing or expired');
+
+      if (!backendRegistration.success && isAuthSessionError) {
+        backendRegistration = {
+          ...backendRegistration,
+          fallbackToLocal: true
+        };
+      }
     }
 
     if (canAttemptBackendAtomicRegistration && !backendRegistration.success && !backendRegistration.fallbackToLocal) {
