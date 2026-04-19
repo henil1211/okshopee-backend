@@ -52,6 +52,7 @@ function usageAndExit() {
   console.log('  node scripts/audit-legacy-all-financial-issues.cjs');
   console.log('  node scripts/audit-legacy-all-financial-issues.cjs --users 6709222,7958187 --limit 500');
   console.log('  node scripts/audit-legacy-all-financial-issues.cjs --host 127.0.0.1 --user root --password "***" --database okshopee24 --json');
+  console.log('  node scripts/audit-legacy-all-financial-issues.cjs --state-file data/app-state.local.json --json');
   process.exit(1);
 }
 
@@ -132,6 +133,27 @@ function stamp() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
 }
 
+function readStateFromFile(stateFilePath) {
+  const absolutePath = path.resolve(process.cwd(), stateFilePath);
+  if (!fs.existsSync(absolutePath)) {
+    throw new Error(`State file not found: ${absolutePath}`);
+  }
+
+  const payload = parseJson(fs.readFileSync(absolutePath, 'utf8'), {});
+  const state = payload && typeof payload === 'object' && payload.state && typeof payload.state === 'object'
+    ? payload.state
+    : payload;
+
+  return {
+    source: `file:${absolutePath}`,
+    users: parseJson(state.mlm_users, []),
+    transactions: parseJson(state.mlm_transactions, []),
+    wallets: parseJson(state.mlm_wallets, []),
+    matrix: parseJson(state.mlm_matrix, []),
+    pins: parseJson(state.mlm_pins, [])
+  };
+}
+
 async function main() {
   if (hasFlag('--help') || hasFlag('-h')) {
     usageAndExit();
@@ -143,6 +165,7 @@ async function main() {
   const dbUser = readArg('--user', process.env.MYSQL_USER || 'root');
   const dbPassword = readArg('--password', process.env.MYSQL_PASSWORD || '');
   const dbName = readArg('--database', process.env.MYSQL_DATABASE || 'okshopee24');
+  const stateFile = readArg('--state-file', '');
   const label = readArg('--label', 'legacy-all-financial-issues-audit');
   const limitRaw = Number(readArg('--limit', '500'));
   const limit = Number.isFinite(limitRaw) ? Math.max(50, Math.min(5000, Math.trunc(limitRaw))) : 500;
@@ -160,31 +183,50 @@ async function main() {
     return codes.some((code) => scopedSet.has(String(code || '').trim()));
   };
 
-  const pool = mysql.createPool({
-    host: dbHost,
-    port: dbPort,
-    user: dbUser,
-    password: dbPassword,
-    database: dbName,
-    waitForConnections: true,
-    connectionLimit: 5,
-    charset: 'utf8mb4'
-  });
+  let dataSource = '';
+  let users = [];
+  let transactions = [];
+  let wallets = [];
+  let matrix = [];
+  let pins = [];
+  let pool = null;
 
   try {
-    const [stateRows] = await pool.query(
-      `SELECT state_key, state_value
-       FROM state_store
-       WHERE state_key IN ('mlm_users', 'mlm_transactions', 'mlm_wallets', 'mlm_matrix', 'mlm_pins')`
-    );
+    if (stateFile) {
+      const stateData = readStateFromFile(stateFile);
+      dataSource = stateData.source;
+      users = stateData.users;
+      transactions = stateData.transactions;
+      wallets = stateData.wallets;
+      matrix = stateData.matrix;
+      pins = stateData.pins;
+    } else {
+      pool = mysql.createPool({
+        host: dbHost,
+        port: dbPort,
+        user: dbUser,
+        password: dbPassword,
+        database: dbName,
+        waitForConnections: true,
+        connectionLimit: 5,
+        charset: 'utf8mb4'
+      });
 
-    const byKey = new Map((Array.isArray(stateRows) ? stateRows : []).map((row) => [String(row.state_key || ''), row.state_value]));
+      const [stateRows] = await pool.query(
+        `SELECT state_key, state_value
+         FROM state_store
+         WHERE state_key IN ('mlm_users', 'mlm_transactions', 'mlm_wallets', 'mlm_matrix', 'mlm_pins')`
+      );
 
-    const users = parseJson(byKey.get('mlm_users'), []);
-    const transactions = parseJson(byKey.get('mlm_transactions'), []);
-    const wallets = parseJson(byKey.get('mlm_wallets'), []);
-    const matrix = parseJson(byKey.get('mlm_matrix'), []);
-    const pins = parseJson(byKey.get('mlm_pins'), []);
+      const byKey = new Map((Array.isArray(stateRows) ? stateRows : []).map((row) => [String(row.state_key || ''), row.state_value]));
+
+      users = parseJson(byKey.get('mlm_users'), []);
+      transactions = parseJson(byKey.get('mlm_transactions'), []);
+      wallets = parseJson(byKey.get('mlm_wallets'), []);
+      matrix = parseJson(byKey.get('mlm_matrix'), []);
+      pins = parseJson(byKey.get('mlm_pins'), []);
+      dataSource = `mysql:${dbName}`;
+    }
 
     const userIndex = buildUserIndexes(users);
     const matrixByUserCode = buildMatrixIndex(matrix);
@@ -469,7 +511,7 @@ async function main() {
       scope: {
         usersFilter: scopedUsers,
         limit,
-        database: dbName,
+        dataSource,
         usersScanned: Array.isArray(users) ? users.length : 0,
         transactionsScanned: Array.isArray(transactions) ? transactions.length : 0,
         walletsScanned: Array.isArray(wallets) ? wallets.length : 0,
@@ -510,10 +552,13 @@ async function main() {
     } else {
       console.log('--- Legacy All Financial Issues Audit ---');
       console.log(`Report: ${reportPath}`);
+      console.log(`Data source: ${dataSource}`);
       console.log(JSON.stringify(report.summary, null, 2));
     }
   } finally {
-    await pool.end();
+    if (pool) {
+      await pool.end();
+    }
   }
 }
 
