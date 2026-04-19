@@ -6848,15 +6848,108 @@ const server = createServer(async (req, res) => {
         const replayUserRef = String(selectedPin?.registrationUserId || selectedPin?.usedById || '').trim();
         const replayUser = usersByInternalId.get(replayUserRef) || usersByUserId.get(replayUserRef);
         if (replayUser?.userId) {
+          const replaySponsorUserCode = normalizeV2UserCode(replayUser.sponsorId);
+          const replaySponsorUser = isValidV2UserCode(replaySponsorUserCode)
+            ? usersByUserId.get(replaySponsorUserCode) || null
+            : null;
+
+          const walletByInternalId = new Map(
+            wallets.map((wallet) => [String(wallet?.userId || ''), wallet])
+          );
+
+          await ensureV2UserAndWallets(
+            replayUser,
+            walletByInternalId.get(String(replayUser.id)) || null
+          );
+
+          if (replaySponsorUser) {
+            await ensureV2UserAndWallets(
+              replaySponsorUser,
+              walletByInternalId.get(String(replaySponsorUser.id)) || null
+            );
+          }
+
+          const replayContributionPlan = await buildLegacyActivationContributionPlanFromMatrixState(connection, replayUser.userId);
+          const replayProvisionedCodes = new Set();
+          for (const step of Array.isArray(replayContributionPlan) ? replayContributionPlan : []) {
+            const beneficiaryUserCode = normalizeV2UserCode(step?.beneficiaryUserCode);
+            if (!isValidV2UserCode(beneficiaryUserCode) || replayProvisionedCodes.has(beneficiaryUserCode)) {
+              continue;
+            }
+            const beneficiaryLegacyUser = usersByUserId.get(beneficiaryUserCode);
+            if (!beneficiaryLegacyUser) {
+              continue;
+            }
+
+            await ensureV2UserAndWallets(
+              beneficiaryLegacyUser,
+              walletByInternalId.get(String(beneficiaryLegacyUser.id)) || null
+            );
+            replayProvisionedCodes.add(beneficiaryUserCode);
+          }
+
           await connection.commit();
           transactionOpen = false;
+          invalidateStateSnapshotCache();
+
+          const sideEffectWarnings = [];
+          let referralResult = null;
+          let helpEventResult = null;
+
+          if (replaySponsorUser?.userId) {
+            const replayReferralSourceRef = `reg_pin_${replayUser.userId}_${replaySponsorUser.userId}`;
+            const replayReferralIdempotencyKey = `reg_ref_${replayUser.userId}_${replaySponsorUser.userId}_${pinCode}`.slice(0, 128);
+            try {
+              const replayReferralOutcome = await processV2ReferralCredit({
+                idempotencyKey: replayReferralIdempotencyKey,
+                actorUserCode: replayUser.userId,
+                sourceUserCode: replayUser.userId,
+                beneficiaryUserCode: replaySponsorUser.userId,
+                allowInactiveActor: false,
+                sourceRef: replayReferralSourceRef,
+                eventType: 'direct_referral',
+                levelNo: 1,
+                amountCents: 500,
+                description: `Referral income from ${replayUser.fullName} (${replayUser.userId})`
+              });
+              referralResult = replayReferralOutcome?.payload || null;
+            } catch (sideEffectError) {
+              const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle referral income');
+              sideEffectWarnings.push(`Referral settlement pending: ${warningMessage}`);
+            }
+          }
+
+          const replayHelpSourceRef = `reg_help_${replayUser.userId}_${replayUser.userId}`;
+          const replayHelpIdempotencyKey = `reg_help_${replayUser.userId}_${pinCode}`.slice(0, 128);
+          try {
+            const replayHelpOutcome = await processV2HelpEvent({
+              idempotencyKey: replayHelpIdempotencyKey,
+              actorUserCode: replayUser.userId,
+              sourceUserCode: replayUser.userId,
+              newMemberUserCode: replayUser.userId,
+              sourceRef: replayHelpSourceRef,
+              eventType: 'activation_join',
+              allowInactiveActor: false,
+              description: `Activation help event for ${replayUser.fullName} (${replayUser.userId})`
+            });
+            helpEventResult = replayHelpOutcome?.payload || null;
+          } catch (sideEffectError) {
+            const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle help event');
+            sideEffectWarnings.push(`Help settlement pending: ${warningMessage}`);
+          }
+
           sendJson(res, 200, {
             ok: true,
             userId: replayUser.userId,
             sponsorUserId: String(replayUser.sponsorId || ''),
             pinCode,
             idempotentReplay: true,
-            message: `Registration already completed for User ID ${replayUser.userId}`
+            message: `Registration already completed for User ID ${replayUser.userId}`,
+            referralSettled: !!referralResult,
+            helpSettled: !!helpEventResult,
+            sideEffectWarnings,
+            referralResult,
+            helpEventResult
           });
           return;
         }
