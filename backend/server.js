@@ -238,6 +238,9 @@ const V2_STATE_WRITE_ALLOWLIST_ADMIN = new Set([
   'mlm_matrix',
   'mlm_grace_periods',
   'mlm_reentries',
+  'mlm_pins',
+  'mlm_pin_transfers',
+  'mlm_pin_purchase_requests',
   'mlm_notifications',
   'mlm_announcements',
   'mlm_settings',
@@ -253,6 +256,11 @@ const V2_STATE_WRITE_ALLOWLIST_ADMIN = new Set([
   'mlm_marketplace_deals',
   'mlm_marketplace_invoices',
   'mlm_marketplace_redemptions'
+]);
+const V2_ADMIN_PIN_STATE_WRITE_KEYS = new Set([
+  'mlm_pins',
+  'mlm_pin_transfers',
+  'mlm_pin_purchase_requests'
 ]);
 const QUALIFICATION_LOCKED_USER_FIELDS = Object.freeze([
   'sponsorId',
@@ -7396,7 +7404,10 @@ const server = createServer(async (req, res) => {
         }
       }
 
-      const blockedFinancialKeys = getIncomingFinancialStateKeys(incomingState);
+      let blockedFinancialKeys = getIncomingFinancialStateKeys(incomingState);
+      if (FINANCE_ENGINE_MODE === 'v2' && stateActorContext?.authSubjectIsAdmin) {
+        blockedFinancialKeys = blockedFinancialKeys.filter((key) => !V2_ADMIN_PIN_STATE_WRITE_KEYS.has(key));
+      }
       if (FINANCE_ENGINE_MODE === 'v2' && !LEGACY_FINANCIAL_WRITES_ENABLED && blockedFinancialKeys.length > 0) {
         sendJson(res, 403, {
           ok: false,

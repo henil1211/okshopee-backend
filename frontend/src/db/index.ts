@@ -9506,9 +9506,11 @@ class Database {
     return this.getCached<Pin[]>(DB_KEYS.PINS, []);
   }
 
-  static savePins(pins: Pin[]): void {
+  static savePins(pins: Pin[], options?: { syncWallet?: boolean }): void {
     this.setCached(DB_KEYS.PINS, pins);
-    this.syncPinWalletFromPins(pins);
+    if (options?.syncWallet !== false) {
+      this.syncPinWalletFromPins(pins);
+    }
   }
 
   private static syncPinWalletFromPins(pins: Pin[]): void {
@@ -9634,7 +9636,8 @@ class Database {
       }
     }
 
-    this.savePins(allPins);
+    // Keep PIN issuance independent from wallet state writes in v2 sync mode.
+    this.savePins(allPins, { syncWallet: false });
     return pins;
   }
 

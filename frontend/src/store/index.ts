@@ -3496,7 +3496,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   generatePins: async (quantity: number, ownerId: string) => {
-    await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS] });
+    await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS] });
 
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
@@ -3524,7 +3524,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         }
       );
     } catch {
-      await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS] });
+      await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS] });
       get().loadAllPins();
       get().loadAllUsers();
       return {
@@ -3539,7 +3539,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
         maxAttempts: 2,
         timeoutMs: 12000,
         retryDelayMs: 800,
-        keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS]
+        keys: [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS]
       });
     } catch {
       // Commit already succeeded; this refresh is best-effort only.
