@@ -34,7 +34,9 @@
     "v2:audit:help-gaps": "node scripts/audit-v2-help-gaps.js",
     "v2:audit:help-gaps:json": "node scripts/audit-v2-help-gaps.js --json",
     "v2:repair:immediate-give-help:dry": "node scripts/repair-v2-immediate-give-help.js --dry-run --source-user-code 0000000",
-    "v2:repair:immediate-give-help:apply": "node scripts/repair-v2-immediate-give-help.js --apply --source-user-code 0000000"
+    "v2:repair:immediate-give-help:apply": "node scripts/repair-v2-immediate-give-help.js --apply --source-user-code 0000000",
+    "legacy:repair:help-overcredit:dry": "node scripts/repair-legacy-help-overcredit-by-users.cjs --users 0000000 --dry-run",
+    "legacy:repair:help-overcredit:apply": "node scripts/repair-legacy-help-overcredit-by-users.cjs --users 0000000 --apply"
   },
   "dependencies": {
     "cors": "^2.8.6",

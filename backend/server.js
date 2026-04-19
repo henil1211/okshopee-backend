@@ -4927,6 +4927,68 @@ async function processV2HelpEvent({
 
     await ensureV2HelpEventsQueueTable(connection);
 
+    const [existingMemberEventRows] = await connection.execute(
+      `SELECT id, event_key, status, created_at, processed_at, payload_json
+       FROM v2_help_events_queue
+       WHERE source_user_id = ?
+         AND new_member_user_id = ?
+         AND event_type = ?
+       ORDER BY id ASC
+       LIMIT 1
+       FOR UPDATE`,
+      [sourceUser.id, newMemberUser.id, eventType]
+    );
+    const existingMemberEvent = Array.isArray(existingMemberEventRows) ? existingMemberEventRows[0] : null;
+
+    if (existingMemberEvent && String(existingMemberEvent.event_key || '') !== eventKey) {
+      if (String(existingMemberEvent.status || '') === 'processed') {
+        const storedPayload = parseIdempotencyResponseBody(existingMemberEvent.payload_json) || {};
+        const replayPayload = (storedPayload && typeof storedPayload === 'object' && storedPayload.result)
+          ? {
+            ...storedPayload.result,
+            idempotentReplay: true,
+            duplicateSuppressed: true,
+            originalEventKey: String(existingMemberEvent.event_key || ''),
+            suppressedEventKey: eventKey
+          }
+          : {
+            ok: true,
+            queueEventId: Number(existingMemberEvent.id),
+            eventKey: String(existingMemberEvent.event_key || ''),
+            eventType,
+            sourceRef: normalizedSourceRef,
+            sourceUserCode,
+            newMemberUserCode,
+            queueStatus: 'processed',
+            queuedAt: existingMemberEvent.created_at ? new Date(existingMemberEvent.created_at).toISOString() : new Date().toISOString(),
+            processedAt: existingMemberEvent.processed_at ? new Date(existingMemberEvent.processed_at).toISOString() : new Date().toISOString(),
+            alreadyProcessed: true,
+            idempotentReplay: true,
+            duplicateSuppressed: true,
+            originalEventKey: String(existingMemberEvent.event_key || ''),
+            suppressedEventKey: eventKey
+          };
+
+        await connection.execute(
+          `UPDATE v2_idempotency_keys
+           SET status = 'completed', response_code = ?, response_body = ?,
+               locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
+           WHERE idempotency_key = ?`,
+          [200, JSON.stringify(replayPayload), idempotencyKey]
+        );
+
+        await connection.commit();
+        transactionOpen = false;
+        return { status: 200, payload: replayPayload };
+      }
+
+      throw createApiError(
+        409,
+        'Activation help event already exists for this member and source user',
+        'HELP_EVENT_DUPLICATE_MEMBER_ACTIVATION'
+      );
+    }
+
     const eventPayload = {
       sourceUserCode,
       newMemberUserCode,
