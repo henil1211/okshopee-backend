@@ -62,7 +62,7 @@ export default function CreateId() {
   const pinRefreshInFlight = useRef<Promise<void> | null>(null);
   const lastPinRefresh = useRef<number>(0);
   const selectedPinRef = useRef('');
-  const displayUserIdRef = useRef<string | null>(displayUser?.id ?? null);
+  const displayUserIdRef = useRef<string | null>(null);
   const successBannerRef = useRef<HTMLDivElement | null>(null);
   const submitInFlightRef = useRef(false);
 
@@ -75,6 +75,27 @@ export default function CreateId() {
     'Indonesia', 'Philippines', 'Thailand', 'Vietnam', 'UAE', 'Saudi Arabia',
     'Other'
   ];
+
+  const resolveDisplayUserOwnerId = (): string | null => {
+    if (!displayUser) return null;
+    const byUserCode = displayUser.userId ? Database.getUserByUserId(displayUser.userId) : null;
+    return byUserCode?.id || displayUser.id || null;
+  };
+
+  const isPinCurrentlyUnused = (pinCode: string): boolean => {
+    const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+    if (!normalizedPinCode) return false;
+
+    const currentUserId = displayUserIdRef.current || resolveDisplayUserOwnerId();
+    if (currentUserId) {
+      const matchesLocal = Database.getUnusedPins(currentUserId)
+        .some((pin) => String(pin.pinCode || '').trim().toUpperCase() === normalizedPinCode);
+      if (matchesLocal) return true;
+    }
+
+    return unusedPins
+      .some((pin) => String(pin.pinCode || '').trim().toUpperCase() === normalizedPinCode);
+  };
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -94,8 +115,8 @@ export default function CreateId() {
   }, [displayUser?.id, displayUser?.userId, displayUser?.fullName]);
 
   useEffect(() => {
-    displayUserIdRef.current = displayUser?.id ?? null;
-  }, [displayUser?.id]);
+    displayUserIdRef.current = resolveDisplayUserOwnerId();
+  }, [displayUser?.id, displayUser?.userId]);
 
   useEffect(() => {
     selectedPinRef.current = formData.pinCode;
@@ -149,10 +170,7 @@ export default function CreateId() {
       setIsPinChecking(false);
       return;
     }
-    const currentUserId = displayUserIdRef.current;
-    const stillUnused = currentUserId
-      ? Database.getUnusedPins(currentUserId).some(pin => pin.pinCode === value)
-      : false;
+    const stillUnused = isPinCurrentlyUnused(value);
     if (!stillUnused) {
       setError('Selected PIN is no longer available');
       setFormData(prev => ({ ...prev, pinCode: '' }));
@@ -295,7 +313,7 @@ export default function CreateId() {
     if (!formData.sponsorId || formData.sponsorId.length !== 7) return 'Valid sponsor ID is required';
     if (!sponsorName) return 'Sponsor ID not found';
     if (!formData.pinCode) return 'Please select a PIN';
-    if (!unusedPins.some(p => p.pinCode === formData.pinCode)) return 'Selected PIN is not available';
+    if (!isPinCurrentlyUnused(formData.pinCode)) return 'Selected PIN is not available';
     if (!isStrongPassword(formData.password)) return getPasswordRequirementsText();
     if (formData.password !== formData.confirmPassword) return 'Passwords do not match';
     if (!isValidTransactionPassword(formData.transactionPassword)) return getTransactionPasswordRequirementsText();
@@ -322,10 +340,7 @@ export default function CreateId() {
     if (formData.pinCode) {
       setIsPinChecking(true);
       await refreshPins();
-      const currentUserId = displayUserIdRef.current;
-      const stillUnused = currentUserId
-        ? Database.getUnusedPins(currentUserId).some(pin => pin.pinCode === formData.pinCode)
-        : false;
+      const stillUnused = isPinCurrentlyUnused(formData.pinCode);
       setIsPinChecking(false);
       if (!stillUnused) {
         setError('Selected PIN is no longer available');
