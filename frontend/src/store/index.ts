@@ -3496,47 +3496,57 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   generatePins: async (quantity: number, ownerId: string) => {
-    await Database.ensureFreshData();
+    await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS] });
 
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can generate PINs' };
     }
 
-    const pins = Database.generatePins(quantity, ownerId, adminUser.id);
-    get().loadAllPins();
-    get().loadAllUsers();
+    const syncGate = Database.getSensitiveActionSyncGate();
+    if (!syncGate.allowed && syncGate.status.state === 'offline') {
+      return {
+        success: false,
+        message: syncGate.message || 'Server sync is offline. Please wait for sync and retry PIN generation.'
+      };
+    }
 
+    let pins: Pin[] = [];
     try {
-      const synced = await Database.forceRemoteSyncKeysNow([DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS], {
-        force: true,
-        timeoutMs: 15000,
-        maxAttempts: 3,
-        retryDelayMs: 500
-      });
-
-      if (!synced) {
-        await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS] });
-        get().loadAllPins();
-        get().loadAllUsers();
-        return {
-          success: false,
-          message: 'PINs were not saved to server. Please retry after sync stabilizes.'
-        };
-      }
-
-      await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
-      get().loadAllPins();
-      get().loadAllUsers();
+      pins = await Database.commitCriticalAction(
+        () => Database.generatePins(quantity, ownerId, adminUser.id),
+        {
+          full: false,
+          force: true,
+          timeoutMs: 90000,
+          maxAttempts: 5,
+          retryDelayMs: 1500
+        }
+      );
     } catch {
       await Database.ensureFreshData({ keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS] });
       get().loadAllPins();
       get().loadAllUsers();
       return {
         success: false,
-        message: 'PINs were generated locally but server sync failed. Please retry once and refresh.'
+        message: 'PINs could not be committed to server. Please retry after sync stabilizes.'
       };
     }
+
+    try {
+      await Database.hydrateFromServer({
+        strict: true,
+        maxAttempts: 2,
+        timeoutMs: 12000,
+        retryDelayMs: 800,
+        keys: [DB_KEYS.PINS, DB_KEYS.WALLETS, DB_KEYS.PIN_TRANSFERS]
+      });
+    } catch {
+      // Commit already succeeded; this refresh is best-effort only.
+    }
+
+    get().loadAllPins();
+    get().loadAllUsers();
 
     return { success: true, message: `Generated ${quantity} PIN(s)`, pins };
   },
