@@ -1,6 +1,6 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   buildLegacyDirectCountMap,
   extractIncrementalDirectRequirementsFromLegacySettings,
@@ -242,6 +242,27 @@ async function createHelpLedgerTransaction(connection, {
   description,
   amountCents
 }) {
+  const requestHash = createHash('sha256')
+    .update(`${idempotencyKey}|${actorUserId}|${eventKey}|${contributionId}|${amountCents}`)
+    .digest('hex');
+
+  await connection.execute(
+    `INSERT INTO v2_idempotency_keys
+      (idempotency_key, endpoint_name, actor_user_id, request_hash, status, locked_until)
+     VALUES
+      (?, ?, ?, ?, 'completed', NULL)
+     ON DUPLICATE KEY UPDATE
+      endpoint_name = VALUES(endpoint_name),
+      actor_user_id = VALUES(actor_user_id),
+      request_hash = VALUES(request_hash),
+      status = 'completed',
+      locked_until = NULL,
+      error_code = NULL,
+      updated_at = NOW(3),
+      last_seen_at = NOW(3)`,
+    [idempotencyKey, 'v2_help_repair', actorUserId, requestHash]
+  );
+
   const txUuid = randomUUID();
   const referenceId = `${String(eventKey || '').slice(0, 60)}:${String(contributionId || '').slice(0, 18)}`.slice(0, 80);
 
