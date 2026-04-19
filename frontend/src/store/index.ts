@@ -484,7 +484,13 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
   wallet.incomeWallet = Number(walletData.incomeCents || 0) / 100;
   wallet.royaltyWallet = Number(walletData.royaltyCents || 0) / 100;
   wallet.lockedIncomeWallet = Number(walletData.lockedIncomeCents || 0) / 100;
-  wallet.giveHelpLocked = Number(walletData.lockedForGiveCents || 0) / 100;
+  const lockedForGiveCents = Number(walletData.lockedForGiveCents || 0);
+  const pendingGiveCents = Number(walletData.pendingGiveCents || 0);
+  const effectiveLockedForGiveCents = Math.max(
+    Number.isFinite(lockedForGiveCents) ? lockedForGiveCents : 0,
+    Number.isFinite(pendingGiveCents) ? pendingGiveCents : 0
+  );
+  wallet.giveHelpLocked = effectiveLockedForGiveCents / 100;
 
   const v2Transactions = txRows.map((row, index) => {
     const signedAmountCents = Number(row.signedAmountCents || 0);
