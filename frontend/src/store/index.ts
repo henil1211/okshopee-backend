@@ -1919,8 +1919,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (!pinCode) {
       return { success: false, message: 'PIN is required for registration' };
     }
+    const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+    if (!normalizedPinCode) {
+      return { success: false, message: 'PIN is required for registration' };
+    }
 
-    const pin = Database.getPinByCode(pinCode);
+    const pin = Database.getPinByCode(normalizedPinCode);
     if (!pin) {
       return { success: false, message: 'Invalid PIN code' };
     }
@@ -2012,11 +2016,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         Database.applyAnnouncementsForNewUser(createdUser.id);
 
         // Strict PIN guard: re-check right before consuming to prevent stale/duplicate use
-        const latestPin = Database.getPinByCode(pinCode);
+        const latestPin = Database.getPinByCode(normalizedPinCode);
         if (!latestPin || latestPin.status !== 'unused') {
           throw new Error('PIN has already been used');
         }
-        const consumedPin = Database.consumePin(pinCode, createdUser.id);
+        const consumedPin = Database.consumePin(normalizedPinCode, createdUser.id);
         if (!consumedPin) {
           throw new Error('PIN has already been used');
         }
@@ -2175,7 +2179,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           sponsorId: sponsor?.userId || null,
           loginPassword: password,
           transactionPassword,
-          pinCode
+          pinCode: normalizedPinCode
         }),
         {
           full: false,

@@ -9540,7 +9540,9 @@ class Database {
   }
 
   static getPinByCode(pinCode: string): Pin | undefined {
-    return this.getPins().find(p => p.pinCode === pinCode.toUpperCase());
+    const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+    if (!normalizedPinCode) return undefined;
+    return this.getPins().find((p) => String(p.pinCode || '').trim().toUpperCase() === normalizedPinCode);
   }
 
   static getUserPins(userId: string): Pin[] {
@@ -9613,8 +9615,10 @@ class Database {
 
   // Use PIN for registration
   static consumePin(pinCode: string, usedById: string): Pin | null {
+    const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+    if (!normalizedPinCode) return null;
     const pins = this.getPins();
-    const index = pins.findIndex(p => p.pinCode === pinCode.toUpperCase());
+    const index = pins.findIndex((p) => String(p.pinCode || '').trim().toUpperCase() === normalizedPinCode);
     if (index === -1) return null;
     if (pins[index].status === 'suspended') return null;
     if (pins[index].status !== 'unused') return null;
