@@ -22,11 +22,13 @@ function usageAndExit() {
   console.log('Usage:');
   console.log('  node scripts/requeue-missing-v2-registration-help.js --users <code1,code2,...> [--apply]');
   console.log('  node scripts/requeue-missing-v2-registration-help.js --all-missing [--limit <n>] [--apply]');
+  console.log('  node scripts/requeue-missing-v2-registration-help.js --all-missing --include-legacy [--limit <n>] [--apply]');
   console.log('');
   console.log('Flags:');
   console.log('  --apply        Actually enqueue retry tasks. Without this flag it runs in dry mode.');
   console.log('  --users        Comma separated user codes to evaluate.');
-  console.log('  --all-missing  Auto-detect active non-admin users missing processed registration help event.');
+  console.log('  --all-missing  Auto-detect users missing processed registration help event.');
+  console.log('  --include-legacy  Include legacy seeded users (default is v2-registration candidates only).');
   console.log('  --limit        Max user codes when using --all-missing (default 200, max 2000).');
   process.exit(1);
 }
@@ -59,8 +61,9 @@ async function ensureRetryQueueTable(pool) {
   `);
 }
 
-async function detectMissingUsers(pool, limit) {
+async function detectMissingUsers(pool, limit, { includeLegacy = false } = {}) {
   const safeLimit = Math.max(1, Math.min(2000, Number(limit) || 200));
+  const includeLegacyFlag = includeLegacy ? 1 : 0;
   const [rows] = await pool.execute(
     `SELECT u.user_code
      FROM v2_users u
@@ -70,10 +73,19 @@ async function detectMissingUsers(pool, limit) {
       AND q.status = 'processed'
      WHERE u.status = 'active'
        AND COALESCE(rp.is_admin, 0) = 0
+       AND (
+         ? = 1
+         OR rp.user_id IS NOT NULL
+         OR EXISTS (
+           SELECT 1
+           FROM v2_post_registration_retry_queue rq
+           WHERE rq.registration_user_code = u.user_code
+         )
+       )
        AND q.id IS NULL
      ORDER BY u.id ASC
      LIMIT ?`,
-    [safeLimit]
+    [includeLegacyFlag, safeLimit]
   );
 
   return (Array.isArray(rows) ? rows : [])
@@ -144,6 +156,7 @@ async function enqueueHelpReplayTask(pool, userCode) {
 async function main() {
   const apply = hasFlag('--apply');
   const allMissing = hasFlag('--all-missing');
+  const includeLegacy = hasFlag('--include-legacy');
   const usersArg = readArg('--users');
   const limitArg = readArg('--limit');
 
@@ -175,7 +188,8 @@ async function main() {
     await ensureRetryQueueTable(pool);
 
     if (allMissing) {
-      userCodes = await detectMissingUsers(pool, limitArg);
+      userCodes = await detectMissingUsers(pool, limitArg, { includeLegacy });
+      console.log(`[detect] scope: ${includeLegacy ? 'legacy+v2' : 'v2-registration-candidates'}`);
       console.log(`[detect] missing users: ${userCodes.length}`);
       if (userCodes.length > 0) {
         console.log(`[detect] user codes: ${userCodes.join(', ')}`);
