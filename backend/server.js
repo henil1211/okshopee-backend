@@ -2076,6 +2076,60 @@ async function readV2PinsByUserId(userId, limit = 300) {
   });
 }
 
+async function readV2LockedIncomeSnapshotForMutation(connection, userId) {
+  const [lockRows] = await connection.execute(
+    `SELECT
+       COALESCE(SUM(locked_qualification_cents), 0) AS locked_qualification_cents,
+       COALESCE(SUM(pending_give_cents), 0) AS pending_give_cents
+     FROM v2_help_level_state
+     WHERE user_id = ?
+     FOR UPDATE`,
+    [userId]
+  );
+
+  const [syntheticLockedReceiveRows] = await connection.execute(
+    `SELECT
+       COALESCE(SUM(pc.amount_cents), 0) AS locked_receive_cents
+     FROM v2_help_pending_contributions pc
+     LEFT JOIN v2_ledger_entries income_le
+       ON income_le.ledger_txn_id = pc.processed_txn_id
+      AND income_le.user_id = pc.beneficiary_user_id
+      AND income_le.wallet_type = 'income'
+      AND income_le.entry_side = 'credit'
+     WHERE pc.beneficiary_user_id = ?
+       AND pc.status = 'processed'
+       AND pc.processed_txn_id IS NOT NULL
+       AND income_le.id IS NULL
+     FOR UPDATE`,
+    [userId]
+  );
+
+  const lockRow = Array.isArray(lockRows) && lockRows.length > 0 ? lockRows[0] : null;
+  const syntheticLockedReceiveRow = Array.isArray(syntheticLockedReceiveRows) && syntheticLockedReceiveRows.length > 0
+    ? syntheticLockedReceiveRows[0]
+    : null;
+
+  const lockedForQualificationCents = Number.isFinite(Number(lockRow?.locked_qualification_cents))
+    ? Math.trunc(Number(lockRow.locked_qualification_cents))
+    : 0;
+  const pendingGiveCents = Number.isFinite(Number(lockRow?.pending_give_cents))
+    ? Math.trunc(Number(lockRow.pending_give_cents))
+    : 0;
+  const syntheticLockedReceiveCents = Number.isFinite(Number(syntheticLockedReceiveRow?.locked_receive_cents))
+    ? Math.trunc(Number(syntheticLockedReceiveRow.locked_receive_cents))
+    : 0;
+
+  const effectiveLockedForQualificationCents = Math.max(0, Math.max(lockedForQualificationCents, syntheticLockedReceiveCents));
+  const lockedForGiveCents = Math.max(0, pendingGiveCents);
+  const totalLockedIncomeCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
+
+  return {
+    lockedForQualificationCents: effectiveLockedForQualificationCents,
+    lockedForGiveCents,
+    totalLockedIncomeCents
+  };
+}
+
 async function processV2FundTransfer({
   idempotencyKey,
   actorUserCode,
@@ -2215,7 +2269,17 @@ async function processV2FundTransfer({
     if (!senderStatusAllowed || receiverWallet.user_status !== 'active') {
       throw createApiError(403, 'Sender or receiver account is not active', 'USER_NOT_ACTIVE');
     }
-    if (Number(senderWallet.current_amount_cents) < amountCents) {
+    if (sourceWallet === 'income') {
+      const incomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, senderWallet.user_id);
+      const spendableIncomeCents = Math.max(0, Number(senderWallet.current_amount_cents) - incomeLockSnapshot.totalLockedIncomeCents);
+      if (spendableIncomeCents < amountCents) {
+        throw createApiError(
+          409,
+          'Insufficient spendable income wallet balance (some amount is locked)',
+          'INSUFFICIENT_FUNDS'
+        );
+      }
+    } else if (Number(senderWallet.current_amount_cents) < amountCents) {
       throw createApiError(409, `Insufficient ${sourceWallet} wallet balance`, 'INSUFFICIENT_FUNDS');
     }
 
@@ -2478,8 +2542,10 @@ async function processV2WithdrawalDebit({
     if (actorIncomeWallet.user_status !== 'active' && !allowInactiveActor) {
       throw createApiError(403, 'Actor user is not active', 'ACTOR_NOT_ACTIVE');
     }
-    if (Number(actorIncomeWallet.current_amount_cents) < amountCents) {
-      throw createApiError(409, 'Insufficient income wallet balance', 'INSUFFICIENT_FUNDS');
+    const actorIncomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, actorIncomeWallet.user_id);
+    const actorSpendableIncomeCents = Math.max(0, Number(actorIncomeWallet.current_amount_cents) - actorIncomeLockSnapshot.totalLockedIncomeCents);
+    if (actorSpendableIncomeCents < amountCents) {
+      throw createApiError(409, 'Insufficient spendable income wallet balance (some amount is locked)', 'INSUFFICIENT_FUNDS');
     }
 
     const [settlementRows] = await connection.execute(
@@ -5109,7 +5175,17 @@ async function processV2AdminAdjustment({
         throw createApiError(500, 'Failed to apply wallet credit for admin adjustment', 'WALLET_UPDATE_FAILED');
       }
     } else {
-      if (Number(targetWallet.current_amount_cents) < amountCents) {
+      if (walletType === 'income') {
+        const targetIncomeLockSnapshot = await readV2LockedIncomeSnapshotForMutation(connection, targetWallet.user_id);
+        const targetSpendableIncomeCents = Math.max(0, Number(targetWallet.current_amount_cents) - targetIncomeLockSnapshot.totalLockedIncomeCents);
+        if (targetSpendableIncomeCents < amountCents) {
+          throw createApiError(
+            409,
+            'Insufficient spendable income wallet balance for admin debit adjustment',
+            'INSUFFICIENT_FUNDS'
+          );
+        }
+      } else if (Number(targetWallet.current_amount_cents) < amountCents) {
         throw createApiError(409, 'Insufficient wallet balance for admin debit adjustment', 'INSUFFICIENT_FUNDS');
       }
 
