@@ -3451,6 +3451,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Only admin can reactivate users' };
     }
 
+    const syncGate = Database.getSensitiveActionSyncGate();
+    if (!syncGate.allowed) {
+      return { success: false, message: syncGate.message || 'Server sync is not ready. Please wait and retry reactivation.' };
+    }
+
     const targetUser = Database.getUserByUserId(targetUserId);
     if (!targetUser) {
       return { success: false, message: 'User not found' };
@@ -3465,6 +3470,23 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Failed to reactivate user' };
     }
 
+    const synced = await Database.forceRemoteSyncKeysNow([DB_KEYS.USERS], {
+      force: true,
+      timeoutMs: 15000,
+      maxAttempts: 3,
+      retryDelayMs: 500
+    });
+
+    if (!synced) {
+      await Database.ensureFreshData({ keys: [DB_KEYS.USERS] });
+      get().loadAllUsers();
+      return {
+        success: false,
+        message: 'Reactivation could not be saved to server. Please retry once server sync is stable.'
+      };
+    }
+
+    await Database.ensureFreshData({ keys: [DB_KEYS.USERS] });
     get().loadAllUsers();
     return { success: true, message: `User ${targetUserId} reactivated. 30-day deadline restarted.` };
   },
