@@ -376,7 +376,7 @@ async function connectMySQL() {
 
   // Verify connection
   const [rows] = await pool.execute('SELECT 1');
-  console.log('MySQL connected and state_store table ready');
+  console.log('MySQL connected; state_store (app sync key-value) ready; V2 finance uses v2_* ledger tables when FINANCE_ENGINE_MODE=v2');
 }
 
 async function ensureFileStorageReady() {
