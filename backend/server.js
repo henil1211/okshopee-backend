@@ -1761,7 +1761,7 @@ async function readV2WalletSnapshotByUserId(userId) {
   }
 
   const lockRow = Array.isArray(lockRows) && lockRows.length > 0 ? lockRows[0] : null;
-  const lockedForGiveCents = Number.isFinite(Number(lockRow?.locked_first_two_cents))
+  const lockedFirstTwoLifetimeCents = Number.isFinite(Number(lockRow?.locked_first_two_cents))
     ? Math.trunc(Number(lockRow.locked_first_two_cents))
     : 0;
   const lockedForQualificationCents = Number.isFinite(Number(lockRow?.locked_qualification_cents))
@@ -1770,6 +1770,7 @@ async function readV2WalletSnapshotByUserId(userId) {
   const pendingGiveCents = Number.isFinite(Number(lockRow?.pending_give_cents))
     ? Math.trunc(Number(lockRow.pending_give_cents))
     : 0;
+  const lockedForGiveCents = Math.max(0, pendingGiveCents);
 
   return {
     balancesCents,
@@ -1778,7 +1779,8 @@ async function readV2WalletSnapshotByUserId(userId) {
       totalLockedIncome: Math.max(0, lockedForGiveCents + lockedForQualificationCents),
       lockedForGive: Math.max(0, lockedForGiveCents),
       lockedForQualification: Math.max(0, lockedForQualificationCents),
-      pendingGive: Math.max(0, pendingGiveCents)
+      pendingGive: Math.max(0, pendingGiveCents),
+      lockedFirstTwoLifetime: Math.max(0, lockedFirstTwoLifetimeCents)
     }
   };
 }
