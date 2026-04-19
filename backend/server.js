@@ -155,22 +155,15 @@ const V2_WITHDRAWAL_ENDPOINT_NAME = 'v2_withdrawal';
 const V2_PIN_PURCHASE_ENDPOINT_NAME = 'v2_pin_purchase';
 const V2_REFERRAL_CREDIT_ENDPOINT_NAME = 'v2_referral_credit';
 const V2_HELP_EVENT_ENDPOINT_NAME = 'v2_help_event';
-const V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME = 'v2_registration_queue_enqueue';
-const V2_REGISTRATION_QUEUE_ADMIN_READ_ENDPOINT_NAME = 'v2_registration_queue_admin_read';
-const V2_REGISTRATION_ENDPOINT_NAME = 'v2_registration';
 const V2_ADMIN_ADJUSTMENT_ENDPOINT_NAME = 'v2_admin_adjustment';
 const V2_WALLET_READ_ENDPOINT_NAME = 'v2_wallet_read';
 const V2_TRANSACTIONS_READ_ENDPOINT_NAME = 'v2_transactions_read';
-const V2_PINS_READ_ENDPOINT_NAME = 'v2_pins_read';
 const V2_STATE_SYNC_ENDPOINT_NAME = 'v2_state_sync';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 const V2_REFERRAL_MAX_LEVEL = 100;
 const V2_REFERRAL_SOURCE_REF_MAX_LENGTH = 120;
 const V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH = 120;
 const V2_HELP_EVENT_TYPE_ACTIVATION_JOIN = 'activation_join';
-const V2_HELP_EVENT_REQUIRE_REGISTRATION_SOURCE = process.env.V2_HELP_EVENT_REQUIRE_REGISTRATION_SOURCE
-  ? process.env.V2_HELP_EVENT_REQUIRE_REGISTRATION_SOURCE === 'true'
-  : true;
 const V2_HELP_STAGE_CODE_MAX_LENGTH = 40;
 const V2_HELP_LEVEL1_AMOUNT_CENTS_RAW = Number(process.env.V2_HELP_LEVEL1_AMOUNT_CENTS || 500);
 const V2_HELP_LEVEL1_AMOUNT_CENTS = Number.isFinite(V2_HELP_LEVEL1_AMOUNT_CENTS_RAW) && V2_HELP_LEVEL1_AMOUNT_CENTS_RAW > 0
@@ -194,36 +187,6 @@ const V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS = Number.isFinite(V2_ADMIN_A
   : 500000;
 const V2_ADMIN_ADJUSTMENT_MAX_NOTE_LENGTH = 500;
 const V2_ADMIN_ADJUSTMENT_MAX_TICKET_ID_LENGTH = 80;
-const V2_POST_REGISTRATION_QUEUE_TASK_TYPES = new Set(['referral_credit', 'help_event']);
-const V2_POST_REGISTRATION_QUEUE_MAX_USER_NAME_LENGTH = 120;
-const V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS || 40);
-const V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS = Number.isFinite(V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW)
-  && V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW >= 1
-  && V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW <= 500
-  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS_RAW)
-  : 40;
-const V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_BATCH_SIZE || 10);
-const V2_POST_REGISTRATION_QUEUE_BATCH_SIZE = Number.isFinite(V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW)
-  && V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW >= 1
-  && V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW <= 200
-  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_BATCH_SIZE_RAW)
-  : 10;
-const V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS || 20000);
-const V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS = Number.isFinite(V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW)
-  && V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW >= 2000
-  && V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW <= 5 * 60 * 1000
-  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS_RAW)
-  : 20000;
-const V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS || 30000);
-const V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS = Number.isFinite(V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS_RAW)
-  && V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS_RAW >= 1000
-  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS_RAW)
-  : 30000;
-const V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS_RAW = Number(process.env.V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS || 15 * 60 * 1000);
-const V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS = Number.isFinite(V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS_RAW)
-  && V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS_RAW >= V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS
-  ? Math.trunc(V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS_RAW)
-  : 15 * 60 * 1000;
 const V2_TX_RETRY_MAX_ATTEMPTS_RAW = Number(process.env.V2_TX_RETRY_MAX_ATTEMPTS || 3);
 const V2_TX_RETRY_MAX_ATTEMPTS = Number.isFinite(V2_TX_RETRY_MAX_ATTEMPTS_RAW)
   && V2_TX_RETRY_MAX_ATTEMPTS_RAW >= 1
@@ -252,14 +215,6 @@ const V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW = Number(process.env.V2_PIN_CODE_MAX_R
 const V2_PIN_CODE_MAX_RETRIES_PER_PIN = Number.isFinite(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW) && V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW >= 1
   ? Math.trunc(V2_PIN_CODE_MAX_RETRIES_PER_PIN_RAW)
   : 12;
-const V2_PIN_LEGACY_PROJECTION_ENABLED = String(process.env.V2_PIN_LEGACY_PROJECTION_ENABLED || 'true').trim().toLowerCase() !== 'false';
-const V2_REGISTRATION_LEGACY_PROJECTION_ENABLED = String(process.env.V2_REGISTRATION_LEGACY_PROJECTION_ENABLED || 'true').trim().toLowerCase() !== 'false';
-const V2_REGISTRATION_MODE = String(process.env.V2_REGISTRATION_MODE
-  || (V2_REGISTRATION_LEGACY_PROJECTION_ENABLED ? 'hybrid' : 'pure_v2')).trim().toLowerCase();
-const V2_REGISTRATION_PURE_V2_MODE = V2_REGISTRATION_MODE === 'pure_v2';
-const V2_AUTH_PROFILE_FALLBACK_ENABLED = String(process.env.V2_AUTH_PROFILE_FALLBACK_ENABLED || 'true').trim().toLowerCase() !== 'false';
-const V2_AUTH_PROFILE_FALLBACK_EFFECTIVE = V2_AUTH_PROFILE_FALLBACK_ENABLED || V2_REGISTRATION_PURE_V2_MODE;
-const V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED = String(process.env.V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED || 'true').trim().toLowerCase() !== 'false';
 const V2_REQUEST_ID_MAX_LENGTH = 100;
 const V2_IMPERSONATION_REASON_MAX_LENGTH = 255;
 const V2_STATE_WRITE_ALLOWLIST_USER = new Set([
@@ -272,8 +227,6 @@ const V2_STATE_WRITE_ALLOWLIST_USER = new Set([
 ]);
 const V2_STATE_WRITE_ALLOWLIST_ADMIN = new Set([
   'mlm_users',
-  'mlm_transactions',
-  'mlm_pins',
   'mlm_safety_pool',
   'mlm_matrix',
   'mlm_grace_periods',
@@ -294,10 +247,6 @@ const V2_STATE_WRITE_ALLOWLIST_ADMIN = new Set([
   'mlm_marketplace_invoices',
   'mlm_marketplace_redemptions'
 ]);
-const V2_LEGACY_FINANCIAL_WRITE_ADMIN_COMPAT_KEYS = new Set([
-  'mlm_transactions',
-  'mlm_pins'
-]);
 const QUALIFICATION_LOCKED_USER_FIELDS = Object.freeze([
   'sponsorId',
   'parentId',
@@ -315,7 +264,6 @@ const QUALIFICATION_LOCKED_USER_FIELDS = Object.freeze([
 
 // ─── MySQL connection pool ───────────────────────────────────────────
 let pool;
-let v2PostRegistrationQueueWorkerRunning = false;
 
 async function ensureStateStoreUpdatedAtColumn() {
   // Older databases may have state_store without updated_at; add it if missing to avoid SELECT errors.
@@ -378,110 +326,6 @@ async function ensureV2AuthAuditTable() {
   }
 }
 
-async function ensureV2PostRegistrationRetryQueueTable() {
-  try {
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS v2_post_registration_retry_queue (
-        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-        task_key VARCHAR(190) NOT NULL,
-        task_type ENUM('referral_credit','help_event') NOT NULL,
-        registration_user_code VARCHAR(20) NOT NULL,
-        registration_user_name VARCHAR(120) NULL,
-        target_user_code VARCHAR(20) NULL,
-        target_user_name VARCHAR(120) NULL,
-        payload_json JSON NOT NULL,
-        status ENUM('queued','processing','completed','failed') NOT NULL DEFAULT 'queued',
-        attempts INT UNSIGNED NOT NULL DEFAULT 0,
-        max_attempts INT UNSIGNED NOT NULL DEFAULT 40,
-        next_attempt_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-        last_attempt_at DATETIME(3) NULL,
-        last_error VARCHAR(280) NULL,
-        last_error_code VARCHAR(80) NULL,
-        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-        processed_at DATETIME(3) NULL,
-        UNIQUE KEY uq_v2_post_reg_queue_task_key (task_key),
-        KEY idx_v2_post_reg_queue_status_next (status, next_attempt_at),
-        KEY idx_v2_post_reg_queue_created (created_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-  } catch (err) {
-    console.error('ensureV2PostRegistrationRetryQueueTable failed:', getErrorMessage(err));
-  }
-}
-
-async function ensureV2RegistrationDomainTables() {
-  try {
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS v2_registration_profiles (
-        user_id BIGINT UNSIGNED PRIMARY KEY,
-        login_password VARCHAR(255) NOT NULL,
-        transaction_password VARCHAR(255) NOT NULL,
-        phone VARCHAR(40) NOT NULL,
-        country VARCHAR(120) NOT NULL,
-        sponsor_user_code VARCHAR(20) NULL,
-        parent_user_code VARCHAR(20) NULL,
-        matrix_position ENUM('left','right') NULL,
-        matrix_level INT UNSIGNED NOT NULL DEFAULT 0,
-        direct_count INT UNSIGNED NOT NULL DEFAULT 0,
-        is_admin TINYINT(1) NOT NULL DEFAULT 0,
-        is_active TINYINT(1) NOT NULL DEFAULT 1,
-        account_status ENUM('active','temp_blocked','permanent_blocked') NOT NULL DEFAULT 'active',
-        blocked_at DATETIME(3) NULL,
-        blocked_until DATETIME(3) NULL,
-        blocked_reason VARCHAR(255) NULL,
-        deactivation_reason VARCHAR(255) NULL,
-        reactivated_at DATETIME(3) NULL,
-        activated_at DATETIME(3) NULL,
-        email_verified TINYINT(1) NOT NULL DEFAULT 0,
-        required_direct_for_next_level INT UNSIGNED NOT NULL DEFAULT 2,
-        completed_direct_for_current_level INT UNSIGNED NOT NULL DEFAULT 0,
-        total_earnings_cents BIGINT NOT NULL DEFAULT 0,
-        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-        KEY idx_v2_reg_profiles_sponsor (sponsor_user_code),
-        KEY idx_v2_reg_profiles_parent (parent_user_code),
-        CONSTRAINT fk_v2_reg_profiles_user FOREIGN KEY (user_id) REFERENCES v2_users(id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS v2_matrix_nodes (
-        user_code VARCHAR(20) PRIMARY KEY,
-        parent_user_code VARCHAR(20) NULL,
-        matrix_level INT UNSIGNED NOT NULL DEFAULT 0,
-        position ENUM('left','right') NULL,
-        left_child_user_code VARCHAR(20) NULL,
-        right_child_user_code VARCHAR(20) NULL,
-        is_active TINYINT(1) NOT NULL DEFAULT 1,
-        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-        UNIQUE KEY uq_v2_matrix_parent_position (parent_user_code, position),
-        KEY idx_v2_matrix_parent (parent_user_code)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-  } catch (err) {
-    console.error('ensureV2RegistrationDomainTables failed:', getErrorMessage(err));
-  }
-}
-
-async function ensureV2HelpQualificationPolicyTable() {
-  try {
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS v2_help_qualification_policy (
-        id TINYINT UNSIGNED PRIMARY KEY,
-        policy_name VARCHAR(80) NOT NULL,
-        max_level SMALLINT UNSIGNED NOT NULL DEFAULT 10,
-        incremental_direct_requirements_json JSON NOT NULL,
-        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `);
-  } catch (err) {
-    console.error('ensureV2HelpQualificationPolicyTable failed:', getErrorMessage(err));
-  }
-}
-
 async function connectMySQL() {
   pool = mysql.createPool({
     host: MYSQL_HOST,
@@ -510,9 +354,6 @@ async function connectMySQL() {
   // Ensure existing deployments that predate updated_at have the column.
   await ensureStateStoreUpdatedAtColumn();
   await ensureV2AuthAuditTable();
-  await ensureV2PostRegistrationRetryQueueTable();
-  await ensureV2RegistrationDomainTables();
-  await ensureV2HelpQualificationPolicyTable();
 
   // Debug: print current DB and columns to confirm schema matches expectations
   try {
@@ -914,8 +755,7 @@ function parseStateJsonObject(raw, fallback = null) {
   return parsed;
 }
 
-function normalizeQualificationDerivedStateForWrite(incomingState, currentState, options = {}) {
-  const lockQualificationFields = options?.lockQualificationFields !== false;
+function normalizeQualificationDerivedStateForWrite(incomingState, currentState) {
   if (!incomingState || typeof incomingState !== 'object') {
     return incomingState;
   }
@@ -960,10 +800,8 @@ function normalizeQualificationDerivedStateForWrite(incomingState, currentState,
         }
 
         const nextUser = { ...incomingUser };
-        if (lockQualificationFields) {
-          for (const field of QUALIFICATION_LOCKED_USER_FIELDS) {
-            nextUser[field] = existingUser[field];
-          }
+        for (const field of QUALIFICATION_LOCKED_USER_FIELDS) {
+          nextUser[field] = existingUser[field];
         }
         return nextUser;
       });
@@ -1079,20 +917,6 @@ function isValidV2HelpEventSourceRef(value) {
   return /^[a-zA-Z0-9:_-]+$/.test(normalized);
 }
 
-function buildV2RegistrationHelpSourceRef(sourceUserCode, newMemberUserCode) {
-  return `reg_help_${sourceUserCode}_${newMemberUserCode}`;
-}
-
-function isCanonicalV2RegistrationHelpEventSource({ sourceUserCode, newMemberUserCode, sourceRef, eventType }) {
-  if (!V2_HELP_EVENT_REQUIRE_REGISTRATION_SOURCE) return true;
-  if (!isValidV2HelpEventType(eventType)) return false;
-  if (!isValidV2UserCode(sourceUserCode) || !isValidV2UserCode(newMemberUserCode)) return false;
-  if (sourceUserCode !== newMemberUserCode) return false;
-
-  const expectedSourceRef = buildV2RegistrationHelpSourceRef(sourceUserCode, newMemberUserCode);
-  return String(sourceRef || '').trim() === expectedSourceRef;
-}
-
 function isValidV2WalletType(value) {
   return value === 'fund' || value === 'income' || value === 'royalty';
 }
@@ -1104,14 +928,6 @@ function isValidV2AdminAdjustmentDirection(value) {
 function isValidV2AdminAdjustmentReasonCode(value) {
   const normalized = String(value || '').trim().toUpperCase();
   return /^[A-Z0-9_]{3,40}$/.test(normalized);
-}
-
-function isValidV2PostRegistrationQueueTaskType(value) {
-  return V2_POST_REGISTRATION_QUEUE_TASK_TYPES.has(String(value || '').trim().toLowerCase());
-}
-
-function normalizeV2PostRegistrationQueueUserName(value) {
-  return String(value || '').trim().slice(0, V2_POST_REGISTRATION_QUEUE_MAX_USER_NAME_LENGTH);
 }
 
 function buildV2ReferralEventKey({ sourceTxnId, beneficiaryUserCode, levelNo, eventType }) {
@@ -1134,16 +950,9 @@ function buildV2HelpPendingGiveStageCode(levelNo) {
   return `L${Math.max(1, Math.trunc(levelNo || 1))}_PENDING_GIVE`.slice(0, V2_HELP_STAGE_CODE_MAX_LENGTH);
 }
 
-const V2_PIN_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const V2_PIN_CODE_LENGTH = 7;
-
 function generateV2PinCode() {
-  let pin = '';
-  const maxIndex = V2_PIN_CODE_CHARS.length;
-  for (let i = 0; i < V2_PIN_CODE_LENGTH; i += 1) {
-    pin += V2_PIN_CODE_CHARS.charAt(Math.floor(Math.random() * maxIndex));
-  }
-  return pin;
+  // 16 hex chars == 64 bits entropy from CSPRNG.
+  return randomBytes(8).toString('hex').toUpperCase();
 }
 
 function parseBearerToken(req) {
@@ -1275,120 +1084,11 @@ async function loadLegacyUsersForAuth() {
   return Array.isArray(parsed) ? parsed : [];
 }
 
-function mapV2RegistrationProfileRowToLegacyUser(row) {
-  if (!row) return null;
-
-  const userCode = normalizeV2UserCode(row.user_code);
-  if (!isValidV2UserCode(userCode)) return null;
-
-  const accountStatus = String(row.account_status || (row.user_status === 'active' ? 'active' : 'permanent_blocked')).trim() || 'active';
-  const isActive = Number(row.profile_is_active ?? 1) === 1 && accountStatus === 'active';
-
-  return {
-    id: row.legacy_user_id || `v2_${row.id}`,
-    userId: userCode,
-    email: String(row.email || '').trim().toLowerCase(),
-    password: String(row.login_password || ''),
-    fullName: String(row.full_name || '').trim(),
-    phone: String(row.profile_phone || '').trim(),
-    country: String(row.profile_country || '').trim(),
-    transactionPassword: String(row.transaction_password || ''),
-    sponsorId: normalizeV2UserCode(row.sponsor_user_code),
-    parentId: normalizeV2UserCode(row.parent_user_code),
-    position: row.matrix_position === 'left' || row.matrix_position === 'right' ? row.matrix_position : null,
-    level: Number(row.matrix_level || 0),
-    directCount: Number(row.direct_count || 0),
-    totalEarnings: Number(row.total_earnings_cents || 0),
-    isActive,
-    isAdmin: Number(row.profile_is_admin || 0) === 1,
-    accountStatus,
-    blockedAt: row.blocked_at || null,
-    blockedUntil: row.blocked_until || null,
-    blockedReason: row.blocked_reason || null,
-    deactivationReason: row.deactivation_reason || null,
-    reactivatedAt: row.reactivated_at || null,
-    createdAt: row.profile_created_at || row.user_created_at || null,
-    activatedAt: row.activated_at || row.profile_created_at || row.user_created_at || null,
-    requiredDirectForNextLevel: Number(row.required_direct_for_next_level || 2),
-    completedDirectForCurrentLevel: Number(row.completed_direct_for_current_level || 0),
-    emailVerified: Number(row.email_verified || 0) === 1,
-    achievements: {
-      nationalTour: false,
-      internationalTour: false,
-      familyTour: false
-    },
-    __authSource: 'v2_registration_profile'
-  };
-}
-
-async function findV2AuthUserByUserCode(userCode) {
-  if (!V2_AUTH_PROFILE_FALLBACK_EFFECTIVE || !pool) return null;
-
-  const normalizedUserCode = normalizeV2UserCode(userCode);
-  if (!isValidV2UserCode(normalizedUserCode)) return null;
-
-  try {
-    const [rows] = await pool.execute(
-      `SELECT
-         u.id,
-         u.user_code,
-         u.legacy_user_id,
-         u.full_name,
-         u.email,
-         u.status AS user_status,
-         u.created_at AS user_created_at,
-         rp.login_password,
-         rp.transaction_password,
-         rp.phone AS profile_phone,
-         rp.country AS profile_country,
-         rp.sponsor_user_code,
-         rp.parent_user_code,
-         rp.matrix_position,
-         rp.matrix_level,
-         rp.direct_count,
-         rp.is_admin AS profile_is_admin,
-         rp.is_active AS profile_is_active,
-         rp.account_status,
-         rp.blocked_at,
-         rp.blocked_until,
-         rp.blocked_reason,
-         rp.deactivation_reason,
-         rp.reactivated_at,
-         rp.activated_at,
-         rp.required_direct_for_next_level,
-         rp.completed_direct_for_current_level,
-         rp.total_earnings_cents,
-         rp.email_verified,
-         rp.created_at AS profile_created_at
-       FROM v2_users u
-       INNER JOIN v2_registration_profiles rp ON rp.user_id = u.id
-       WHERE u.user_code = ?
-       LIMIT 1`,
-      [normalizedUserCode]
-    );
-
-    const row = Array.isArray(rows) ? rows[0] : null;
-    return mapV2RegistrationProfileRowToLegacyUser(row);
-  } catch (error) {
-    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
-      console.warn(`[v2-auth-profile] lookup failed: ${getErrorMessage(error, 'Unknown error')}`);
-    }
-    return null;
-  }
-}
-
 async function findLegacyUserByPublicUserId(userId) {
   const normalizedUserId = normalizeV2UserCode(userId);
   if (!normalizedUserId) return null;
   const users = await loadLegacyUsersForAuth();
-  const legacyUser = users.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId) || null;
-  if (legacyUser) return legacyUser;
-
-  if (V2_AUTH_PROFILE_FALLBACK_EFFECTIVE) {
-    return findV2AuthUserByUserCode(normalizedUserId);
-  }
-
-  return null;
+  return users.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId) || null;
 }
 
 function isLegacyUserEligibleForV2Access(user) {
@@ -1687,109 +1387,6 @@ function parseIdempotencyResponseBody(responseBody) {
   }
 }
 
-async function appendLegacyPinsForV2Purchase(connection, {
-  buyerUserCode,
-  createdByUserCode,
-  pinCodes,
-  pinPriceCents
-}) {
-  const normalizedBuyerUserCode = normalizeV2UserCode(buyerUserCode);
-  if (!isValidV2UserCode(normalizedBuyerUserCode)) {
-    throw createApiError(400, 'Buyer user code is invalid for legacy pin projection', 'INVALID_USER_CODE');
-  }
-
-  const normalizedCreatedByUserCode = normalizeV2UserCode(createdByUserCode);
-  const normalizedPinCodes = Array.isArray(pinCodes)
-    ? pinCodes
-      .map((value) => String(value || '').trim().toUpperCase())
-      .filter((value) => value.length >= 6 && value.length <= 40)
-    : [];
-
-  if (normalizedPinCodes.length === 0) {
-    return { inserted: 0, skipped: true };
-  }
-
-  const [usersRows] = await connection.execute(
-    `SELECT state_value
-     FROM state_store
-     WHERE state_key = 'mlm_users'
-     LIMIT 1
-     FOR UPDATE`
-  );
-  const usersRaw = Array.isArray(usersRows) && usersRows[0]
-    ? usersRows[0].state_value
-    : '[]';
-  const usersParsed = typeof usersRaw === 'string' ? safeParseJSON(usersRaw) : [];
-  const legacyUsers = Array.isArray(usersParsed) ? usersParsed : [];
-
-  const legacyBuyerUser = legacyUsers.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedBuyerUserCode);
-  if (!legacyBuyerUser) {
-    throw createApiError(404, 'Legacy buyer user is missing for PIN projection', 'LEGACY_BUYER_NOT_FOUND');
-  }
-
-  const legacyCreatedByUser = normalizedCreatedByUserCode
-    ? legacyUsers.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedCreatedByUserCode)
-    : null;
-
-  const [pinsRows] = await connection.execute(
-    `SELECT state_value
-     FROM state_store
-     WHERE state_key = 'mlm_pins'
-     LIMIT 1
-     FOR UPDATE`
-  );
-  const pinsRaw = Array.isArray(pinsRows) && pinsRows[0]
-    ? pinsRows[0].state_value
-    : '[]';
-  const pinsParsed = typeof pinsRaw === 'string' ? safeParseJSON(pinsRaw) : [];
-  const legacyPins = Array.isArray(pinsParsed) ? pinsParsed : [];
-
-  const existingPinCodes = new Set(
-    legacyPins
-      .map((pin) => String(pin?.pinCode || '').trim().toUpperCase())
-      .filter(Boolean)
-  );
-
-  const priceAmount = Number.isFinite(Number(pinPriceCents))
-    ? Math.max(0, Math.trunc(Number(pinPriceCents)) / 100)
-    : 0;
-  const nowIso = new Date().toISOString();
-  const legacyOwnerId = String(legacyBuyerUser.id || '').trim();
-  const legacyCreatedById = String(legacyCreatedByUser?.id || legacyOwnerId).trim() || legacyOwnerId;
-
-  const pinsToInsert = [];
-  normalizedPinCodes.forEach((pinCode, index) => {
-    if (!pinCode || existingPinCodes.has(pinCode)) return;
-    pinsToInsert.push({
-      id: `pin_v2_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 9)}`,
-      pinCode,
-      amount: priceAmount,
-      status: 'unused',
-      ownerId: legacyOwnerId,
-      createdBy: legacyCreatedById,
-      createdAt: nowIso
-    });
-    existingPinCodes.add(pinCode);
-  });
-
-  if (pinsToInsert.length === 0) {
-    return { inserted: 0, skipped: true };
-  }
-
-  const mergedPins = [...legacyPins, ...pinsToInsert];
-  await connection.execute(
-    `INSERT INTO state_store (state_key, state_value, updated_at) VALUES ('mlm_pins', ?, ?)
-     ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-    [JSON.stringify(mergedPins), toMySQLDatetime(nowIso)]
-  );
-
-  return {
-    inserted: pinsToInsert.length,
-    skipped: false,
-    ownerUserCode: normalizedBuyerUserCode
-  };
-}
-
 function isRetryableV2TransactionError(error) {
   const code = String(error?.code || '').toUpperCase();
   const errno = Number(error?.errno || 0);
@@ -1884,425 +1481,6 @@ async function executeV2TransactionWithRetry(executor, operationName) {
   }
 
   throw lastError || createApiError(500, `Unexpected retry wrapper exit for ${operationName}`, 'TX_RETRY_WRAPPER_ERROR');
-}
-
-function computeV2PostRegistrationQueueRetryDelayMs(attemptNo) {
-  const safeAttempt = Math.max(1, Math.trunc(Number(attemptNo) || 1));
-  const exponent = Math.max(0, Math.min(8, safeAttempt - 1));
-  const backoff = V2_POST_REGISTRATION_QUEUE_RETRY_BASE_DELAY_MS * (2 ** exponent);
-  return Math.min(V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS, backoff);
-}
-
-function buildV2PostRegistrationQueueIdempotencyKey(taskType, taskKey) {
-  const digest = createHash('sha256').update(String(taskKey || '')).digest('hex').slice(0, 52);
-  return `regq_${String(taskType || 'task').slice(0, 20)}_${digest}`;
-}
-
-function parseV2PostRegistrationQueuePayload(taskType, rawPayload) {
-  const payload = rawPayload && typeof rawPayload === 'object'
-    ? rawPayload
-    : parseIdempotencyResponseBody(rawPayload);
-  if (!payload || typeof payload !== 'object') {
-    throw createApiError(400, 'Queue payload is invalid', 'INVALID_QUEUE_PAYLOAD');
-  }
-
-  if (taskType === 'referral_credit') {
-    const sourceUserCode = normalizeV2UserCode(payload.sourceUserCode);
-    const beneficiaryUserCode = normalizeV2UserCode(payload.beneficiaryUserCode);
-    const sourceRef = String(payload.sourceRef || '').trim();
-    const eventType = String(payload.eventType || 'direct_referral').trim().toLowerCase();
-    const levelNoRaw = Number(payload.levelNo == null ? 1 : payload.levelNo);
-    const amountCentsRaw = Number(payload.amountCents);
-    const description = typeof payload.description === 'string' ? payload.description.trim().slice(0, 255) : null;
-
-    if (!isValidV2UserCode(sourceUserCode) || !isValidV2UserCode(beneficiaryUserCode)) {
-      throw createApiError(400, 'Queue payload has invalid source/beneficiary user codes', 'INVALID_QUEUE_PAYLOAD');
-    }
-    if (!isValidV2ReferralSourceRef(sourceRef)) {
-      throw createApiError(400, 'Queue payload has invalid sourceRef', 'INVALID_QUEUE_PAYLOAD');
-    }
-    if (!isValidV2ReferralEventType(eventType)) {
-      throw createApiError(400, 'Queue payload has invalid eventType', 'INVALID_QUEUE_PAYLOAD');
-    }
-    if (!Number.isInteger(levelNoRaw) || levelNoRaw < 1 || levelNoRaw > V2_REFERRAL_MAX_LEVEL) {
-      throw createApiError(400, 'Queue payload has invalid levelNo', 'INVALID_QUEUE_PAYLOAD');
-    }
-    if (!Number.isInteger(amountCentsRaw) || amountCentsRaw <= 0) {
-      throw createApiError(400, 'Queue payload has invalid amountCents', 'INVALID_QUEUE_PAYLOAD');
-    }
-
-    return {
-      sourceUserCode,
-      beneficiaryUserCode,
-      sourceRef,
-      eventType,
-      levelNo: levelNoRaw,
-      amountCents: amountCentsRaw,
-      description
-    };
-  }
-
-  if (taskType === 'help_event') {
-    const sourceUserCode = normalizeV2UserCode(payload.sourceUserCode);
-    const newMemberUserCode = normalizeV2UserCode(payload.newMemberUserCode);
-    const sourceRef = String(payload.sourceRef || '').trim();
-    const eventType = String(payload.eventType || V2_HELP_EVENT_TYPE_ACTIVATION_JOIN).trim().toLowerCase();
-    const description = typeof payload.description === 'string' ? payload.description.trim().slice(0, 255) : null;
-
-    if (!isValidV2UserCode(sourceUserCode) || !isValidV2UserCode(newMemberUserCode)) {
-      throw createApiError(400, 'Queue payload has invalid source/new-member user codes', 'INVALID_QUEUE_PAYLOAD');
-    }
-    if (!isValidV2HelpEventSourceRef(sourceRef)) {
-      throw createApiError(400, 'Queue payload has invalid sourceRef', 'INVALID_QUEUE_PAYLOAD');
-    }
-    if (!isValidV2HelpEventType(eventType)) {
-      throw createApiError(400, 'Queue payload has invalid eventType', 'INVALID_QUEUE_PAYLOAD');
-    }
-    if (!isCanonicalV2RegistrationHelpEventSource({ sourceUserCode, newMemberUserCode, sourceRef, eventType })) {
-      throw createApiError(400, 'Queue payload has invalid source mapping for help event', 'INVALID_QUEUE_PAYLOAD');
-    }
-
-    return {
-      sourceUserCode,
-      newMemberUserCode,
-      sourceRef,
-      eventType,
-      description
-    };
-  }
-
-  throw createApiError(400, 'Queue task type is invalid', 'INVALID_QUEUE_TASK_TYPE');
-}
-
-async function enqueueV2PostRegistrationRetryTask({
-  taskType,
-  taskKey,
-  registrationUserCode,
-  registrationUserName,
-  targetUserCode,
-  targetUserName,
-  payload,
-  maxAttempts = V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS
-}) {
-  if (STORAGE_MODE !== 'mysql') {
-    throw createApiError(503, 'V2 financial APIs require STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
-  }
-
-  if (FINANCE_ENGINE_MODE !== 'v2') {
-    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to queue registration retry tasks', 'FINANCE_MODE_MISMATCH');
-  }
-
-  if (!pool) {
-    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
-  }
-
-  const normalizedTaskType = String(taskType || '').trim().toLowerCase();
-  const normalizedTaskKey = String(taskKey || '').trim();
-  const normalizedRegistrationUserCode = normalizeV2UserCode(registrationUserCode);
-  const normalizedRegistrationUserName = normalizeV2PostRegistrationQueueUserName(registrationUserName);
-  const normalizedTargetUserCode = normalizeV2UserCode(targetUserCode || '');
-  const normalizedTargetUserName = normalizeV2PostRegistrationQueueUserName(targetUserName || '');
-  const safeMaxAttemptsRaw = Number(maxAttempts);
-  const safeMaxAttempts = Number.isFinite(safeMaxAttemptsRaw)
-    ? Math.max(1, Math.min(500, Math.trunc(safeMaxAttemptsRaw)))
-    : V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS;
-
-  if (!isValidV2PostRegistrationQueueTaskType(normalizedTaskType)) {
-    throw createApiError(400, 'taskType must be one of referral_credit|help_event', 'INVALID_QUEUE_TASK_TYPE');
-  }
-  if (!normalizedTaskKey || normalizedTaskKey.length > 190) {
-    throw createApiError(400, 'taskKey is required and must be 1-190 chars', 'INVALID_QUEUE_TASK_KEY');
-  }
-  if (!isValidV2UserCode(normalizedRegistrationUserCode)) {
-    throw createApiError(400, 'registrationUserCode is required and must be valid', 'INVALID_USER_CODE');
-  }
-
-  const normalizedPayload = parseV2PostRegistrationQueuePayload(normalizedTaskType, payload);
-  const payloadJson = JSON.stringify(normalizedPayload);
-
-  await pool.execute(
-    `INSERT INTO v2_post_registration_retry_queue
-      (task_key, task_type, registration_user_code, registration_user_name,
-       target_user_code, target_user_name, payload_json, status, attempts, max_attempts,
-       next_attempt_at, last_attempt_at, last_error, last_error_code, processed_at)
-     VALUES
-      (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, NOW(3), NULL, NULL, NULL, NULL)
-     ON DUPLICATE KEY UPDATE
-      registration_user_code = VALUES(registration_user_code),
-      registration_user_name = VALUES(registration_user_name),
-      target_user_code = VALUES(target_user_code),
-      target_user_name = VALUES(target_user_name),
-      payload_json = VALUES(payload_json),
-      max_attempts = VALUES(max_attempts),
-      status = IF(status = 'completed', 'completed', 'queued'),
-      attempts = IF(status = 'completed', attempts, 0),
-      next_attempt_at = IF(status = 'completed', next_attempt_at, NOW(3)),
-      last_attempt_at = IF(status = 'completed', last_attempt_at, NULL),
-      last_error = NULL,
-      last_error_code = NULL,
-      processed_at = IF(status = 'completed', processed_at, NULL)` ,
-    [
-      normalizedTaskKey,
-      normalizedTaskType,
-      normalizedRegistrationUserCode,
-      normalizedRegistrationUserName || null,
-      isValidV2UserCode(normalizedTargetUserCode) ? normalizedTargetUserCode : null,
-      normalizedTargetUserName || null,
-      payloadJson,
-      safeMaxAttempts
-    ]
-  );
-}
-
-async function fetchV2PostRegistrationRetryQueueStatus(limit = 25) {
-  if (!pool) {
-    return {
-      pendingCount: 0,
-      oldestPendingCreatedAt: null,
-      nextAttemptAt: null,
-      items: []
-    };
-  }
-
-  const safeLimitRaw = Number(limit);
-  const safeLimit = Number.isFinite(safeLimitRaw)
-    ? Math.max(1, Math.min(200, Math.trunc(safeLimitRaw)))
-    : 25;
-
-  const [aggregateRows] = await pool.execute(
-    `SELECT
-       COUNT(*) AS pending_count,
-       MIN(created_at) AS oldest_pending_created_at,
-       MIN(next_attempt_at) AS next_attempt_at
-     FROM v2_post_registration_retry_queue
-     WHERE status IN ('queued','processing','failed')`
-  );
-
-  const aggregate = Array.isArray(aggregateRows) && aggregateRows.length > 0 ? aggregateRows[0] : {};
-
-  const [itemRows] = await pool.execute(
-    `SELECT
-       id,
-       task_key,
-       task_type,
-       registration_user_code,
-       registration_user_name,
-       target_user_code,
-       target_user_name,
-       status,
-       attempts,
-       max_attempts,
-       next_attempt_at,
-       last_error,
-       created_at,
-       updated_at
-     FROM v2_post_registration_retry_queue
-     WHERE status IN ('queued','processing','failed')
-     ORDER BY next_attempt_at ASC, created_at ASC, id ASC
-     LIMIT ?`,
-    [safeLimit]
-  );
-
-  return {
-    pendingCount: Number(aggregate?.pending_count || 0),
-    oldestPendingCreatedAt: aggregate?.oldest_pending_created_at ? new Date(aggregate.oldest_pending_created_at).toISOString() : null,
-    nextAttemptAt: aggregate?.next_attempt_at ? new Date(aggregate.next_attempt_at).toISOString() : null,
-    items: (Array.isArray(itemRows) ? itemRows : []).map((row) => ({
-      id: Number(row?.id || 0),
-      taskKey: String(row?.task_key || ''),
-      taskType: String(row?.task_type || ''),
-      registrationUserCode: String(row?.registration_user_code || ''),
-      registrationUserName: String(row?.registration_user_name || ''),
-      targetUserCode: String(row?.target_user_code || ''),
-      targetUserName: String(row?.target_user_name || ''),
-      status: String(row?.status || ''),
-      attempts: Number(row?.attempts || 0),
-      maxAttempts: Number(row?.max_attempts || 0),
-      nextAttemptAt: row?.next_attempt_at ? new Date(row.next_attempt_at).toISOString() : null,
-      lastError: typeof row?.last_error === 'string' ? row.last_error : '',
-      createdAt: row?.created_at ? new Date(row.created_at).toISOString() : null,
-      updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null
-    }))
-  };
-}
-
-async function claimV2PostRegistrationRetryTasks(limit = V2_POST_REGISTRATION_QUEUE_BATCH_SIZE) {
-  if (!pool) return [];
-  const safeLimit = Math.max(1, Math.min(200, Math.trunc(Number(limit) || V2_POST_REGISTRATION_QUEUE_BATCH_SIZE)));
-  const connection = await pool.getConnection();
-
-  try {
-    await connection.beginTransaction();
-
-    const [rows] = await connection.execute(
-      `SELECT
-         id,
-         task_key,
-         task_type,
-         registration_user_code,
-         registration_user_name,
-         target_user_code,
-         target_user_name,
-         payload_json,
-         attempts,
-         max_attempts
-       FROM v2_post_registration_retry_queue
-       WHERE status IN ('queued','failed')
-         AND attempts < max_attempts
-         AND next_attempt_at <= NOW(3)
-       ORDER BY next_attempt_at ASC, created_at ASC, id ASC
-       LIMIT ?
-       FOR UPDATE`,
-      [safeLimit]
-    );
-
-    const tasks = Array.isArray(rows) ? rows : [];
-    if (tasks.length === 0) {
-      await connection.commit();
-      return [];
-    }
-
-    const ids = tasks.map((row) => Number(row.id)).filter((id) => Number.isFinite(id) && id > 0);
-    if (ids.length === 0) {
-      await connection.commit();
-      return [];
-    }
-
-    const placeholders = ids.map(() => '?').join(', ');
-    await connection.execute(
-      `UPDATE v2_post_registration_retry_queue
-       SET status = 'processing',
-           attempts = attempts + 1,
-           last_attempt_at = NOW(3),
-           updated_at = NOW(3)
-       WHERE id IN (${placeholders})`,
-      ids
-    );
-
-    await connection.commit();
-
-    return tasks.map((row) => ({
-      id: Number(row?.id || 0),
-      taskKey: String(row?.task_key || ''),
-      taskType: String(row?.task_type || ''),
-      registrationUserCode: String(row?.registration_user_code || ''),
-      registrationUserName: String(row?.registration_user_name || ''),
-      targetUserCode: String(row?.target_user_code || ''),
-      targetUserName: String(row?.target_user_name || ''),
-      payload: parseIdempotencyResponseBody(row?.payload_json),
-      attemptNo: Number(row?.attempts || 0) + 1,
-      maxAttempts: Number(row?.max_attempts || V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS)
-    }));
-  } catch (error) {
-    try {
-      await connection.rollback();
-    } catch {
-      // ignore rollback secondary errors
-    }
-    throw error;
-  } finally {
-    connection.release();
-  }
-}
-
-async function processSingleV2PostRegistrationRetryTask(task) {
-  const taskType = String(task?.taskType || '').trim().toLowerCase();
-  const taskKey = String(task?.taskKey || '').trim();
-  const taskId = Number(task?.id || 0);
-  const attemptNo = Math.max(1, Number(task?.attemptNo || 1));
-  const maxAttempts = Math.max(1, Number(task?.maxAttempts || V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS));
-
-  if (!taskId || !isValidV2PostRegistrationQueueTaskType(taskType) || !taskKey) {
-    return;
-  }
-
-  try {
-    const idempotencyKey = buildV2PostRegistrationQueueIdempotencyKey(taskType, taskKey);
-
-    if (taskType === 'referral_credit') {
-      const payload = parseV2PostRegistrationQueuePayload(taskType, task.payload);
-      await executeV2TransactionWithRetry(
-        () => processV2ReferralCredit({
-          idempotencyKey,
-          actorUserCode: payload.sourceUserCode,
-          sourceUserCode: payload.sourceUserCode,
-          beneficiaryUserCode: payload.beneficiaryUserCode,
-          allowInactiveActor: true,
-          sourceTxnId: null,
-          sourceRef: payload.sourceRef,
-          eventType: payload.eventType,
-          levelNo: payload.levelNo,
-          amountCents: payload.amountCents,
-          description: payload.description
-        }),
-        `${V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME}_referral`
-      );
-    } else if (taskType === 'help_event') {
-      const payload = parseV2PostRegistrationQueuePayload(taskType, task.payload);
-      await executeV2TransactionWithRetry(
-        () => processV2HelpEvent({
-          idempotencyKey,
-          actorUserCode: payload.sourceUserCode,
-          sourceUserCode: payload.sourceUserCode,
-          newMemberUserCode: payload.newMemberUserCode,
-          sourceRef: payload.sourceRef,
-          eventType: payload.eventType,
-          allowInactiveActor: true,
-          description: payload.description
-        }),
-        `${V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME}_help`
-      );
-    }
-
-    await pool.execute(
-      `UPDATE v2_post_registration_retry_queue
-       SET status = 'completed',
-           processed_at = NOW(3),
-           last_error = NULL,
-           last_error_code = NULL,
-           updated_at = NOW(3)
-       WHERE id = ?`,
-      [taskId]
-    );
-  } catch (error) {
-    const reachedMaxAttempts = attemptNo >= maxAttempts;
-    const nextAttemptAt = reachedMaxAttempts
-      ? null
-      : new Date(Date.now() + computeV2PostRegistrationQueueRetryDelayMs(attemptNo)).toISOString();
-
-    await pool.execute(
-      `UPDATE v2_post_registration_retry_queue
-       SET status = 'failed',
-           next_attempt_at = ?,
-           last_error = ?,
-           last_error_code = ?,
-           updated_at = NOW(3)
-       WHERE id = ?`,
-      [
-        toMySQLDatetime(nextAttemptAt || new Date(Date.now() + V2_POST_REGISTRATION_QUEUE_RETRY_MAX_DELAY_MS).toISOString()),
-        getErrorMessage(error, 'Queue processing failed').slice(0, 280),
-        String(error?.code || 'QUEUE_PROCESSING_FAILED').slice(0, 80),
-        taskId
-      ]
-    );
-  }
-}
-
-async function runV2PostRegistrationQueueWorkerTick() {
-  if (v2PostRegistrationQueueWorkerRunning) return;
-  if (!pool || STORAGE_MODE !== 'mysql' || FINANCE_ENGINE_MODE !== 'v2') return;
-
-  v2PostRegistrationQueueWorkerRunning = true;
-  try {
-    const tasks = await claimV2PostRegistrationRetryTasks(V2_POST_REGISTRATION_QUEUE_BATCH_SIZE);
-    for (const task of tasks) {
-      await processSingleV2PostRegistrationRetryTask(task);
-    }
-  } catch (error) {
-    console.warn(`[v2-post-registration-queue] worker tick failed: ${getErrorMessage(error)}`);
-  } finally {
-    v2PostRegistrationQueueWorkerRunning = false;
-  }
 }
 
 function normalizeV2FundTransferProgressUpdates(rawProgressUpdates, senderUserCode, receiverUserCode) {
@@ -2520,14 +1698,6 @@ function normalizeV2LedgerEntryStatus(status) {
   return 'pending';
 }
 
-function normalizeV2PinStatusForRead(status) {
-  const normalized = String(status || '').toLowerCase();
-  if (normalized === 'generated' || normalized === 'used' || normalized === 'expired' || normalized === 'cancelled') {
-    return normalized;
-  }
-  return 'generated';
-}
-
 async function resolveV2UserForReadByCode(userCode) {
   const normalizedUserCode = normalizeV2UserCode(userCode);
   if (!isValidV2UserCode(normalizedUserCode)) {
@@ -2557,14 +1727,23 @@ async function readV2WalletSnapshotByUserId(userId) {
     'read_v2_wallet_snapshot'
   );
 
+  const [lockRows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT
+         COALESCE(SUM(locked_first_two_cents), 0) AS locked_first_two_cents,
+         COALESCE(SUM(locked_qualification_cents), 0) AS locked_qualification_cents,
+         COALESCE(SUM(pending_give_cents), 0) AS pending_give_cents
+       FROM v2_help_level_state
+       WHERE user_id = ?`,
+      [userId]
+    ),
+    'read_v2_help_lock_snapshot'
+  );
+
   const balancesCents = {
     fund: 0,
     income: 0,
     royalty: 0
-  };
-  const lockedBalancesCents = {
-    lockedIncome: 0,
-    giveHelpLocked: 0
   };
   let latestUpdatedAt = null;
 
@@ -2581,45 +1760,32 @@ async function readV2WalletSnapshotByUserId(userId) {
     }
   }
 
-  try {
-    const [helpStateRows] = await executeV2ReadWithRetry(
-      () => pool.execute(
-        `SELECT
-           COALESCE(SUM(locked_qualification_cents), 0) AS locked_qualification_cents,
-           COALESCE(SUM(pending_give_cents), 0) AS pending_give_cents
-         FROM v2_help_level_state
-         WHERE user_id = ?`,
-        [userId]
-      ),
-      'read_v2_help_locked_snapshot'
-    );
-
-    const helpState = Array.isArray(helpStateRows) ? helpStateRows[0] : null;
-    const lockedQualificationCents = Number.isFinite(Number(helpState?.locked_qualification_cents))
-      ? Math.max(0, Math.trunc(Number(helpState.locked_qualification_cents)))
-      : 0;
-    const pendingGiveCents = Number.isFinite(Number(helpState?.pending_give_cents))
-      ? Math.max(0, Math.trunc(Number(helpState.pending_give_cents)))
-      : 0;
-
-    lockedBalancesCents.giveHelpLocked = pendingGiveCents;
-    lockedBalancesCents.lockedIncome = lockedQualificationCents + pendingGiveCents;
-  } catch (error) {
-    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
-      throw error;
-    }
-  }
+  const lockRow = Array.isArray(lockRows) && lockRows.length > 0 ? lockRows[0] : null;
+  const lockedForGiveCents = Number.isFinite(Number(lockRow?.locked_first_two_cents))
+    ? Math.trunc(Number(lockRow.locked_first_two_cents))
+    : 0;
+  const lockedForQualificationCents = Number.isFinite(Number(lockRow?.locked_qualification_cents))
+    ? Math.trunc(Number(lockRow.locked_qualification_cents))
+    : 0;
+  const pendingGiveCents = Number.isFinite(Number(lockRow?.pending_give_cents))
+    ? Math.trunc(Number(lockRow.pending_give_cents))
+    : 0;
 
   return {
     balancesCents,
-    lockedBalancesCents,
-    updatedAt: latestUpdatedAt
+    updatedAt: latestUpdatedAt,
+    lockedBreakdownCents: {
+      totalLockedIncome: Math.max(0, lockedForGiveCents + lockedForQualificationCents),
+      lockedForGive: Math.max(0, lockedForGiveCents),
+      lockedForQualification: Math.max(0, lockedForQualificationCents),
+      pendingGive: Math.max(0, pendingGiveCents)
+    }
   };
 }
 
 async function readV2LedgerEntriesByUserId(userId, limit = 100) {
   const safeLimit = normalizeV2ReadLimit(limit, 100, 300);
-  const [rows] = await executeV2ReadWithRetry(
+  const [walletRows] = await executeV2ReadWithRetry(
     () => pool.execute(
       `SELECT
          le.id AS ledger_entry_id,
@@ -2650,7 +1816,69 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
     'read_v2_ledger_entries'
   );
 
-  return (Array.isArray(rows) ? rows : []).map((row) => {
+  const [lockedReceiveRows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT
+         CONCAT('lock_', pc.id) AS ledger_entry_id,
+         'locked_income' AS wallet_type,
+         'credit' AS entry_side,
+         pc.amount_cents,
+         lt.id AS ledger_txn_id,
+         lt.tx_uuid,
+         lt.tx_type,
+         lt.status AS ledger_status,
+         lt.description,
+         lt.reference_id,
+         lt.created_at,
+         lt.posted_at,
+         src.user_code AS counterparty_user_code
+       FROM v2_help_pending_contributions pc
+       INNER JOIN v2_ledger_transactions lt ON lt.id = pc.processed_txn_id
+       INNER JOIN v2_users src ON src.id = pc.source_user_id
+       LEFT JOIN v2_ledger_entries income_le
+         ON income_le.ledger_txn_id = pc.processed_txn_id
+        AND income_le.user_id = pc.beneficiary_user_id
+        AND income_le.wallet_type = 'income'
+        AND income_le.entry_side = 'credit'
+       WHERE pc.beneficiary_user_id = ?
+         AND pc.status = 'processed'
+         AND pc.processed_txn_id IS NOT NULL
+         AND income_le.id IS NULL
+       ORDER BY lt.id DESC, pc.id DESC
+       LIMIT ?`,
+      [userId, safeLimit]
+    ),
+    'read_v2_locked_help_receives'
+  );
+
+  const rows = [
+    ...(Array.isArray(walletRows) ? walletRows : []),
+    ...(Array.isArray(lockedReceiveRows) ? lockedReceiveRows : [])
+  ]
+    .sort((left, right) => {
+      const rightTs = right?.posted_at ? new Date(right.posted_at).getTime() : new Date(right?.created_at || 0).getTime();
+      const leftTs = left?.posted_at ? new Date(left.posted_at).getTime() : new Date(left?.created_at || 0).getTime();
+      if (Number.isFinite(rightTs) && Number.isFinite(leftTs) && rightTs !== leftTs) {
+        return rightTs - leftTs;
+      }
+
+      const rightTxnId = Number(right?.ledger_txn_id || 0);
+      const leftTxnId = Number(left?.ledger_txn_id || 0);
+      if (rightTxnId !== leftTxnId) {
+        return rightTxnId - leftTxnId;
+      }
+
+      const rightId = Number(right?.ledger_entry_id || 0);
+      const leftId = Number(left?.ledger_entry_id || 0);
+      if (Number.isFinite(rightId) && Number.isFinite(leftId) && rightId !== leftId) {
+        return rightId - leftId;
+      }
+
+      return String(right?.ledger_entry_id || '').localeCompare(String(left?.ledger_entry_id || ''));
+    })
+    .slice(0, safeLimit);
+
+  return rows.map((row) => {
     const signedAmountCents = normalizeV2LedgerEntrySignedAmountCents(row?.entry_side, row?.amount_cents);
     const createdAt = row?.created_at ? new Date(row.created_at).toISOString() : null;
     const postedAt = row?.posted_at ? new Date(row.posted_at).toISOString() : createdAt;
@@ -2672,1297 +1900,6 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
       postedAt
     };
   });
-}
-
-async function readV2PinsByBuyerUserId(userId, limit = 500) {
-  const safeLimit = normalizeV2ReadLimit(limit, 500, 2000);
-  const [rows] = await executeV2ReadWithRetry(
-    () => pool.execute(
-      `SELECT
-         p.id,
-         p.pin_code,
-         p.price_cents,
-         p.status,
-         p.purchased_txn_id,
-         p.used_txn_id,
-         p.expires_at,
-         p.created_at,
-         p.used_at,
-         used_user.user_code AS used_by_user_code
-       FROM v2_pins p
-       LEFT JOIN v2_users used_user ON used_user.id = p.used_by_user_id
-       WHERE p.buyer_user_id = ?
-       ORDER BY p.id DESC
-       LIMIT ?`,
-      [userId, safeLimit]
-    ),
-    'read_v2_pins'
-  );
-
-  return (Array.isArray(rows) ? rows : []).map((row) => ({
-    id: Number(row?.id || 0),
-    pinCode: String(row?.pin_code || '').trim().toUpperCase(),
-    priceCents: Number.isFinite(Number(row?.price_cents)) ? Math.trunc(Number(row.price_cents)) : 0,
-    status: normalizeV2PinStatusForRead(row?.status),
-    purchasedTxnId: Number.isFinite(Number(row?.purchased_txn_id)) ? Math.trunc(Number(row.purchased_txn_id)) : null,
-    usedTxnId: Number.isFinite(Number(row?.used_txn_id)) ? Math.trunc(Number(row.used_txn_id)) : null,
-    usedByUserCode: typeof row?.used_by_user_code === 'string' ? row.used_by_user_code : null,
-    expiresAt: row?.expires_at ? new Date(row.expires_at).toISOString() : null,
-    createdAt: row?.created_at ? new Date(row.created_at).toISOString() : null,
-    usedAt: row?.used_at ? new Date(row.used_at).toISOString() : null
-  }));
-}
-
-function normalizeLegacyRegistrationMatrixSide(position) {
-  if (position === 'left' || position === 0 || position === '0') return 'left';
-  if (position === 'right' || position === 1 || position === '1') return 'right';
-  return null;
-}
-
-function isLegacySponsorEligibleForRegistration(user) {
-  if (!user) return false;
-  if (user.accountStatus === 'temp_blocked' || user.accountStatus === 'permanent_blocked') {
-    return true;
-  }
-  if (user.accountStatus !== 'active') return false;
-  return !!user.isActive || user.deactivationReason === 'direct_referral_deadline';
-}
-
-function findLegacyNextMatrixPlacementForRegistration(matrix, sponsorUserCode) {
-  const normalizedSponsorUserCode = normalizeV2UserCode(sponsorUserCode);
-  if (!normalizedSponsorUserCode || !Array.isArray(matrix)) return null;
-
-  const sponsorNode = matrix.find((node) => normalizeV2UserCode(node?.userId) === normalizedSponsorUserCode) || null;
-  if (!sponsorNode) return null;
-
-  const nodeMap = new Map();
-  for (const node of matrix) {
-    const nodeUserCode = normalizeV2UserCode(node?.userId);
-    if (!nodeUserCode) continue;
-    nodeMap.set(nodeUserCode, node);
-  }
-
-  const childSideMap = new Map();
-  const setChild = (parentId, side, childId) => {
-    const normalizedParent = normalizeV2UserCode(parentId);
-    const normalizedChild = normalizeV2UserCode(childId);
-    if (!normalizedParent || !normalizedChild || !side) return;
-    if (!nodeMap.has(normalizedParent) || !nodeMap.has(normalizedChild)) return;
-
-    const existing = childSideMap.get(normalizedParent) || {};
-    if (side === 'left' && !existing.left) existing.left = normalizedChild;
-    if (side === 'right' && !existing.right) existing.right = normalizedChild;
-    childSideMap.set(normalizedParent, existing);
-  };
-
-  for (const node of matrix) {
-    setChild(node?.parentId, normalizeLegacyRegistrationMatrixSide(node?.position), node?.userId);
-  }
-  for (const node of matrix) {
-    setChild(node?.userId, 'left', node?.leftChild);
-    setChild(node?.userId, 'right', node?.rightChild);
-  }
-
-  const queue = [normalizedSponsorUserCode];
-  const visited = new Set();
-  while (queue.length > 0) {
-    const currentId = queue.shift();
-    if (!currentId || visited.has(currentId)) continue;
-    visited.add(currentId);
-
-    const currentNode = nodeMap.get(currentId);
-    if (!currentNode) continue;
-
-    const children = childSideMap.get(currentId) || {};
-    const leftChild = normalizeV2UserCode(children.left);
-    const rightChild = normalizeV2UserCode(children.right);
-
-    if (!leftChild) {
-      return { parentId: currentId, position: 'left' };
-    }
-    if (!rightChild) {
-      return { parentId: currentId, position: 'right' };
-    }
-
-    queue.push(leftChild, rightChild);
-  }
-
-  return null;
-}
-
-function generateLegacyUniqueRegistrationUserCode(users) {
-  const usedUserCodes = new Set(
-    (Array.isArray(users) ? users : [])
-      .map((user) => String(user?.userId || '').trim())
-      .filter((value) => /^\d{7}$/.test(value))
-  );
-
-  for (let attempt = 0; attempt < 50000; attempt += 1) {
-    const candidate = String(Math.floor(1000000 + Math.random() * 9000000));
-    if (!usedUserCodes.has(candidate)) {
-      return candidate;
-    }
-  }
-
-  let maxKnown = 1000000;
-  for (const value of usedUserCodes) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed) && parsed > maxKnown) {
-      maxKnown = parsed;
-    }
-  }
-
-  for (let candidate = Math.max(1000001, maxKnown + 1); candidate <= 9999999; candidate += 1) {
-    const serialized = String(candidate);
-    if (!usedUserCodes.has(serialized)) {
-      return serialized;
-    }
-  }
-
-  throw createApiError(500, 'Unable to generate a unique 7-digit User ID', 'USER_ID_EXHAUSTED');
-}
-
-function buildDeterministicV2RegistrationIdempotencyKey(prefix, sourceRef) {
-  const normalizedPrefix = String(prefix || '').trim().replace(/[^a-zA-Z0-9_-]+/g, '_') || 'reg';
-  const normalizedSourceRef = String(sourceRef || '').trim();
-  const sourceToken = normalizedSourceRef.replace(/[^a-zA-Z0-9:_-]+/g, '_').slice(0, 90);
-  const seed = sourceToken || createHash('sha256').update(normalizedSourceRef).digest('hex').slice(0, 48);
-  return `${normalizedPrefix}_${seed}`.slice(0, 120);
-}
-
-async function generateV2UniqueRegistrationUserCode(connection) {
-  for (let attempt = 0; attempt < 50000; attempt += 1) {
-    const candidate = String(Math.floor(1000000 + Math.random() * 9000000));
-    const [rows] = await connection.execute(
-      `SELECT user_code
-       FROM v2_users
-       WHERE user_code = ?
-       LIMIT 1`,
-      [candidate]
-    );
-    if (!Array.isArray(rows) || rows.length === 0) {
-      return candidate;
-    }
-  }
-
-  const [maxRows] = await connection.execute(
-    `SELECT MAX(CAST(user_code AS UNSIGNED)) AS max_code
-     FROM v2_users
-     WHERE user_code REGEXP '^[0-9]{7}$'`
-  );
-  const maxCode = Number(Array.isArray(maxRows) && maxRows[0] ? maxRows[0].max_code : 0);
-  let candidate = Number.isFinite(maxCode) && maxCode >= 1000000 ? Math.trunc(maxCode) + 1 : 1000001;
-
-  while (candidate <= 9999999) {
-    const serialized = String(candidate);
-    const [rows] = await connection.execute(
-      `SELECT user_code
-       FROM v2_users
-       WHERE user_code = ?
-       LIMIT 1`,
-      [serialized]
-    );
-    if (!Array.isArray(rows) || rows.length === 0) {
-      return serialized;
-    }
-    candidate += 1;
-  }
-
-  throw createApiError(500, 'Unable to generate a unique 7-digit User ID', 'USER_ID_EXHAUSTED');
-}
-
-function isV2SponsorEligibleForRegistration(sponsorRow) {
-  if (!sponsorRow) return false;
-
-  const status = String(sponsorRow.status || '').trim().toLowerCase();
-  if (status !== 'active') return false;
-
-  const profileIsActive = Number(sponsorRow.profile_is_active ?? 1) === 1;
-  if (!profileIsActive) return false;
-
-  const accountStatus = String(sponsorRow.profile_account_status || 'active').trim().toLowerCase();
-  if (accountStatus === 'permanent_blocked') return false;
-  if (accountStatus === 'temp_blocked') {
-    const blockedUntilRaw = sponsorRow.profile_blocked_until;
-    if (blockedUntilRaw) {
-      const blockedUntil = new Date(blockedUntilRaw);
-      if (!Number.isNaN(blockedUntil.getTime()) && blockedUntil.getTime() > Date.now()) {
-        return false;
-      }
-    }
-  }
-
-  return true;
-}
-
-async function loadV2SponsorForRegistration(connection, sponsorUserCode) {
-  const normalizedSponsorUserCode = normalizeV2UserCode(sponsorUserCode);
-  if (!isValidV2UserCode(normalizedSponsorUserCode)) return null;
-
-  const [rows] = await connection.execute(
-    `SELECT
-       u.id,
-       u.user_code,
-       u.full_name,
-       u.status,
-       rp.is_active AS profile_is_active,
-       rp.account_status AS profile_account_status,
-       rp.blocked_until AS profile_blocked_until
-     FROM v2_users u
-     LEFT JOIN v2_registration_profiles rp ON rp.user_id = u.id
-     WHERE u.user_code = ?
-     LIMIT 1
-     FOR UPDATE`,
-    [normalizedSponsorUserCode]
-  );
-
-  return Array.isArray(rows) ? rows[0] || null : null;
-}
-
-async function findV2NextMatrixPlacementForRegistration(connection, sponsorUserCode) {
-  const normalizedSponsorUserCode = normalizeV2UserCode(sponsorUserCode);
-  if (!isValidV2UserCode(normalizedSponsorUserCode)) return null;
-
-  const [rows] = await connection.execute(
-    `SELECT user_code, parent_user_code, left_child_user_code, right_child_user_code
-     FROM v2_matrix_nodes
-     FOR UPDATE`
-  );
-  const nodeRows = Array.isArray(rows) ? rows : [];
-  if (nodeRows.length === 0) {
-    return { parentId: normalizedSponsorUserCode, position: 'left' };
-  }
-
-  const byUserCode = new Map();
-  for (const row of nodeRows) {
-    const userCode = normalizeV2UserCode(row?.user_code);
-    if (!isValidV2UserCode(userCode)) continue;
-    byUserCode.set(userCode, {
-      userCode,
-      leftChildUserCode: normalizeV2UserCode(row?.left_child_user_code),
-      rightChildUserCode: normalizeV2UserCode(row?.right_child_user_code)
-    });
-  }
-
-  if (!byUserCode.has(normalizedSponsorUserCode)) {
-    return null;
-  }
-
-  const queue = [normalizedSponsorUserCode];
-  const visited = new Set();
-
-  while (queue.length > 0) {
-    const currentUserCode = queue.shift();
-    if (!currentUserCode || visited.has(currentUserCode)) continue;
-    visited.add(currentUserCode);
-
-    const node = byUserCode.get(currentUserCode);
-    if (!node) continue;
-
-    const leftChildUserCode = isValidV2UserCode(node.leftChildUserCode)
-      ? node.leftChildUserCode
-      : null;
-    const rightChildUserCode = isValidV2UserCode(node.rightChildUserCode)
-      ? node.rightChildUserCode
-      : null;
-
-    if (!leftChildUserCode) {
-      return { parentId: currentUserCode, position: 'left' };
-    }
-    if (!rightChildUserCode) {
-      return { parentId: currentUserCode, position: 'right' };
-    }
-
-    queue.push(leftChildUserCode, rightChildUserCode);
-  }
-
-  return null;
-}
-
-async function lockV2GeneratedPinForRegistration(connection, pinCode) {
-  const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
-  if (!normalizedPinCode) {
-    throw createApiError(400, 'pinCode is required', 'INVALID_PIN_CODE');
-  }
-
-  const [rows] = await connection.execute(
-    `SELECT id, pin_code, status, price_cents, used_by_user_id, used_at
-     FROM v2_pins
-     WHERE pin_code = ?
-     LIMIT 1
-     FOR UPDATE`,
-    [normalizedPinCode]
-  );
-  const pin = Array.isArray(rows) ? rows[0] : null;
-  if (!pin) {
-    throw createApiError(400, 'Invalid PIN code', 'INVALID_PIN_CODE');
-  }
-
-  const status = String(pin.status || '').trim().toLowerCase();
-  if (status !== 'generated') {
-    if (status === 'used') {
-      throw createApiError(409, 'PIN has already been used', 'PIN_ALREADY_USED');
-    }
-    throw createApiError(409, 'PIN is not available for registration', 'PIN_NOT_AVAILABLE');
-  }
-
-  return {
-    id: Number(pin.id || 0),
-    pinCode: normalizedPinCode,
-    priceCents: Number.isFinite(Number(pin.price_cents)) ? Math.trunc(Number(pin.price_cents)) : V2_DEFAULT_PIN_PRICE_CENTS
-  };
-}
-
-async function ensureV2UserAndWalletProvisionForRegistration(connection, legacyUser) {
-  const legacyInternalId = String(legacyUser?.id || '').trim();
-  const legacyUserCode = normalizeV2UserCode(legacyUser?.userId);
-  const fullName = String(legacyUser?.fullName || '').trim() || 'ReferNex User';
-  const email = String(legacyUser?.email || '').trim() || null;
-
-  if (!legacyInternalId || !isValidV2UserCode(legacyUserCode)) {
-    throw createApiError(500, 'Registered user is invalid for V2 provisioning', 'REGISTRATION_V2_PROVISION_INVALID');
-  }
-
-  await connection.execute(
-    `INSERT INTO v2_users (legacy_user_id, user_code, full_name, email, status)
-     VALUES (?, ?, ?, ?, 'active')
-     ON DUPLICATE KEY UPDATE
-       full_name = VALUES(full_name),
-       email = VALUES(email),
-       status = 'active',
-       updated_at = NOW(3)`,
-    [legacyInternalId, legacyUserCode, fullName.slice(0, 150), email ? email.slice(0, 190) : null]
-  );
-
-  const [v2UserRows] = await connection.execute(
-    `SELECT id
-     FROM v2_users
-     WHERE user_code = ?
-     LIMIT 1
-     FOR UPDATE`,
-    [legacyUserCode]
-  );
-  const v2User = Array.isArray(v2UserRows) && v2UserRows[0] ? v2UserRows[0] : null;
-  const v2UserId = Number(v2User?.id || 0);
-  if (!v2UserId) {
-    throw createApiError(500, 'Failed to provision v2 user for registration', 'REGISTRATION_V2_USER_PROVISION_FAILED');
-  }
-
-  const walletTypes = ['fund', 'income', 'royalty'];
-  for (const walletType of walletTypes) {
-    const [existingWalletRows] = await connection.execute(
-      `SELECT id
-       FROM v2_wallet_accounts
-       WHERE user_id = ? AND wallet_type = ?
-       LIMIT 1
-       FOR UPDATE`,
-      [v2UserId, walletType]
-    );
-    const hasWallet = Array.isArray(existingWalletRows) && existingWalletRows.length > 0;
-    if (hasWallet) {
-      continue;
-    }
-
-    const [existingGlRows] = await connection.execute(
-      `SELECT id
-       FROM v2_gl_accounts
-       WHERE owner_user_id = ? AND wallet_type = ?
-       LIMIT 1
-       FOR UPDATE`,
-      [v2UserId, walletType]
-    );
-
-    let glAccountId = Number(Array.isArray(existingGlRows) && existingGlRows[0] ? existingGlRows[0].id : 0);
-    if (!glAccountId) {
-      const glCode = `USR_${legacyUserCode}_${String(walletType).toUpperCase()}`.slice(0, 80);
-      const glName = `${fullName} ${String(walletType).toUpperCase()} Wallet`.slice(0, 160);
-
-      await connection.execute(
-        `INSERT INTO v2_gl_accounts
-          (account_code, account_name, account_type, owner_user_id, wallet_type, is_system_account, is_active)
-         VALUES
-          (?, ?, 'LIABILITY', ?, ?, 0, 1)
-         ON DUPLICATE KEY UPDATE
-          owner_user_id = VALUES(owner_user_id),
-          wallet_type = VALUES(wallet_type),
-          is_active = 1,
-          updated_at = NOW(3)`,
-        [glCode, glName, v2UserId, walletType]
-      );
-
-      const [glRows] = await connection.execute(
-        `SELECT id
-         FROM v2_gl_accounts
-         WHERE account_code = ?
-         LIMIT 1
-         FOR UPDATE`,
-        [glCode]
-      );
-      glAccountId = Number(Array.isArray(glRows) && glRows[0] ? glRows[0].id : 0);
-    }
-
-    if (!glAccountId) {
-      throw createApiError(500, `Failed to provision GL account for ${walletType} wallet`, 'REGISTRATION_V2_GL_PROVISION_FAILED');
-    }
-
-    await connection.execute(
-      `INSERT INTO v2_wallet_accounts
-        (user_id, wallet_type, gl_account_id, baseline_amount_cents, current_amount_cents, currency, version)
-       VALUES
-        (?, ?, ?, 0, 0, 'INR', 0)
-       ON DUPLICATE KEY UPDATE
-        gl_account_id = VALUES(gl_account_id),
-        updated_at = NOW(3)`,
-      [v2UserId, walletType, glAccountId]
-    );
-  }
-
-  return { v2UserId };
-}
-
-async function upsertV2RegistrationProfileForUser(connection, { legacyUser, v2UserId }) {
-  const legacyUserCode = normalizeV2UserCode(legacyUser?.userId);
-  if (!v2UserId || !isValidV2UserCode(legacyUserCode)) {
-    throw createApiError(500, 'Cannot upsert v2 registration profile for invalid user', 'REGISTRATION_PROFILE_INVALID');
-  }
-
-  const accountStatus = String(legacyUser?.accountStatus || 'active').trim() || 'active';
-  const safeAccountStatus = accountStatus === 'temp_blocked' || accountStatus === 'permanent_blocked'
-    ? accountStatus
-    : 'active';
-
-  await connection.execute(
-    `INSERT INTO v2_registration_profiles
-      (user_id, login_password, transaction_password, phone, country,
-       sponsor_user_code, parent_user_code, matrix_position, matrix_level,
-       direct_count, is_admin, is_active, account_status,
-       blocked_at, blocked_until, blocked_reason, deactivation_reason,
-       reactivated_at, activated_at, email_verified,
-       required_direct_for_next_level, completed_direct_for_current_level, total_earnings_cents)
-     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-      login_password = VALUES(login_password),
-      transaction_password = VALUES(transaction_password),
-      phone = VALUES(phone),
-      country = VALUES(country),
-      sponsor_user_code = VALUES(sponsor_user_code),
-      parent_user_code = VALUES(parent_user_code),
-      matrix_position = VALUES(matrix_position),
-      matrix_level = VALUES(matrix_level),
-      direct_count = VALUES(direct_count),
-      is_admin = VALUES(is_admin),
-      is_active = VALUES(is_active),
-      account_status = VALUES(account_status),
-      blocked_at = VALUES(blocked_at),
-      blocked_until = VALUES(blocked_until),
-      blocked_reason = VALUES(blocked_reason),
-      deactivation_reason = VALUES(deactivation_reason),
-      reactivated_at = VALUES(reactivated_at),
-      activated_at = VALUES(activated_at),
-      email_verified = VALUES(email_verified),
-      required_direct_for_next_level = VALUES(required_direct_for_next_level),
-      completed_direct_for_current_level = VALUES(completed_direct_for_current_level),
-      total_earnings_cents = VALUES(total_earnings_cents),
-      updated_at = NOW(3)`,
-    [
-      v2UserId,
-      String(legacyUser?.password || ''),
-      String(legacyUser?.transactionPassword || ''),
-      String(legacyUser?.phone || '').slice(0, 40),
-      String(legacyUser?.country || '').slice(0, 120),
-      normalizeV2UserCode(legacyUser?.sponsorId),
-      normalizeV2UserCode(legacyUser?.parentId),
-      legacyUser?.position === 'left' || legacyUser?.position === 'right' ? legacyUser.position : null,
-      Number.isFinite(Number(legacyUser?.level)) ? Math.max(0, Math.trunc(Number(legacyUser.level))) : 0,
-      Number.isFinite(Number(legacyUser?.directCount)) ? Math.max(0, Math.trunc(Number(legacyUser.directCount))) : 0,
-      legacyUser?.isAdmin ? 1 : 0,
-      legacyUser?.isActive ? 1 : 0,
-      safeAccountStatus,
-      legacyUser?.blockedAt ? toMySQLDatetime(legacyUser.blockedAt) : null,
-      legacyUser?.blockedUntil ? toMySQLDatetime(legacyUser.blockedUntil) : null,
-      legacyUser?.blockedReason ? String(legacyUser.blockedReason).slice(0, 255) : null,
-      legacyUser?.deactivationReason ? String(legacyUser.deactivationReason).slice(0, 255) : null,
-      legacyUser?.reactivatedAt ? toMySQLDatetime(legacyUser.reactivatedAt) : null,
-      legacyUser?.activatedAt ? toMySQLDatetime(legacyUser.activatedAt) : null,
-      legacyUser?.emailVerified ? 1 : 0,
-      Number.isFinite(Number(legacyUser?.requiredDirectForNextLevel)) ? Math.max(0, Math.trunc(Number(legacyUser.requiredDirectForNextLevel))) : 2,
-      Number.isFinite(Number(legacyUser?.completedDirectForCurrentLevel)) ? Math.max(0, Math.trunc(Number(legacyUser.completedDirectForCurrentLevel))) : 0,
-      Number.isFinite(Number(legacyUser?.totalEarnings)) ? Math.trunc(Number(legacyUser.totalEarnings)) : 0
-    ]
-  );
-}
-
-async function upsertV2MatrixProjectionForUser(connection, legacyUser) {
-  const userCode = normalizeV2UserCode(legacyUser?.userId);
-  if (!isValidV2UserCode(userCode)) {
-    throw createApiError(500, 'Cannot upsert v2 matrix projection for invalid user', 'REGISTRATION_MATRIX_INVALID');
-  }
-
-  const parentUserCode = normalizeV2UserCode(legacyUser?.parentId);
-  const position = legacyUser?.position === 'left' || legacyUser?.position === 'right' ? legacyUser.position : null;
-  const matrixLevel = Number.isFinite(Number(legacyUser?.level)) ? Math.max(0, Math.trunc(Number(legacyUser.level))) : 0;
-
-  await connection.execute(
-    `INSERT INTO v2_matrix_nodes
-      (user_code, parent_user_code, matrix_level, position, is_active)
-     VALUES
-      (?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-      parent_user_code = VALUES(parent_user_code),
-      matrix_level = VALUES(matrix_level),
-      position = VALUES(position),
-      is_active = VALUES(is_active),
-      updated_at = NOW(3)`,
-    [userCode, parentUserCode, matrixLevel, position, legacyUser?.isActive ? 1 : 0]
-  );
-
-  if (parentUserCode && position) {
-    await connection.execute(
-      `INSERT INTO v2_matrix_nodes
-        (user_code, parent_user_code, matrix_level, position, is_active)
-       VALUES
-        (?, NULL, 0, NULL, 1)
-       ON DUPLICATE KEY UPDATE
-        user_code = VALUES(user_code)`,
-      [parentUserCode]
-    );
-
-    if (position === 'left') {
-      await connection.execute(
-        `UPDATE v2_matrix_nodes
-         SET left_child_user_code = ?, updated_at = NOW(3)
-         WHERE user_code = ?`,
-        [userCode, parentUserCode]
-      );
-    } else {
-      await connection.execute(
-        `UPDATE v2_matrix_nodes
-         SET right_child_user_code = ?, updated_at = NOW(3)
-         WHERE user_code = ?`,
-        [userCode, parentUserCode]
-      );
-    }
-  }
-}
-
-async function markV2PinUsedByRegistration(connection, { pinCode, v2UserId, requireMatch = false }) {
-  const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
-  if (!normalizedPinCode || !v2UserId) return false;
-
-  try {
-    const [updateResult] = await connection.execute(
-      `UPDATE v2_pins
-       SET status = 'used', used_by_user_id = ?, used_at = NOW(3), updated_at = NOW(3)
-       WHERE pin_code = ? AND status = 'generated'`,
-      [v2UserId, normalizedPinCode]
-    );
-
-    const affected = Number(updateResult?.affectedRows || 0) > 0;
-    if (!affected && requireMatch) {
-      throw createApiError(409, 'PIN is not available for registration', 'PIN_NOT_AVAILABLE');
-    }
-
-    return affected;
-  } catch (error) {
-    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
-      throw error;
-    }
-    return false;
-  }
-}
-
-async function processV2Registration({
-  idempotencyKey,
-  fullName,
-  email,
-  password,
-  transactionPassword,
-  phone,
-  country,
-  sponsorId,
-  pinCode
-}) {
-  if (STORAGE_MODE !== 'mysql') {
-    throw createApiError(503, 'V2 registration requires STORAGE_MODE=mysql', 'V2_REQUIRES_MYSQL');
-  }
-
-  if (FINANCE_ENGINE_MODE !== 'v2') {
-    throw createApiError(409, 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/register', 'FINANCE_MODE_MISMATCH');
-  }
-
-  if (!pool) {
-    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
-  }
-
-  const normalizedFullName = String(fullName || '').trim();
-  const normalizedEmail = String(email || '').trim().toLowerCase();
-  const normalizedPassword = String(password || '');
-  const normalizedTransactionPassword = String(transactionPassword || '');
-  const normalizedPhone = String(phone || '').trim();
-  const normalizedCountry = String(country || '').trim();
-  const normalizedSponsorId = String(sponsorId || '').trim();
-  const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
-
-  if (!normalizedFullName) {
-    throw createApiError(400, 'fullName is required', 'INVALID_FULL_NAME');
-  }
-  if (!normalizedEmail) {
-    throw createApiError(400, 'email is required', 'INVALID_EMAIL');
-  }
-  if (!normalizedPassword) {
-    throw createApiError(400, 'password is required', 'INVALID_PASSWORD');
-  }
-  if (!normalizedTransactionPassword) {
-    throw createApiError(400, 'transactionPassword is required', 'INVALID_TRANSACTION_PASSWORD');
-  }
-  if (!normalizedPhone) {
-    throw createApiError(400, 'phone is required', 'INVALID_PHONE');
-  }
-  if (!normalizedCountry) {
-    throw createApiError(400, 'country is required', 'INVALID_COUNTRY');
-  }
-  if (!normalizedPinCode) {
-    throw createApiError(400, 'pinCode is required', 'INVALID_PIN_CODE');
-  }
-  if (normalizedSponsorId && !/^\d{7}$/.test(normalizedSponsorId)) {
-    throw createApiError(400, 'Sponsor ID must be a 7-digit user code', 'INVALID_SPONSOR_ID');
-  }
-
-  const requestHash = buildV2RequestHash({
-    endpoint: V2_REGISTRATION_ENDPOINT_NAME,
-    fullName: normalizedFullName,
-    email: normalizedEmail,
-    password: normalizedPassword,
-    transactionPassword: normalizedTransactionPassword,
-    phone: normalizedPhone,
-    country: normalizedCountry,
-    sponsorId: normalizedSponsorId || null,
-    pinCode: normalizedPinCode
-  });
-
-  const connection = await pool.getConnection();
-  let transactionOpen = false;
-  let registrationResponsePayload = null;
-  let registeredUser = null;
-  let sponsorUser = null;
-  let sponsorUserCodeForResponse = null;
-  let pinAmountForTransaction = V2_DEFAULT_PIN_PRICE_CENTS;
-
-  try {
-    await connection.beginTransaction();
-    transactionOpen = true;
-
-    const [idemRows] = await connection.execute(
-      `SELECT idempotency_key, request_hash, status, response_code, response_body, locked_until
-       FROM v2_idempotency_keys
-       WHERE idempotency_key = ?
-       FOR UPDATE`,
-      [idempotencyKey]
-    );
-    const existingIdem = Array.isArray(idemRows) && idemRows.length > 0 ? idemRows[0] : null;
-
-    if (existingIdem) {
-      if (existingIdem.request_hash !== requestHash) {
-        throw createApiError(409, 'Idempotency key reused with different payload', 'IDEMPOTENCY_PAYLOAD_MISMATCH');
-      }
-
-      if (existingIdem.status === 'completed') {
-        const replayPayload = parseIdempotencyResponseBody(existingIdem.response_body) || { ok: true };
-        await connection.commit();
-        transactionOpen = false;
-        return {
-          status: Number(existingIdem.response_code) || 200,
-          payload: { ...replayPayload, idempotentReplay: true }
-        };
-      }
-
-      const lockExpiresAt = existingIdem.locked_until ? new Date(existingIdem.locked_until).getTime() : 0;
-      if (existingIdem.status === 'processing' && Number.isFinite(lockExpiresAt) && lockExpiresAt > Date.now()) {
-        throw createApiError(409, 'Request with this Idempotency-Key is already processing', 'IDEMPOTENCY_IN_PROGRESS');
-      }
-
-      await connection.execute(
-        `UPDATE v2_idempotency_keys
-         SET endpoint_name = ?, actor_user_id = NULL, request_hash = ?, status = 'processing',
-             locked_until = DATE_ADD(NOW(3), INTERVAL ? SECOND), error_code = NULL,
-             updated_at = NOW(3), last_seen_at = NOW(3)
-         WHERE idempotency_key = ?`,
-        [V2_REGISTRATION_ENDPOINT_NAME, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS, idempotencyKey]
-      );
-    } else {
-      await connection.execute(
-        `INSERT INTO v2_idempotency_keys
-          (idempotency_key, endpoint_name, actor_user_id, request_hash, status, locked_until)
-         VALUES
-          (?, ?, NULL, ?, 'processing', DATE_ADD(NOW(3), INTERVAL ? SECOND))`,
-        [idempotencyKey, V2_REGISTRATION_ENDPOINT_NAME, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
-      );
-    }
-
-    const useLegacyProjection = V2_REGISTRATION_LEGACY_PROJECTION_ENABLED && !V2_REGISTRATION_PURE_V2_MODE;
-
-    const lockStateKey = async (stateKey, fallbackRaw = '[]') => {
-      const [rows] = await connection.execute(
-        `SELECT state_value
-         FROM state_store
-         WHERE state_key = ?
-         LIMIT 1
-         FOR UPDATE`,
-        [stateKey]
-      );
-      if (!Array.isArray(rows) || rows.length === 0) {
-        return fallbackRaw;
-      }
-      const raw = rows[0]?.state_value;
-      return typeof raw === 'string' ? raw : fallbackRaw;
-    };
-
-    let users = [];
-    let wallets = [];
-    let transactions = [];
-    let matrix = [];
-    let pins = [];
-    let notifications = [];
-    let announcements = [];
-    let safetyPool = { totalAmount: 0, transactions: [] };
-
-    let sponsorUserCodeForPlacement = normalizedSponsorId || null;
-    let parentUserCode = null;
-    let position = null;
-    let matrixDepthLevel = 0;
-
-    if (useLegacyProjection) {
-      const usersRaw = await lockStateKey('mlm_users', '[]');
-      const walletsRaw = await lockStateKey('mlm_wallets', '[]');
-      const transactionsRaw = await lockStateKey('mlm_transactions', '[]');
-      const matrixRaw = await lockStateKey('mlm_matrix', '[]');
-      const pinsRaw = await lockStateKey('mlm_pins', '[]');
-      const notificationsRaw = await lockStateKey('mlm_notifications', '[]');
-      const announcementsRaw = await lockStateKey('mlm_announcements', '[]');
-      const safetyPoolRaw = await lockStateKey('mlm_safety_pool', '{"totalAmount":0,"transactions":[]}');
-
-      users = Array.isArray(safeParseJSON(usersRaw)) ? safeParseJSON(usersRaw) : [];
-      wallets = Array.isArray(safeParseJSON(walletsRaw)) ? safeParseJSON(walletsRaw) : [];
-      transactions = Array.isArray(safeParseJSON(transactionsRaw)) ? safeParseJSON(transactionsRaw) : [];
-      matrix = Array.isArray(safeParseJSON(matrixRaw)) ? safeParseJSON(matrixRaw) : [];
-      pins = Array.isArray(safeParseJSON(pinsRaw)) ? safeParseJSON(pinsRaw) : [];
-      notifications = Array.isArray(safeParseJSON(notificationsRaw)) ? safeParseJSON(notificationsRaw) : [];
-      announcements = Array.isArray(safeParseJSON(announcementsRaw)) ? safeParseJSON(announcementsRaw) : [];
-      const safetyPoolParsed = safeParseJSON(safetyPoolRaw);
-      safetyPool = safetyPoolParsed && typeof safetyPoolParsed === 'object'
-        ? {
-          totalAmount: Number(safetyPoolParsed.totalAmount || 0),
-          transactions: Array.isArray(safetyPoolParsed.transactions) ? safetyPoolParsed.transactions : []
-        }
-        : { totalAmount: 0, transactions: [] };
-
-      const pinIndex = pins.findIndex(
-        (pin) => String(pin?.pinCode || '').trim().toUpperCase() === normalizedPinCode
-      );
-      if (pinIndex === -1) {
-        throw createApiError(400, 'Invalid PIN code', 'INVALID_PIN_CODE');
-      }
-      if (pins[pinIndex]?.status === 'suspended') {
-        throw createApiError(409, 'PIN is suspended by admin', 'PIN_SUSPENDED');
-      }
-      if (pins[pinIndex]?.status !== 'unused') {
-        throw createApiError(409, 'PIN has already been used', 'PIN_ALREADY_USED');
-      }
-
-      pinAmountForTransaction = Number(pins[pinIndex]?.amount || V2_DEFAULT_PIN_PRICE_CENTS / 100);
-
-      sponsorUser = normalizedSponsorId
-        ? users.find((user) => String(user?.userId || '').trim() === normalizedSponsorId) || null
-        : null;
-      if (normalizedSponsorId && !sponsorUser) {
-        throw createApiError(400, 'Invalid Sponsor ID', 'INVALID_SPONSOR_ID');
-      }
-      if (sponsorUser && !isLegacySponsorEligibleForRegistration(sponsorUser)) {
-        throw createApiError(409, 'Sponsor account is inactive or blocked', 'SPONSOR_NOT_ACTIVE');
-      }
-
-      const placement = sponsorUser
-        ? findLegacyNextMatrixPlacementForRegistration(matrix, sponsorUser.userId)
-        : null;
-      if (sponsorUser && !placement) {
-        throw createApiError(409, 'Sponsor matrix placement is unavailable', 'SPONSOR_PLACEMENT_UNAVAILABLE');
-      }
-
-      parentUserCode = placement?.parentId || null;
-      position = placement?.position || null;
-      const parentNode = parentUserCode
-        ? matrix.find((node) => normalizeV2UserCode(node?.userId) === normalizeV2UserCode(parentUserCode)) || null
-        : null;
-      matrixDepthLevel = parentNode ? (Number(parentNode.level || 0) + 1) : 0;
-
-      sponsorUserCodeForPlacement = sponsorUser ? String(sponsorUser.userId || '').trim() : null;
-      sponsorUserCodeForResponse = sponsorUserCodeForPlacement;
-
-      pins[pinIndex] = {
-        ...pins[pinIndex],
-        status: 'used'
-      };
-    } else {
-      const v2Pin = await lockV2GeneratedPinForRegistration(connection, normalizedPinCode);
-      pinAmountForTransaction = Number(v2Pin.priceCents || V2_DEFAULT_PIN_PRICE_CENTS) / 100;
-
-      if (normalizedSponsorId) {
-        const v2Sponsor = await loadV2SponsorForRegistration(connection, normalizedSponsorId);
-        if (!v2Sponsor) {
-          throw createApiError(400, 'Invalid Sponsor ID', 'INVALID_SPONSOR_ID');
-        }
-        if (!isV2SponsorEligibleForRegistration(v2Sponsor)) {
-          throw createApiError(409, 'Sponsor account is inactive or blocked', 'SPONSOR_NOT_ACTIVE');
-        }
-
-        sponsorUserCodeForPlacement = normalizeV2UserCode(v2Sponsor.user_code);
-        sponsorUserCodeForResponse = sponsorUserCodeForPlacement;
-
-        const placement = await findV2NextMatrixPlacementForRegistration(connection, sponsorUserCodeForPlacement);
-        if (!placement) {
-          throw createApiError(409, 'Sponsor matrix placement is unavailable', 'SPONSOR_PLACEMENT_UNAVAILABLE');
-        }
-        parentUserCode = placement?.parentId || null;
-        position = placement?.position || null;
-        if (isValidV2UserCode(parentUserCode)) {
-          const [parentRows] = await connection.execute(
-            `SELECT matrix_level
-             FROM v2_matrix_nodes
-             WHERE user_code = ?
-             LIMIT 1
-             FOR UPDATE`,
-            [parentUserCode]
-          );
-          const parentNode = Array.isArray(parentRows) ? parentRows[0] : null;
-          matrixDepthLevel = Number(parentNode?.matrix_level || 0) + 1;
-        }
-      }
-    }
-
-    const generatedUserId = useLegacyProjection
-      ? generateLegacyUniqueRegistrationUserCode(users)
-      : await generateV2UniqueRegistrationUserCode(connection);
-
-    let generatedInternalUserId;
-    if (useLegacyProjection) {
-      const existingInternalIds = new Set(users.map((user) => String(user?.id || '').trim()).filter(Boolean));
-      generatedInternalUserId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-      while (!generatedInternalUserId || existingInternalIds.has(generatedInternalUserId)) {
-        generatedInternalUserId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-      }
-    } else {
-      generatedInternalUserId = `v2_${generatedUserId}`;
-    }
-
-    const nowIso = new Date().toISOString();
-    registeredUser = {
-      id: generatedInternalUserId,
-      userId: generatedUserId,
-      email: normalizedEmail,
-      password: normalizedPassword,
-      fullName: normalizedFullName,
-      phone: normalizedPhone,
-      country: normalizedCountry,
-      isActive: true,
-      isAdmin: false,
-      accountStatus: 'active',
-      blockedAt: null,
-      blockedUntil: null,
-      blockedReason: null,
-      deactivationReason: null,
-      reactivatedAt: null,
-      createdAt: nowIso,
-      activatedAt: nowIso,
-      gracePeriodEnd: null,
-      sponsorId: sponsorUserCodeForPlacement,
-      parentId: parentUserCode,
-      position,
-      level: 0,
-      directCount: 0,
-      totalEarnings: 0,
-      isCapped: false,
-      capLevel: 0,
-      reEntryCount: 0,
-      cycleCount: 0,
-      requiredDirectForNextLevel: 2,
-      completedDirectForCurrentLevel: 0,
-      transactionPassword: normalizedTransactionPassword,
-      emailVerified: false,
-      achievements: {
-        nationalTour: false,
-        internationalTour: false,
-        familyTour: false
-      }
-    };
-    if (useLegacyProjection) {
-      users.push(registeredUser);
-
-      if (sponsorUser) {
-        sponsorUser.directCount = Number(sponsorUser.directCount || 0) + 1;
-      }
-
-      const existingWallet = wallets.find((wallet) => String(wallet?.userId || '').trim() === registeredUser.id);
-      if (!existingWallet) {
-        wallets.push({
-          userId: registeredUser.id,
-          depositWallet: 0,
-          fundRecoveryDue: 0,
-          fundRecoveryRecoveredTotal: 0,
-          fundRecoveryReason: null,
-          pinWallet: 0,
-          incomeWallet: 0,
-          royaltyWallet: 0,
-          matrixWallet: 0,
-          lockedIncomeWallet: 0,
-          giveHelpLocked: 0,
-          totalReceived: 0,
-          totalGiven: 0,
-          pendingSystemFee: 0,
-          lastSystemFeeDate: null,
-          rewardPoints: 0,
-          totalRewardPointsEarned: 0,
-          totalRewardPointsRedeemed: 0
-        });
-      }
-
-      const pinIndex = pins.findIndex(
-        (pin) => String(pin?.pinCode || '').trim().toUpperCase() === normalizedPinCode
-      );
-      if (pinIndex >= 0) {
-        pins[pinIndex] = {
-          ...pins[pinIndex],
-          status: 'used',
-          usedAt: nowIso,
-          usedById: registeredUser.id,
-          registrationUserId: registeredUser.id
-        };
-      }
-
-      const matrixNode = {
-        userId: generatedUserId,
-        username: normalizedFullName,
-        level: matrixDepthLevel,
-        position: position === 'right' ? 1 : 0,
-        parentId: parentUserCode || undefined,
-        isActive: true
-      };
-      matrix.push(matrixNode);
-
-      if (parentUserCode && position) {
-        const parentIndex = matrix.findIndex((node) => normalizeV2UserCode(node?.userId) === normalizeV2UserCode(parentUserCode));
-        if (parentIndex >= 0) {
-          if (position === 'left') {
-            matrix[parentIndex].leftChild = generatedUserId;
-          } else {
-            matrix[parentIndex].rightChild = generatedUserId;
-          }
-        }
-      }
-
-      transactions.push({
-        id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_pin_used`,
-        userId: registeredUser.id,
-        type: 'pin_used',
-        amount: Number.isFinite(pinAmountForTransaction) ? pinAmountForTransaction : 11,
-        pinCode: normalizedPinCode,
-        pinId: pinIndex >= 0 ? (String(pins[pinIndex]?.id || '').trim() || undefined) : undefined,
-        status: 'completed',
-        description: 'Account activation using PIN',
-        createdAt: nowIso,
-        completedAt: nowIso
-      });
-
-      const directIncome = 5;
-      const adminFee = 1;
-      if (!sponsorUser) {
-        safetyPool.totalAmount += directIncome;
-        safetyPool.transactions.push({
-          id: `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          amount: directIncome,
-          fromUserId: registeredUser.id,
-          reason: 'No sponsor - referral income',
-          createdAt: nowIso
-        });
-      }
-      safetyPool.totalAmount += adminFee;
-      safetyPool.transactions.push({
-        id: `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        amount: adminFee,
-        fromUserId: registeredUser.id,
-        reason: 'Admin fee',
-        createdAt: nowIso
-      });
-
-      notifications.push({
-        id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        userId: registeredUser.id,
-        title: 'Welcome To ReferNex',
-        message: `Welcome to ReferNex.\n\nAccount created successfully. Your User ID is ${generatedUserId}. Please check your email for your login and transaction passwords.`,
-        type: 'success',
-        isRead: false,
-        createdAt: nowIso
-      });
-
-      const nowTs = Date.now();
-      for (const announcement of announcements) {
-        if (!announcement || typeof announcement !== 'object') continue;
-        if (announcement.isRecalled) continue;
-        if (announcement.expiresAt && Date.parse(announcement.expiresAt) <= nowTs) continue;
-        if (!announcement.includeFutureUsers) continue;
-        if (registeredUser.isAdmin && announcement.includeAdmins === false) continue;
-
-        const alreadyNotified = notifications.some((notification) => (
-          String(notification?.userId || '').trim() === registeredUser.id
-          && String(notification?.announcementId || '').trim() === String(announcement.id || '').trim()
-        ));
-        if (alreadyNotified) continue;
-
-        notifications.push({
-          id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          userId: registeredUser.id,
-          title: String(announcement.title || '').trim() || 'Announcement',
-          message: String(announcement.message || '').trim() || '',
-          type: announcement.type || 'info',
-          isRead: false,
-          createdAt: nowIso,
-          announcementId: announcement.id,
-          ...(announcement.imageUrl ? { imageUrl: announcement.imageUrl } : {})
-        });
-        announcement.totalRecipients = Number(announcement.totalRecipients || 0) + 1;
-      }
-
-      const upsertStateKey = async (stateKey, value) => {
-        await connection.execute(
-          `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
-           ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
-          [stateKey, JSON.stringify(value), toMySQLDatetime(nowIso)]
-        );
-      };
-
-      await upsertStateKey('mlm_users', users);
-      await upsertStateKey('mlm_wallets', wallets);
-      await upsertStateKey('mlm_transactions', transactions);
-      await upsertStateKey('mlm_matrix', matrix);
-      await upsertStateKey('mlm_pins', pins);
-      await upsertStateKey('mlm_safety_pool', safetyPool);
-      await upsertStateKey('mlm_notifications', notifications);
-      await upsertStateKey('mlm_announcements', announcements);
-    }
-
-    const { v2UserId } = await ensureV2UserAndWalletProvisionForRegistration(connection, registeredUser);
-    await upsertV2RegistrationProfileForUser(connection, { legacyUser: registeredUser, v2UserId });
-    await upsertV2MatrixProjectionForUser(connection, registeredUser);
-    const mirroredPinUsed = await markV2PinUsedByRegistration(connection, {
-      pinCode: normalizedPinCode,
-      v2UserId,
-      requireMatch: V2_REGISTRATION_PURE_V2_MODE
-    });
-
-    if (!useLegacyProjection && sponsorUserCodeForPlacement) {
-      await connection.execute(
-        `UPDATE v2_registration_profiles rp
-         INNER JOIN v2_users u ON u.id = rp.user_id
-         SET rp.direct_count = rp.direct_count + 1,
-             rp.completed_direct_for_current_level = rp.completed_direct_for_current_level + 1,
-             rp.updated_at = NOW(3)
-         WHERE u.user_code = ?`,
-        [sponsorUserCodeForPlacement]
-      );
-    }
-
-    registrationResponsePayload = {
-      ok: true,
-      userId: registeredUser.userId,
-      user: {
-        userId: registeredUser.userId,
-        fullName: registeredUser.fullName,
-        email: registeredUser.email,
-        phone: registeredUser.phone,
-        country: registeredUser.country,
-        sponsorId: sponsorUserCodeForResponse || registeredUser.sponsorId,
-        parentId: registeredUser.parentId,
-        position: registeredUser.position
-      },
-      createdAt: nowIso,
-      warnings: [
-        ...(useLegacyProjection
-          ? []
-          : ['Legacy registration projection is disabled for this environment.']),
-        ...(mirroredPinUsed
-          ? []
-          : [useLegacyProjection
-            ? 'PIN was consumed in legacy projection but no matching generated v2 PIN was found.'
-            : 'PIN could not be marked as used in v2_pins.'])
-      ]
-    };
-
-    await connection.execute(
-      `UPDATE v2_idempotency_keys
-       SET status = 'completed', response_code = ?, response_body = ?,
-           locked_until = NULL, error_code = NULL, updated_at = NOW(3), last_seen_at = NOW(3)
-       WHERE idempotency_key = ?`,
-      [201, JSON.stringify(registrationResponsePayload), idempotencyKey]
-    );
-
-    await connection.commit();
-    transactionOpen = false;
-  } catch (error) {
-    if (transactionOpen) {
-      try {
-        await connection.rollback();
-      } catch {
-        // Ignore rollback secondary errors.
-      }
-    }
-
-    if (idempotencyKey && pool) {
-      try {
-        await pool.execute(
-          `UPDATE v2_idempotency_keys
-           SET status = 'failed', error_code = ?, locked_until = NULL,
-               updated_at = NOW(3), last_seen_at = NOW(3)
-           WHERE idempotency_key = ?`,
-          [String(error?.code || 'UNKNOWN_V2_ERROR').slice(0, 80), idempotencyKey]
-        );
-      } catch {
-        // Keep primary error as source of truth.
-      }
-    }
-
-    throw error;
-  } finally {
-    connection.release();
-  }
-
-  invalidateStateSnapshotCache();
-
-  const warnings = [];
-  const sourceUserCode = String(registeredUser?.userId || '').trim();
-  const sourceUserName = String(registeredUser?.fullName || '').trim();
-  const beneficiaryUserCode = normalizeV2UserCode(
-    sponsorUserCodeForResponse
-    || sponsorUserCodeForPlacement
-    || sponsorUser?.userId
-  );
-  const beneficiaryUserName = String(sponsorUser?.fullName || '').trim() || beneficiaryUserCode;
-
-  if (sourceUserCode && beneficiaryUserCode) {
-    const referralSourceRef = `reg_pin_${sourceUserCode}_${beneficiaryUserCode}`;
-    const referralIdempotencyKey = buildDeterministicV2RegistrationIdempotencyKey('reg_ref', referralSourceRef);
-    try {
-      await executeV2TransactionWithRetry(
-        () => processV2ReferralCredit({
-          idempotencyKey: referralIdempotencyKey,
-          actorUserCode: sourceUserCode,
-          sourceUserCode,
-          beneficiaryUserCode,
-          allowInactiveActor: false,
-          sourceTxnId: null,
-          sourceRef: referralSourceRef,
-          eventType: 'direct_referral',
-          levelNo: 1,
-          amountCents: 500,
-          description: `Referral income from ${sourceUserName} (${sourceUserCode})`
-        }),
-        `${V2_REGISTRATION_ENDPOINT_NAME}_referral`
-      );
-    } catch (error) {
-      try {
-        await enqueueV2PostRegistrationRetryTask({
-          taskType: 'referral_credit',
-          taskKey: `referral:${referralSourceRef}:${sourceUserCode}:${beneficiaryUserCode}`,
-          registrationUserCode: sourceUserCode,
-          registrationUserName: sourceUserName,
-          targetUserCode: beneficiaryUserCode,
-          targetUserName: beneficiaryUserName,
-          payload: {
-            sourceUserCode,
-            beneficiaryUserCode,
-            sourceRef: referralSourceRef,
-            eventType: 'direct_referral',
-            levelNo: 1,
-            amountCents: 500,
-            description: `Referral income from ${sourceUserName} (${sourceUserCode})`
-          },
-          maxAttempts: V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS
-        });
-        warnings.push(`Referral credit queued for retry (${getErrorMessage(error, 'unknown error')}).`);
-      } catch (queueError) {
-        warnings.push(`Referral credit failed (${getErrorMessage(queueError, getErrorMessage(error, 'unknown error'))}).`);
-      }
-    }
-  }
-
-  if (sourceUserCode) {
-    const helpSourceRef = `reg_help_${sourceUserCode}_${sourceUserCode}`;
-    const helpIdempotencyKey = buildDeterministicV2RegistrationIdempotencyKey('reg_help', helpSourceRef);
-    try {
-      await executeV2TransactionWithRetry(
-        () => processV2HelpEvent({
-          idempotencyKey: helpIdempotencyKey,
-          actorUserCode: sourceUserCode,
-          sourceUserCode,
-          newMemberUserCode: sourceUserCode,
-          sourceRef: helpSourceRef,
-          eventType: 'activation_join',
-          allowInactiveActor: false,
-          description: `Activation help event for ${sourceUserName} (${sourceUserCode})`
-        }),
-        `${V2_REGISTRATION_ENDPOINT_NAME}_help`
-      );
-    } catch (error) {
-      try {
-        await enqueueV2PostRegistrationRetryTask({
-          taskType: 'help_event',
-          taskKey: `help:${helpSourceRef}:${sourceUserCode}:${sourceUserCode}`,
-          registrationUserCode: sourceUserCode,
-          registrationUserName: sourceUserName,
-          targetUserCode: sourceUserCode,
-          targetUserName: sourceUserName,
-          payload: {
-            sourceUserCode,
-            newMemberUserCode: sourceUserCode,
-            sourceRef: helpSourceRef,
-            eventType: 'activation_join',
-            description: `Activation help event for ${sourceUserName} (${sourceUserCode})`
-          },
-          maxAttempts: V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS
-        });
-        warnings.push(`Help event queued for retry (${getErrorMessage(error, 'unknown error')}).`);
-      } catch (queueError) {
-        warnings.push(`Help event failed (${getErrorMessage(queueError, getErrorMessage(error, 'unknown error'))}).`);
-      }
-    }
-  }
-
-  if (warnings.length > 0 && idempotencyKey && pool && registrationResponsePayload) {
-    try {
-      registrationResponsePayload = {
-        ...registrationResponsePayload,
-        warnings
-      };
-      await pool.execute(
-        `UPDATE v2_idempotency_keys
-         SET response_body = ?, updated_at = NOW(3), last_seen_at = NOW(3)
-         WHERE idempotency_key = ?`,
-        [JSON.stringify(registrationResponsePayload), idempotencyKey]
-      );
-    } catch {
-      // Keep primary response even if replay metadata update fails.
-    }
-  }
-
-  if (warnings.length > 0) {
-    void runV2PostRegistrationQueueWorkerTick();
-  }
-
-  return {
-    status: 201,
-    payload: warnings.length > 0 && registrationResponsePayload
-      ? { ...registrationResponsePayload, warnings }
-      : registrationResponsePayload || { ok: true }
-  };
 }
 
 async function processV2FundTransfer({
@@ -4533,7 +2470,6 @@ async function processV2PinPurchase({
 
   const connection = await pool.getConnection();
   let transactionOpen = false;
-  let legacyPinsProjectionInserted = 0;
 
   try {
     await connection.beginTransaction();
@@ -4730,16 +2666,6 @@ async function processV2PinPurchase({
       }
     }
 
-    if (V2_PIN_LEGACY_PROJECTION_ENABLED) {
-      const legacyProjection = await appendLegacyPinsForV2Purchase(connection, {
-        buyerUserCode,
-        createdByUserCode: actorUserCode,
-        pinCodes: generatedPinCodes,
-        pinPriceCents: effectivePinPriceCents
-      });
-      legacyPinsProjectionInserted = Number(legacyProjection?.inserted || 0);
-    }
-
     const responsePayload = {
       ok: true,
       txUuid,
@@ -4762,11 +2688,6 @@ async function processV2PinPurchase({
 
     await connection.commit();
     transactionOpen = false;
-
-    if (legacyPinsProjectionInserted > 0) {
-      invalidateStateSnapshotCache();
-    }
-
     return { status: 200, payload: responsePayload };
   } catch (error) {
     if (transactionOpen) {
@@ -5220,48 +3141,6 @@ async function resolveLegacyImmediateUplineFromMatrix(connection, newMemberUserC
     return { parentUserCode: null, side: null };
   }
 
-  try {
-    const [v2NodeRows] = await connection.execute(
-      `SELECT user_code, parent_user_code, position
-       FROM v2_matrix_nodes
-       WHERE user_code = ?
-       LIMIT 1`,
-      [normalizedNewMemberUserCode]
-    );
-    const v2Node = Array.isArray(v2NodeRows) ? v2NodeRows[0] : null;
-
-    if (v2Node) {
-      const parentUserCode = normalizeV2UserCode(v2Node.parent_user_code);
-      let side = normalizeV2HelpContributionSide(v2Node.position);
-      if (side === 'unknown') side = null;
-
-      if (!side && parentUserCode) {
-        const [v2ParentRows] = await connection.execute(
-          `SELECT left_child_user_code, right_child_user_code
-           FROM v2_matrix_nodes
-           WHERE user_code = ?
-           LIMIT 1`,
-          [parentUserCode]
-        );
-        const v2ParentNode = Array.isArray(v2ParentRows) ? v2ParentRows[0] : null;
-        if (v2ParentNode) {
-          const leftChild = normalizeV2UserCode(v2ParentNode.left_child_user_code);
-          const rightChild = normalizeV2UserCode(v2ParentNode.right_child_user_code);
-          if (leftChild === normalizedNewMemberUserCode) side = 'left';
-          if (rightChild === normalizedNewMemberUserCode) side = 'right';
-        }
-      }
-
-      if (isValidV2UserCode(parentUserCode)) {
-        return { parentUserCode, side };
-      }
-    }
-  } catch (error) {
-    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
-      throw error;
-    }
-  }
-
   const [rows] = await connection.execute(
     `SELECT state_value
      FROM state_store
@@ -5513,55 +3392,6 @@ function normalizeV2HelpContributionSide(value) {
 }
 
 async function loadLegacyHelpQualificationContext(connection) {
-  try {
-    const [policyRows] = await connection.execute(
-      `SELECT incremental_direct_requirements_json, max_level
-       FROM v2_help_qualification_policy
-       WHERE id = 1
-       LIMIT 1`
-    );
-    const policy = Array.isArray(policyRows) ? policyRows[0] : null;
-
-    const [profileRows] = await connection.execute(
-      `SELECT u.user_code, rp.direct_count
-       FROM v2_registration_profiles rp
-       INNER JOIN v2_users u ON u.id = rp.user_id`
-    );
-    const profileList = Array.isArray(profileRows) ? profileRows : [];
-
-    if (policy && profileList.length > 0) {
-      const directCountByUserCode = {};
-      for (const row of profileList) {
-        const userCode = normalizeV2UserCode(row?.user_code);
-        if (!isValidV2UserCode(userCode)) continue;
-        directCountByUserCode[userCode] = Math.max(0, Math.trunc(Number(row?.direct_count || 0)));
-      }
-
-      const parsedRequirements = safeParseJSON(policy.incremental_direct_requirements_json);
-      const incrementalDirectRequirements = Array.isArray(parsedRequirements)
-        ? parsedRequirements.map((value) => Math.max(0, Math.trunc(Number(value || 0))))
-        : [];
-
-      if (incrementalDirectRequirements.length > 0) {
-        return {
-          directCountByUserCode,
-          incrementalDirectRequirements
-        };
-      }
-    }
-  } catch (error) {
-    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
-      console.warn(`[v2-help-qualification] load failed: ${getErrorMessage(error, 'Unknown error')}`);
-    }
-  }
-
-  if (!V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED) {
-    return {
-      directCountByUserCode: {},
-      incrementalDirectRequirements: extractIncrementalDirectRequirementsFromLegacySettings(null, 10)
-    };
-  }
-
   const [rows] = await connection.execute(
     `SELECT state_key, state_value
      FROM state_store
@@ -5594,74 +3424,6 @@ async function buildLegacyActivationContributionPlanFromMatrixState(connection, 
     return [];
   }
 
-  const buildPlanFromNodes = (byUserCode) => {
-    const plan = [];
-    let currentChildUserCode = normalizedNewMemberUserCode;
-    let currentNode = byUserCode.get(currentChildUserCode) || null;
-    let levelNo = 1;
-
-    while (currentNode && levelNo <= 10) {
-      const parentUserCode = isValidV2UserCode(currentNode.parentUserCode)
-        ? currentNode.parentUserCode
-        : null;
-      if (!parentUserCode) break;
-
-      const parentNode = byUserCode.get(parentUserCode) || null;
-      let side = currentNode.position === 0 || currentNode.position === 'left'
-        ? 'left'
-        : currentNode.position === 1 || currentNode.position === 'right'
-          ? 'right'
-          : 'unknown';
-
-      if (parentNode) {
-        if (parentNode.leftChildUserCode === currentChildUserCode) side = 'left';
-        else if (parentNode.rightChildUserCode === currentChildUserCode) side = 'right';
-      }
-
-      plan.push({
-        beneficiaryUserCode: parentUserCode,
-        levelNo,
-        side: normalizeV2HelpContributionSide(side)
-      });
-
-      currentChildUserCode = parentUserCode;
-      currentNode = parentNode;
-      levelNo += 1;
-    }
-
-    return plan;
-  };
-
-  try {
-    const [v2Rows] = await connection.execute(
-      `SELECT user_code, parent_user_code, left_child_user_code, right_child_user_code, position
-       FROM v2_matrix_nodes`
-    );
-    if (Array.isArray(v2Rows) && v2Rows.length > 0) {
-      const byUserCode = new Map();
-      for (const node of v2Rows) {
-        const userCode = normalizeV2UserCode(node?.user_code);
-        if (!isValidV2UserCode(userCode)) continue;
-        byUserCode.set(userCode, {
-          userCode,
-          parentUserCode: normalizeV2UserCode(node?.parent_user_code),
-          leftChildUserCode: normalizeV2UserCode(node?.left_child_user_code),
-          rightChildUserCode: normalizeV2UserCode(node?.right_child_user_code),
-          position: normalizeV2HelpContributionSide(node?.position)
-        });
-      }
-
-      const v2Plan = buildPlanFromNodes(byUserCode);
-      if (v2Plan.length > 0) {
-        return v2Plan;
-      }
-    }
-  } catch (error) {
-    if (String(error?.code || '') !== 'ER_NO_SUCH_TABLE') {
-      throw error;
-    }
-  }
-
   const [rows] = await connection.execute(
     `SELECT state_value
      FROM state_store
@@ -5687,7 +3449,41 @@ async function buildLegacyActivationContributionPlanFromMatrixState(connection, 
     });
   }
 
-  return buildPlanFromNodes(byUserCode);
+  const plan = [];
+  let currentChildUserCode = normalizedNewMemberUserCode;
+  let currentNode = byUserCode.get(currentChildUserCode) || null;
+  let levelNo = 1;
+
+  while (currentNode && levelNo <= 10) {
+    const parentUserCode = isValidV2UserCode(currentNode.parentUserCode)
+      ? currentNode.parentUserCode
+      : null;
+    if (!parentUserCode) break;
+
+    const parentNode = byUserCode.get(parentUserCode) || null;
+    let side = currentNode.position === 0
+      ? 'left'
+      : currentNode.position === 1
+        ? 'right'
+        : 'unknown';
+
+    if (parentNode) {
+      if (parentNode.leftChildUserCode === currentChildUserCode) side = 'left';
+      else if (parentNode.rightChildUserCode === currentChildUserCode) side = 'right';
+    }
+
+    plan.push({
+      beneficiaryUserCode: parentUserCode,
+      levelNo,
+      side: normalizeV2HelpContributionSide(side)
+    });
+
+    currentChildUserCode = parentUserCode;
+    currentNode = parentNode;
+    levelNo += 1;
+  }
+
+  return plan;
 }
 
 async function ensureV2HelpLevelStateRow(connection, userId, levelNo) {
@@ -6395,18 +4191,6 @@ async function processV2HelpEvent({
   const normalizedSourceRef = String(sourceRef || '').trim();
   if (!isValidV2HelpEventSourceRef(normalizedSourceRef)) {
     throw createApiError(400, `sourceRef must be 1-${V2_HELP_EVENT_SOURCE_REF_MAX_LENGTH} chars [a-zA-Z0-9:_-]`, 'INVALID_SOURCE_REF');
-  }
-  if (!isCanonicalV2RegistrationHelpEventSource({
-    sourceUserCode,
-    newMemberUserCode,
-    sourceRef: normalizedSourceRef,
-    eventType
-  })) {
-    throw createApiError(
-      400,
-      'Help event must use canonical registration source mapping (sourceUserCode == newMemberUserCode and matching reg_help sourceRef)',
-      'INVALID_EVENT_SOURCE_MAPPING'
-    );
   }
   const levelNo = 1;
   const settlementAmountCents = V2_HELP_LEVEL1_AMOUNT_CENTS;
@@ -7510,49 +5294,6 @@ async function getStateSnapshotCached(options = {}) {
 
 // ─── Authentication ──────────────────────────────────────────────────
 
-function toAuthDateMs(value) {
-  const timestamp = value ? new Date(value).getTime() : 0;
-  return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-function getLegacyAuthCandidateScore(user) {
-  const accountStatus = String(user?.accountStatus || 'active').trim().toLowerCase();
-  let score = 0;
-
-  if (user?.isAdmin) score += 1_000_000;
-  if (user?.isActive) score += 50_000;
-  if (accountStatus === 'active') score += 10_000;
-  if (accountStatus === 'temp_blocked') score += 1_000;
-  if (accountStatus === 'permanent_blocked') score -= 50_000;
-  if (String(user?.deactivationReason || '') === 'direct_referral_deadline') score -= 20_000;
-  score += Math.max(0, Number(user?.directCount || 0));
-
-  return score;
-}
-
-function selectLegacyAuthUserCandidate(usersData, normalizedUserId) {
-  if (!Array.isArray(usersData)) return null;
-
-  const matches = usersData
-    .filter((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId);
-  if (matches.length === 0) return null;
-
-  const sorted = [...matches].sort((left, right) => {
-    const scoreDiff = getLegacyAuthCandidateScore(right) - getLegacyAuthCandidateScore(left);
-    if (scoreDiff !== 0) return scoreDiff;
-
-    const reactivatedDiff = toAuthDateMs(right?.reactivatedAt) - toAuthDateMs(left?.reactivatedAt);
-    if (reactivatedDiff !== 0) return reactivatedDiff;
-
-    const activatedDiff = toAuthDateMs(right?.activatedAt) - toAuthDateMs(left?.activatedAt);
-    if (activatedDiff !== 0) return activatedDiff;
-
-    return toAuthDateMs(right?.createdAt) - toAuthDateMs(left?.createdAt);
-  });
-
-  return sorted[0] || null;
-}
-
 async function authenticateUser(userId, password) {
   const normalizedUserId = typeof userId === 'string' ? userId.trim() : '';
   const normalizedPassword = typeof password === 'string' ? password : '';
@@ -7560,40 +5301,36 @@ async function authenticateUser(userId, password) {
     return { ok: false, status: 400, error: 'User ID must be exactly 7 digits' };
   }
 
-  let user = await findV2AuthUserByUserCode(normalizedUserId);
   let usersData = null;
 
-  if (!user) {
-    // Try in-memory cache first
-    if (stateSnapshotCache?.snapshot?.state?.mlm_users) {
-      try {
-        usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
-        if (Array.isArray(usersData)) {
-          user = selectLegacyAuthUserCandidate(usersData, normalizedUserId);
-        }
-      } catch {
-        user = null;
-        usersData = null;
+  // Try in-memory cache first
+  let user = null;
+  if (stateSnapshotCache?.snapshot?.state?.mlm_users) {
+    try {
+      usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
+      if (Array.isArray(usersData)) {
+        user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
       }
-    }
-
-    // Fallback: read from MySQL
-    if (!user) {
-      const usersRaw = await readStateKeyValue('mlm_users');
-      if (!usersRaw) return { ok: false, status: 404, error: 'User ID not found' };
-      try {
-        usersData = JSON.parse(usersRaw);
-        if (Array.isArray(usersData)) {
-          user = selectLegacyAuthUserCandidate(usersData, normalizedUserId);
-        }
-      } catch {
-        return { ok: false, status: 500, error: 'Failed to parse user data' };
-      }
-      if (!user) return { ok: false, status: 404, error: 'User ID not found' };
+    } catch {
+      user = null;
+      usersData = null;
     }
   }
 
-  const isV2ProfileAuthUser = user?.__authSource === 'v2_registration_profile';
+  // Fallback: read from MySQL
+  if (!user) {
+    const usersRaw = await readStateKeyValue('mlm_users');
+    if (!usersRaw) return { ok: false, status: 404, error: 'User ID not found' };
+    try {
+      usersData = JSON.parse(usersRaw);
+      if (Array.isArray(usersData)) {
+        user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+      }
+    } catch {
+      return { ok: false, status: 500, error: 'Failed to parse user data' };
+    }
+    if (!user) return { ok: false, status: 404, error: 'User ID not found' };
+  }
 
   if (user.accountStatus === 'permanent_blocked') {
     return {
@@ -7613,7 +5350,7 @@ async function authenticateUser(userId, password) {
   }
 
   // Auto-deactivate on login if direct-referral deadline has passed.
-  if (!isV2ProfileAuthUser && !user.isAdmin && user.isActive && user.activatedAt) {
+  if (!user.isAdmin && user.isActive && user.activatedAt) {
     const requiredDirects = 2;
     const directCount = Number.isFinite(Number(user.directCount)) ? Number(user.directCount) : 0;
     if (directCount < requiredDirects) {
@@ -7655,19 +5392,9 @@ async function authenticateUser(userId, password) {
           user = updatedUser;
 
           if (Array.isArray(usersData)) {
-            let changed = false;
-            for (let i = 0; i < usersData.length; i += 1) {
-              const item = usersData[i];
-              if (!item) continue;
-              if (normalizeV2UserCode(item.userId) !== normalizedUserId) continue;
-              usersData[i] = {
-                ...item,
-                isActive: false,
-                deactivationReason: 'direct_referral_deadline'
-              };
-              changed = true;
-            }
-            if (changed) {
+            const index = usersData.findIndex((item) => item && (item.id === updatedUser.id || item.userId === updatedUser.userId));
+            if (index >= 0) {
+              usersData[index] = updatedUser;
               await writeStateToDB({ mlm_users: JSON.stringify(usersData) }, false);
             }
           }
@@ -8408,44 +6135,6 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && url.pathname === '/api/v2/register') {
-    try {
-      const body = await getRequestBody(req);
-      const parsed = body ? JSON.parse(body) : {};
-      const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
-      if (!idempotencyKey) {
-        sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
-        return;
-      }
-
-      const result = await executeV2TransactionWithRetry(
-        () => processV2Registration({
-          idempotencyKey,
-          fullName: parsed?.fullName,
-          email: parsed?.email,
-          password: parsed?.password,
-          transactionPassword: parsed?.transactionPassword,
-          phone: parsed?.phone,
-          country: parsed?.country,
-          sponsorId: parsed?.sponsorId,
-          pinCode: parsed?.pinCode
-        }),
-        V2_REGISTRATION_ENDPOINT_NAME
-      );
-
-      sendJson(res, result.status, result.payload);
-    } catch (error) {
-      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : getHttpStatusForRequestError(error));
-      const message = getErrorMessage(error, 'Failed to process registration');
-      sendJson(res, status, {
-        ok: false,
-        error: message,
-        code: error?.code || (typeof error === 'object' && error.code) || 'V2_REGISTRATION_FAILED'
-      });
-    }
-    return;
-  }
-
   if (req.method === 'GET' && url.pathname === '/api/v2/wallet') {
     try {
       if (STORAGE_MODE !== 'mysql') {
@@ -8496,8 +6185,10 @@ const server = createServer(async (req, res) => {
           fundCents: walletSnapshot.balancesCents.fund,
           incomeCents: walletSnapshot.balancesCents.income,
           royaltyCents: walletSnapshot.balancesCents.royalty,
-          lockedIncomeCents: walletSnapshot.lockedBalancesCents.lockedIncome,
-          giveHelpLockedCents: walletSnapshot.lockedBalancesCents.giveHelpLocked,
+          lockedIncomeCents: walletSnapshot.lockedBreakdownCents.totalLockedIncome,
+          lockedForGiveCents: walletSnapshot.lockedBreakdownCents.lockedForGive,
+          lockedForQualificationCents: walletSnapshot.lockedBreakdownCents.lockedForQualification,
+          pendingGiveCents: walletSnapshot.lockedBreakdownCents.pendingGive,
           updatedAt: walletSnapshot.updatedAt
         }
       });
@@ -8575,68 +6266,6 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && url.pathname === '/api/v2/pins') {
-    try {
-      if (STORAGE_MODE !== 'mysql') {
-        sendJson(res, 503, { ok: false, error: 'V2 financial APIs require STORAGE_MODE=mysql', code: 'V2_REQUIRES_MYSQL' });
-        return;
-      }
-      if (FINANCE_ENGINE_MODE !== 'v2') {
-        sendJson(res, 409, { ok: false, error: 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/pins', code: 'FINANCE_MODE_MISMATCH' });
-        return;
-      }
-      if (!pool) {
-        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
-        return;
-      }
-
-      const authContext = await resolveV2RequestAuthContext({
-        req,
-        endpointName: V2_PINS_READ_ENDPOINT_NAME,
-        requiredRole: 'user',
-        allowImpersonation: true
-      });
-
-      const requestedUserCode = normalizeV2UserCode(url.searchParams.get('userCode') || authContext.actorUserCode);
-      if (!isValidV2UserCode(requestedUserCode)) {
-        sendJson(res, 400, {
-          ok: false,
-          error: 'userCode is required and must be 3-20 chars [a-zA-Z0-9_-]',
-          code: 'INVALID_USER_CODE'
-        });
-        return;
-      }
-      if (requestedUserCode !== authContext.actorUserCode) {
-        sendJson(res, 403, {
-          ok: false,
-          error: 'Actor is only allowed to read their effective userCode pins',
-          code: 'ACTOR_USER_MISMATCH'
-        });
-        return;
-      }
-
-      const user = await resolveV2UserForReadByCode(requestedUserCode);
-      const limit = normalizeV2ReadLimit(url.searchParams.get('limit'), 500, 2000);
-      const pins = await readV2PinsByBuyerUserId(user.userId, limit);
-
-      sendJson(res, 200, {
-        ok: true,
-        userCode: user.userCode,
-        count: pins.length,
-        pins
-      });
-    } catch (error) {
-      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : getHttpStatusForRequestError(error));
-      const message = getErrorMessage(error, 'Failed to read V2 pins');
-      sendJson(res, status, {
-        ok: false,
-        error: message,
-        code: error?.code || (typeof error === 'object' && error.code) || 'V2_PINS_READ_FAILED'
-      });
-    }
-    return;
-  }
-
   if (req.method === 'POST' && url.pathname === '/api/v2/fund-transfers') {
     try {
       const body = await getRequestBody(req);
@@ -8696,16 +6325,8 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      const isSelfIncomeToFundTransfer =
-        senderUserCode === receiverUserCode
-        && sourceWallet === 'income'
-        && destinationWallet === 'fund';
-      if (senderUserCode === receiverUserCode && !isSelfIncomeToFundTransfer) {
-        sendJson(res, 400, {
-          ok: false,
-          error: 'senderUserCode and receiverUserCode must be different unless converting income wallet to own fund wallet',
-          code: 'SELF_TRANSFER_NOT_ALLOWED'
-        });
+      if (senderUserCode === receiverUserCode) {
+        sendJson(res, 400, { ok: false, error: 'senderUserCode and receiverUserCode must be different', code: 'SELF_TRANSFER_NOT_ALLOWED' });
         return;
       }
       if (senderUserCode !== actorUserCode) {
@@ -9075,14 +6696,6 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      if (!isCanonicalV2RegistrationHelpEventSource({ sourceUserCode, newMemberUserCode, sourceRef, eventType })) {
-        sendJson(res, 400, {
-          ok: false,
-          error: 'Help event must use canonical registration source mapping (sourceUserCode == newMemberUserCode and matching reg_help sourceRef)',
-          code: 'INVALID_EVENT_SOURCE_MAPPING'
-        });
-        return;
-      }
       if (!idempotencyKey) {
         sendJson(res, 400, { ok: false, error: 'Missing required Idempotency-Key header', code: 'MISSING_IDEMPOTENCY_KEY' });
         return;
@@ -9111,145 +6724,6 @@ const server = createServer(async (req, res) => {
         ok: false,
         error: message,
         code: error?.code || (typeof error === 'object' && error.code) || 'V2_HELP_EVENT_FAILED'
-      });
-    }
-    return;
-  }
-
-  if (req.method === 'POST' && url.pathname === '/api/v2/registration-queue/tasks') {
-    try {
-      const body = await getRequestBody(req);
-      const parsed = body ? JSON.parse(body) : {};
-      const authContext = await resolveV2RequestAuthContext({
-        req,
-        endpointName: V2_REGISTRATION_QUEUE_ENQUEUE_ENDPOINT_NAME,
-        requiredRole: 'user',
-        allowImpersonation: false
-      });
-
-      const taskType = String(parsed?.taskType || '').trim().toLowerCase();
-      const sourceUserCode = normalizeV2UserCode(parsed?.sourceUserCode);
-      const registrationUserName = normalizeV2PostRegistrationQueueUserName(parsed?.registrationUserName);
-      const targetUserCode = normalizeV2UserCode(parsed?.targetUserCode || '');
-      const targetUserName = normalizeV2PostRegistrationQueueUserName(parsed?.targetUserName || '');
-      const maxAttemptsRaw = Number(parsed?.maxAttempts);
-      const maxAttempts = Number.isFinite(maxAttemptsRaw)
-        ? Math.max(1, Math.min(500, Math.trunc(maxAttemptsRaw)))
-        : V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS;
-
-      if (!isValidV2PostRegistrationQueueTaskType(taskType)) {
-        sendJson(res, 400, {
-          ok: false,
-          error: 'taskType must be one of referral_credit|help_event',
-          code: 'INVALID_QUEUE_TASK_TYPE'
-        });
-        return;
-      }
-      if (!isValidV2UserCode(sourceUserCode)) {
-        sendJson(res, 400, {
-          ok: false,
-          error: 'sourceUserCode is required and must be 3-20 chars [a-zA-Z0-9_-]',
-          code: 'INVALID_USER_CODE'
-        });
-        return;
-      }
-      if (authContext.actorUserCode !== sourceUserCode) {
-        sendJson(res, 403, {
-          ok: false,
-          error: 'Actor is only allowed to enqueue tasks for their own sourceUserCode',
-          code: 'ACTOR_SOURCE_MISMATCH'
-        });
-        return;
-      }
-
-      let normalizedPayload;
-      let derivedTaskKey = '';
-
-      if (taskType === 'referral_credit') {
-        normalizedPayload = parseV2PostRegistrationQueuePayload(taskType, {
-          sourceUserCode,
-          beneficiaryUserCode: parsed?.beneficiaryUserCode,
-          sourceRef: parsed?.sourceRef,
-          eventType: parsed?.eventType,
-          levelNo: parsed?.levelNo,
-          amountCents: parsed?.amountCents,
-          description: parsed?.description
-        });
-        derivedTaskKey = `referral:${normalizedPayload.sourceRef}:${normalizedPayload.sourceUserCode}:${normalizedPayload.beneficiaryUserCode}`;
-      } else {
-        normalizedPayload = parseV2PostRegistrationQueuePayload(taskType, {
-          sourceUserCode,
-          newMemberUserCode: parsed?.newMemberUserCode,
-          sourceRef: parsed?.sourceRef,
-          eventType: parsed?.eventType,
-          description: parsed?.description
-        });
-        derivedTaskKey = `help:${normalizedPayload.sourceRef}:${normalizedPayload.sourceUserCode}:${normalizedPayload.newMemberUserCode}`;
-      }
-
-      const providedTaskKey = String(parsed?.taskKey || '').trim();
-      const taskKey = providedTaskKey || derivedTaskKey;
-
-      await enqueueV2PostRegistrationRetryTask({
-        taskType,
-        taskKey,
-        registrationUserCode: sourceUserCode,
-        registrationUserName,
-        targetUserCode,
-        targetUserName,
-        payload: normalizedPayload,
-        maxAttempts
-      });
-
-      void runV2PostRegistrationQueueWorkerTick();
-
-      sendJson(res, 202, {
-        ok: true,
-        taskType,
-        taskKey,
-        registrationUserCode: sourceUserCode,
-        targetUserCode: isValidV2UserCode(targetUserCode) ? targetUserCode : null,
-        queued: true,
-        maxAttempts
-      });
-    } catch (error) {
-      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
-      const message = getErrorMessage(error, 'Failed to enqueue registration retry task');
-      sendJson(res, status, {
-        ok: false,
-        error: message,
-        code: error?.code || (typeof error === 'object' && error.code) || 'REGISTRATION_QUEUE_ENQUEUE_FAILED'
-      });
-    }
-    return;
-  }
-
-  if (req.method === 'GET' && url.pathname === '/api/v2/admin/registration-queue') {
-    try {
-      await resolveV2RequestAuthContext({
-        req,
-        endpointName: V2_REGISTRATION_QUEUE_ADMIN_READ_ENDPOINT_NAME,
-        requiredRole: 'admin',
-        allowImpersonation: false
-      });
-
-      const limitRaw = Number(url.searchParams.get('limit'));
-      const limit = Number.isFinite(limitRaw)
-        ? Math.max(1, Math.min(200, Math.trunc(limitRaw)))
-        : 25;
-
-      const queueStatus = await fetchV2PostRegistrationRetryQueueStatus(limit);
-      sendJson(res, 200, {
-        ok: true,
-        ...queueStatus
-      });
-    } catch (error) {
-      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
-      const message = getErrorMessage(error, 'Failed to read registration queue status');
-      sendJson(res, status, {
-        ok: false,
-        error: message,
-        code: error?.code || (typeof error === 'object' && error.code) || 'REGISTRATION_QUEUE_READ_FAILED'
       });
     }
     return;
@@ -9415,11 +6889,6 @@ const server = createServer(async (req, res) => {
 
       const blockedFinancialKeys = getIncomingFinancialStateKeys(incomingState);
       if (FINANCE_ENGINE_MODE === 'v2' && !LEGACY_FINANCIAL_WRITES_ENABLED && blockedFinancialKeys.length > 0) {
-        const allowAdminCompatibilityWrite = !!stateActorContext?.authSubjectIsAdmin
-          && blockedFinancialKeys.every((key) => V2_LEGACY_FINANCIAL_WRITE_ADMIN_COMPAT_KEYS.has(key));
-        if (allowAdminCompatibilityWrite) {
-          // Compatibility path for admin-driven legacy registration projection during v2 transition.
-        } else {
         sendJson(res, 403, {
           ok: false,
           error: 'Legacy financial writes are blocked while FINANCE_ENGINE_MODE=v2',
@@ -9427,7 +6896,6 @@ const server = createServer(async (req, res) => {
           blockedKeys: blockedFinancialKeys
         });
         return;
-        }
       }
 
       const incomingBaseUpdatedAt = typeof parsed?.baseUpdatedAt === 'string' ? parsed.baseUpdatedAt : null;
@@ -9467,8 +6935,7 @@ const server = createServer(async (req, res) => {
       if (FINANCE_ENGINE_MODE === 'v2') {
         normalizedIncomingState = normalizeQualificationDerivedStateForWrite(
           incomingState,
-          currentSnapshot?.state || {},
-          { lockQualificationFields: !stateActorContext?.authSubjectIsAdmin }
+          currentSnapshot?.state || {}
         );
       }
 
@@ -9757,22 +7224,9 @@ async function start() {
       'V2 auth flags:',
       `signedTokenEnabled=${!!V2_AUTH_TOKEN_SECRET}`,
       `legacyBearerCompat=${V2_ALLOW_LEGACY_BEARER_USER_CODE}`,
-      `profileFallback=${V2_AUTH_PROFILE_FALLBACK_ENABLED}`,
-      `profileFallbackEffective=${V2_AUTH_PROFILE_FALLBACK_EFFECTIVE}`,
       `auditEnabled=${V2_AUTH_AUDIT_ENABLED}`,
       `issuer=${V2_AUTH_TOKEN_ISSUER}`,
       `ttlSeconds=${V2_AUTH_TOKEN_TTL_SECONDS}`
-    );
-    console.log(
-      'V2 registration flags:',
-      `mode=${V2_REGISTRATION_MODE}`,
-      `pureV2=${V2_REGISTRATION_PURE_V2_MODE}`,
-      `legacyProjection=${V2_REGISTRATION_LEGACY_PROJECTION_ENABLED}`,
-      `pinLegacyProjection=${V2_PIN_LEGACY_PROJECTION_ENABLED}`
-    );
-    console.log(
-      'V2 help qualification flags:',
-      `legacyFallback=${V2_HELP_QUALIFICATION_LEGACY_FALLBACK_ENABLED}`
     );
     const smtpErrors = getSmtpConfigErrors();
     if (smtpErrors.length === 0) {
@@ -9793,20 +7247,6 @@ async function start() {
     setInterval(() => {
       void getStateSnapshotCached({ forceFresh: true }).catch(() => {});
     }, 5 * 60 * 1000);
-
-    if (STORAGE_MODE === 'mysql' && FINANCE_ENGINE_MODE === 'v2') {
-      console.log(
-        `Post-registration queue worker: enabled intervalMs=${V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS} batchSize=${V2_POST_REGISTRATION_QUEUE_BATCH_SIZE} maxAttempts=${V2_POST_REGISTRATION_QUEUE_MAX_ATTEMPTS}`
-      );
-      setTimeout(() => {
-        void runV2PostRegistrationQueueWorkerTick();
-      }, 4000);
-      setInterval(() => {
-        void runV2PostRegistrationQueueWorkerTick();
-      }, V2_POST_REGISTRATION_QUEUE_WORKER_INTERVAL_MS);
-    } else {
-      console.log('Post-registration queue worker: disabled (requires STORAGE_MODE=mysql and FINANCE_ENGINE_MODE=v2)');
-    }
 
     if (LEDGER_MISMATCH_ALERT_ENABLED) {
       console.log(

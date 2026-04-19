@@ -71,33 +71,6 @@ function normalizeV2ApiErrorMessage(status: number, payload: Record<string, unkn
 
 const V2_TRANSFER_SYNC_REQUIRED_MESSAGE = 'Live V2 sync is unavailable. Transfer data may be stale. Please refresh and try again.';
 
-export function computeSpendableIncomeBalance(wallet?: Pick<Wallet, 'incomeWallet' | 'giveHelpLocked' | 'lockedIncomeWallet'> | null): number {
-  const incomeBalance = Number(wallet?.incomeWallet || 0);
-  const giveHelpLocked = Number(wallet?.giveHelpLocked || 0);
-  const lockedReceiveHelp = Number(wallet?.lockedIncomeWallet || 0);
-  const effectiveLocked = Math.max(giveHelpLocked, lockedReceiveHelp);
-  return Math.max(0, incomeBalance - effectiveLocked);
-}
-
-function doesTransactionPasswordMatchUser(user: User | null | undefined, candidate: string): boolean {
-  const entered = String(candidate || '').trim();
-  if (!user || !entered) return false;
-
-  if (String(user.transactionPassword || '').trim() === entered) {
-    return true;
-  }
-
-  const publicUserId = String(user.userId || '').trim();
-  if (!publicUserId) return false;
-
-  const sameUserIdRecords = Database.getUsers().filter(
-    (row) => String(row?.userId || '').trim() === publicUserId
-  );
-  return sameUserIdRecords.some(
-    (row) => String(row?.transactionPassword || '').trim() === entered
-  );
-}
-
 function resolveV2BearerTokenOrError(subjectUser: User): { token: string } | { message: string } {
   const savedAuthSession = Database.getV2AuthSession();
   const signedAccessToken = String(savedAuthSession?.accessToken || '').trim();
@@ -184,466 +157,6 @@ function resolveV2ReadRequestHeaders(params: {
   return { headers };
 }
 
-let walletLoadRequestSequence = 0;
-let walletTransactionsRequestSequence = 0;
-
-function resolveActiveWalletContextUser(): User | null {
-  const authState = useAuthStore.getState();
-  const activeUser = authState.impersonatedUser || authState.user;
-  if (!activeUser) return null;
-  return resolveCanonicalUserForWalletActions(activeUser.id)
-    || Database.getUserByUserId(activeUser.userId)
-    || Database.getUserById(activeUser.id)
-    || activeUser;
-}
-
-function isAdminImpersonationActive(): boolean {
-  const authState = useAuthStore.getState();
-  return !!(authState.user?.isAdmin && authState.impersonatedUser);
-}
-
-function normalizePurchasedPinCodes(rawPinCodes: unknown): string[] {
-  if (!Array.isArray(rawPinCodes)) return [];
-
-  const normalized = rawPinCodes
-    .map((value) => String(value || '').trim().toUpperCase())
-    .filter((value) => value.length >= 6 && value.length <= 40);
-
-  return Array.from(new Set(normalized));
-}
-
-function upsertPurchasedPinsIntoLocalCache(params: {
-  ownerInternalUserId: string;
-  pinPriceCents: number;
-  pinCodes: string[];
-  createdByRef: string;
-}): boolean {
-  const ownerInternalUserId = String(params.ownerInternalUserId || '').trim();
-  if (!ownerInternalUserId || params.pinCodes.length === 0) {
-    return false;
-  }
-
-  const existingPins = Database.getPins();
-  const existingCodes = new Set(existingPins.map((pin) => String(pin.pinCode || '').trim().toUpperCase()));
-  const now = new Date().toISOString();
-  const amount = Math.max(0, Number(params.pinPriceCents || 0) / 100);
-  const createdByRef = String(params.createdByRef || '').trim() || ownerInternalUserId;
-  const pinsToAdd: Pin[] = [];
-
-  params.pinCodes.forEach((pinCode, index) => {
-    const normalizedCode = String(pinCode || '').trim().toUpperCase();
-    if (!normalizedCode || existingCodes.has(normalizedCode)) {
-      return;
-    }
-
-    pinsToAdd.push({
-      id: `pin_v2_${Date.now()}_${index}_${Math.random().toString(36).slice(2, 8)}`,
-      pinCode: normalizedCode,
-      amount,
-      status: 'unused',
-      ownerId: ownerInternalUserId,
-      createdBy: createdByRef,
-      createdAt: now
-    });
-    existingCodes.add(normalizedCode);
-  });
-
-  if (pinsToAdd.length === 0) {
-    return false;
-  }
-
-  Database.savePins([...existingPins, ...pinsToAdd]);
-  return true;
-}
-
-function mapV2PinStatusToLocalPinStatus(status: unknown): Pin['status'] {
-  const normalized = String(status || '').toLowerCase();
-  if (normalized === 'generated') return 'unused';
-  if (normalized === 'used') return 'used';
-  if (normalized === 'expired' || normalized === 'cancelled') return 'suspended';
-  return 'unused';
-}
-
-function mapV2TransactionStatusToPaymentStatus(status: unknown): PinPurchaseRequest['status'] {
-  const normalized = String(status || '').toLowerCase();
-  if (normalized === 'completed') return 'completed';
-  if (normalized === 'reversed') return 'reversed';
-  if (normalized === 'cancelled') return 'cancelled';
-  return 'pending';
-}
-
-function inferPinQuantityFromV2Purchase(params: {
-  referenceId: unknown;
-  description: unknown;
-  signedAmountCents: unknown;
-  pinAmountDollars: number;
-}): number {
-  const referenceId = String(params.referenceId || '').trim();
-  const refMatch = referenceId.match(/:(\d+)$/);
-  if (refMatch) {
-    const qty = Number(refMatch[1]);
-    if (Number.isInteger(qty) && qty > 0) return qty;
-  }
-
-  const description = String(params.description || '').trim();
-  const descMatch = description.match(/(\d+)\s*pin/i);
-  if (descMatch) {
-    const qty = Number(descMatch[1]);
-    if (Number.isInteger(qty) && qty > 0) return qty;
-  }
-
-  const amountCents = Math.abs(Number(params.signedAmountCents || 0));
-  const pinAmountCents = Math.max(1, Math.round(Number(params.pinAmountDollars || 11) * 100));
-  if (amountCents > 0) {
-    const inferredQty = Math.max(1, Math.round(amountCents / pinAmountCents));
-    if (Number.isInteger(inferredQty) && inferredQty > 0) return inferredQty;
-  }
-
-  return 1;
-}
-
-function mergePinRequestRecordsById(existing: PinPurchaseRequest[], incoming: PinPurchaseRequest[]): PinPurchaseRequest[] {
-  const byId = new Map<string, PinPurchaseRequest>();
-
-  for (const request of existing) {
-    const id = String(request?.id || '').trim();
-    if (!id) continue;
-    byId.set(id, request);
-  }
-
-  for (const request of incoming) {
-    const id = String(request?.id || '').trim();
-    if (!id) continue;
-    const current = byId.get(id);
-    if (!current) {
-      byId.set(id, request);
-      continue;
-    }
-
-    const existingPins = Array.isArray(current.pinsGenerated) ? current.pinsGenerated : [];
-    const incomingPins = Array.isArray(request.pinsGenerated) ? request.pinsGenerated : [];
-    const mergedPins = Array.from(new Set([...existingPins, ...incomingPins]));
-
-    byId.set(id, {
-      ...current,
-      ...request,
-      pinsGenerated: mergedPins.length > 0 ? mergedPins : undefined
-    });
-  }
-
-  return Array.from(byId.values()).sort((left, right) => {
-    const rightTs = new Date(String(right.createdAt || '')).getTime() || 0;
-    const leftTs = new Date(String(left.createdAt || '')).getTime() || 0;
-    return rightTs - leftTs;
-  });
-}
-
-function upsertDirectPinPurchaseRequestIntoLocalCache(params: {
-  ownerInternalUserId: string;
-  quantity: number;
-  amount: number;
-  pinCodes: string[];
-  txUuid?: unknown;
-  ledgerTransactionId?: unknown;
-  createdAt?: unknown;
-}): void {
-  const ownerInternalUserId = String(params.ownerInternalUserId || '').trim();
-  if (!ownerInternalUserId) return;
-
-  const ledgerTxId = Number(params.ledgerTransactionId || 0);
-  const txUuid = String(params.txUuid || '').trim();
-  const requestId = Number.isInteger(ledgerTxId) && ledgerTxId > 0
-    ? `v2_direct_${ledgerTxId}`
-    : txUuid
-      ? `v2_direct_${txUuid}`
-      : `v2_direct_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-  const createdAt = typeof params.createdAt === 'string' && params.createdAt.trim()
-    ? params.createdAt
-    : new Date().toISOString();
-  const quantity = Math.max(1, Number.isFinite(Number(params.quantity)) ? Math.trunc(Number(params.quantity)) : 1);
-  const amount = Math.max(0, Number(params.amount || 0));
-  const normalizedPinCodes = normalizePurchasedPinCodes(params.pinCodes);
-
-  const incoming: PinPurchaseRequest = {
-    id: requestId,
-    userId: ownerInternalUserId,
-    quantity,
-    amount,
-    status: 'completed',
-    purchaseType: 'direct',
-    paidFromWallet: true,
-    createdAt,
-    processedAt: createdAt,
-    processedBy: 'v2_system',
-    pinsGenerated: normalizedPinCodes.length > 0 ? normalizedPinCodes : undefined
-  };
-
-  const allRequests = Database.getPinPurchaseRequests();
-  const otherUsers = allRequests.filter((request) => String(request.userId || '').trim() !== ownerInternalUserId);
-  const ownerRequests = allRequests.filter((request) => String(request.userId || '').trim() === ownerInternalUserId);
-  const mergedOwner = mergePinRequestRecordsById(ownerRequests, [incoming]);
-  Database.savePinPurchaseRequests([...otherUsers, ...mergedOwner]);
-}
-
-function mergeV2PinsWithLegacyTransitionPins(v2Pins: Pin[], legacyPins: Pin[]): Pin[] {
-  const mergedByCode = new Map<string, Pin>();
-
-  for (const pin of v2Pins) {
-    const pinCode = String(pin.pinCode || '').trim().toUpperCase();
-    if (!pinCode) continue;
-    mergedByCode.set(pinCode, pin);
-  }
-
-  for (const pin of legacyPins) {
-    const pinCode = String(pin.pinCode || '').trim().toUpperCase();
-    if (!pinCode || mergedByCode.has(pinCode)) continue;
-
-    const shouldCarryForward = pin.status === 'transferred' || !!pin.transferredFrom;
-    if (!shouldCarryForward) continue;
-
-    mergedByCode.set(pinCode, pin);
-  }
-
-  return Array.from(mergedByCode.values()).sort((left, right) => {
-    const rightTs = new Date(String(right.createdAt || '')).getTime() || 0;
-    const leftTs = new Date(String(left.createdAt || '')).getTime() || 0;
-    return rightTs - leftTs;
-  });
-}
-
-async function fetchV2PinsSnapshotForUserWithStatus(user: User): Promise<{ pins: Pin[] | null; errorMessage: string | null }> {
-  const canonicalUser = resolveCanonicalUserForWalletActions(user.id)
-    || Database.getUserByUserId(user.userId)
-    || Database.getUserById(user.id)
-    || user;
-
-  const userCode = String(canonicalUser?.userId || '').trim();
-  const internalUserId = String(canonicalUser?.id || '').trim();
-  if (!userCode || !internalUserId) {
-    return { pins: null, errorMessage: 'V2 pin read skipped: user identity is incomplete.' };
-  }
-
-  const requestId = generateClientRequestId('v2_pins_read');
-  const resolvedHeaders = resolveV2ReadRequestHeaders({
-    requestId,
-    impersonationReason: 'pins_read_refresh'
-  });
-  if (!('headers' in resolvedHeaders)) {
-    return {
-      pins: null,
-      errorMessage: resolvedHeaders.message || 'Live V2 pin read failed: auth headers could not be prepared.'
-    };
-  }
-
-  const requestUrl = `${getBackendApiBase()}/api/v2/pins?userCode=${encodeURIComponent(userCode)}&limit=1000`;
-  let response: Response;
-  try {
-    response = await fetch(requestUrl, {
-      method: 'GET',
-      headers: resolvedHeaders.headers
-    });
-  } catch (error) {
-    const rawMessage = error instanceof Error ? error.message : 'Network request error';
-    const normalizedMessage = /failed to fetch|networkerror|load failed|fetch failed/i.test(rawMessage)
-      ? `Cannot reach. Wait few Minutes ${getBackendApiBase()}. Check internet, DNS, SSL, or CORS/proxy settings.`
-      : rawMessage;
-    return {
-      pins: null,
-      errorMessage: `Live V2 pin read failed: ${normalizedMessage}`
-    };
-  }
-
-  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-  if (!response.ok || payload?.ok === false) {
-    const status = response.status || 0;
-    const code = typeof payload?.code === 'string' ? payload.code : '';
-    const backendMessage = typeof payload?.error === 'string'
-      ? payload.error
-      : typeof payload?.message === 'string'
-        ? payload.message
-        : `HTTP ${status}`;
-
-    if (status === 401) {
-      Database.setV2AuthSession(null);
-      return {
-        pins: null,
-        errorMessage: `V2 session rejected (HTTP 401). Please logout and login again.${code ? ` (${code})` : ''}`
-      };
-    }
-
-    return {
-      pins: null,
-      errorMessage: `Live V2 pin read failed: ${backendMessage}${code ? ` (${code})` : ''}`
-    };
-  }
-
-  const rows = Array.isArray((payload as { pins?: unknown[] })?.pins)
-    ? ((payload as { pins?: unknown[] }).pins as Array<Record<string, unknown>>)
-    : [];
-
-  const v2Pins: Pin[] = rows
-    .map((row, index) => {
-      const pinCode = String(row.pinCode || '').trim().toUpperCase();
-      if (!pinCode) return null;
-
-      const localStatus = mapV2PinStatusToLocalPinStatus(row.status);
-      const createdAt = typeof row.createdAt === 'string' && row.createdAt.trim()
-        ? row.createdAt
-        : new Date().toISOString();
-      const usedByUserCode = String(row.usedByUserCode || '').trim();
-      const usedByInternalUser = usedByUserCode
-        ? (resolveCanonicalUserForWalletActions(usedByUserCode)
-          || Database.getUserByUserId(usedByUserCode)
-          || Database.getUserById(usedByUserCode))
-        : null;
-      const usedById = String(usedByInternalUser?.id || usedByUserCode || '').trim();
-      const usedAt = typeof row.usedAt === 'string' && row.usedAt.trim() ? row.usedAt : undefined;
-
-      return {
-        id: `pin_v2_${String(row.id || `${pinCode}_${index}`)}`,
-        pinCode,
-        amount: Math.max(0, Number(row.priceCents || 0)) / 100,
-        status: localStatus,
-        ownerId: internalUserId,
-        createdBy: internalUserId,
-        createdAt,
-        ...(localStatus === 'used' && usedAt ? { usedAt } : {}),
-        ...(localStatus === 'used' && usedById ? { usedById, registrationUserId: usedById } : {}),
-        ...(localStatus === 'suspended'
-          ? {
-            suspendedAt: usedAt || createdAt,
-            suspensionReason: `Projected from v2 pin status: ${String(row.status || '').trim() || 'unknown'}`
-          }
-          : {})
-      } as Pin;
-    })
-    .filter((pin): pin is Pin => !!pin);
-
-  const legacyPins = Database.getUserPins(internalUserId);
-  const mergedPins = mergeV2PinsWithLegacyTransitionPins(v2Pins, legacyPins);
-
-  return {
-    pins: mergedPins,
-    errorMessage: null
-  };
-}
-
-async function fetchV2DirectPinPurchaseRequestsForUserWithStatus(user: User): Promise<{
-  requests: PinPurchaseRequest[] | null;
-  errorMessage: string | null;
-}> {
-  const canonicalUser = resolveCanonicalUserForWalletActions(user.id)
-    || Database.getUserByUserId(user.userId)
-    || Database.getUserById(user.id)
-    || user;
-
-  const userCode = String(canonicalUser?.userId || '').trim();
-  const internalUserId = String(canonicalUser?.id || '').trim();
-  if (!userCode || !internalUserId) {
-    return { requests: null, errorMessage: 'V2 direct pin history read skipped: user identity is incomplete.' };
-  }
-
-  const requestId = generateClientRequestId('v2_pin_requests_read');
-  const resolvedHeaders = resolveV2ReadRequestHeaders({
-    requestId,
-    impersonationReason: 'pin_requests_read_refresh'
-  });
-  if (!('headers' in resolvedHeaders)) {
-    return {
-      requests: null,
-      errorMessage: resolvedHeaders.message || 'Live V2 direct pin history read failed: auth headers could not be prepared.'
-    };
-  }
-
-  const requestUrl = `${getBackendApiBase()}/api/v2/transactions?userCode=${encodeURIComponent(userCode)}&limit=400`;
-  let response: Response;
-  try {
-    response = await fetch(requestUrl, {
-      method: 'GET',
-      headers: resolvedHeaders.headers
-    });
-  } catch (error) {
-    const rawMessage = error instanceof Error ? error.message : 'Network request error';
-    return {
-      requests: null,
-      errorMessage: `Live V2 direct pin history read failed: ${rawMessage}`
-    };
-  }
-
-  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-  if (!response.ok || payload?.ok === false) {
-    const status = response.status || 0;
-    const code = typeof payload?.code === 'string' ? payload.code : '';
-    const backendMessage = typeof payload?.error === 'string'
-      ? payload.error
-      : typeof payload?.message === 'string'
-        ? payload.message
-        : `HTTP ${status}`;
-
-    if (status === 401) {
-      Database.setV2AuthSession(null);
-      return {
-        requests: null,
-        errorMessage: `V2 session rejected (HTTP 401). Please logout and login again.${code ? ` (${code})` : ''}`
-      };
-    }
-
-    return {
-      requests: null,
-      errorMessage: `Live V2 direct pin history read failed: ${backendMessage}${code ? ` (${code})` : ''}`
-    };
-  }
-
-  const txRows = Array.isArray((payload as { transactions?: unknown[] })?.transactions)
-    ? ((payload as { transactions?: unknown[] }).transactions as Array<Record<string, unknown>>)
-    : [];
-
-  const pinAmountDollars = Math.max(1, Number(Database.getSettings()?.pinAmount || 11));
-
-  const requests = txRows
-    .filter((row) => String(row.txType || '').toLowerCase() === 'pin_purchase' && Number(row.signedAmountCents || 0) < 0)
-    .map((row, index) => {
-      const ledgerTransactionId = Number(row.ledgerTransactionId || 0);
-      const txUuid = String(row.txUuid || '').trim();
-      const id = Number.isInteger(ledgerTransactionId) && ledgerTransactionId > 0
-        ? `v2_direct_${ledgerTransactionId}`
-        : txUuid
-          ? `v2_direct_${txUuid}`
-          : `v2_direct_fallback_${Date.now()}_${index}`;
-      const createdAt = typeof row.postedAt === 'string' && row.postedAt.trim()
-        ? row.postedAt
-        : typeof row.createdAt === 'string' && row.createdAt.trim()
-          ? row.createdAt
-          : new Date().toISOString();
-      const amount = Math.abs(Number(row.signedAmountCents || 0)) / 100;
-      const quantity = inferPinQuantityFromV2Purchase({
-        referenceId: row.referenceId,
-        description: row.description,
-        signedAmountCents: row.signedAmountCents,
-        pinAmountDollars
-      });
-      const status = mapV2TransactionStatusToPaymentStatus(row.status);
-
-      return {
-        id,
-        userId: internalUserId,
-        quantity,
-        amount,
-        status,
-        purchaseType: 'direct',
-        paidFromWallet: true,
-        createdAt,
-        ...(status === 'completed' ? { processedAt: createdAt, processedBy: 'v2_system' } : {})
-      } as PinPurchaseRequest;
-    });
-
-  return {
-    requests,
-    errorMessage: null
-  };
-}
-
 function buildWalletDefaultsForV2Read(userId: string, existingWallet?: Wallet | null): Wallet {
   return {
     userId,
@@ -667,6 +180,13 @@ function buildWalletDefaultsForV2Read(userId: string, existingWallet?: Wallet | 
   };
 }
 
+export function computeSpendableIncomeBalance(wallet?: Wallet | null): number {
+  if (!wallet) return 0;
+  const incomeWallet = Number(wallet.incomeWallet || 0);
+  const giveHelpLocked = Number(wallet.giveHelpLocked || 0);
+  return Math.max(0, incomeWallet - giveHelpLocked);
+}
+
 function mapV2ReadStatusToTransactionStatus(status: unknown): TransactionStatus {
   const normalized = String(status || '').toLowerCase();
   if (normalized === 'completed') return 'completed';
@@ -675,9 +195,15 @@ function mapV2ReadStatusToTransactionStatus(status: unknown): TransactionStatus 
   return 'pending';
 }
 
-function mapV2ReadTypeToTransactionType(txType: unknown, walletType: unknown, signedAmountCents: number): TransactionType {
+function mapV2ReadTypeToTransactionType(
+  txType: unknown,
+  walletType: unknown,
+  signedAmountCents: number,
+  rawDescription?: unknown
+): TransactionType {
   const normalizedTxType = String(txType || '').toLowerCase();
   const normalizedWalletType = String(walletType || '').toLowerCase();
+  const normalizedDescription = String(rawDescription || '').toLowerCase();
 
   if (normalizedTxType === 'fund_transfer') {
     if (normalizedWalletType === 'income' && signedAmountCents < 0) return 'income_transfer';
@@ -686,6 +212,9 @@ function mapV2ReadTypeToTransactionType(txType: unknown, walletType: unknown, si
   if (normalizedTxType === 'withdrawal_debit') return 'withdrawal';
   if (normalizedTxType === 'pin_purchase') return 'pin_purchase';
   if (normalizedTxType === 'referral_credit') {
+    if (normalizedWalletType === 'locked_income' && signedAmountCents >= 0) return 'receive_help';
+    if (normalizedDescription.includes('help') && signedAmountCents >= 0) return 'receive_help';
+    if (normalizedDescription.includes('from locked income') && signedAmountCents < 0) return 'give_help';
     return signedAmountCents >= 0 ? 'direct_income' : 'income_transfer';
   }
   if (normalizedTxType === 'admin_adjustment') {
@@ -925,7 +454,7 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
   wallet.incomeWallet = Number(walletData.incomeCents || 0) / 100;
   wallet.royaltyWallet = Number(walletData.royaltyCents || 0) / 100;
   wallet.lockedIncomeWallet = Number(walletData.lockedIncomeCents || 0) / 100;
-  wallet.giveHelpLocked = Number(walletData.giveHelpLockedCents || 0) / 100;
+  wallet.giveHelpLocked = Number(walletData.lockedForGiveCents || 0) / 100;
 
   const v2Transactions = txRows.map((row, index) => {
     const signedAmountCents = Number(row.signedAmountCents || 0);
@@ -941,7 +470,12 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
         ? row.createdAt
         : new Date().toISOString();
 
-    const txType = mapV2ReadTypeToTransactionType(row.txType, row.walletType, signedAmountCents);
+    const txType = mapV2ReadTypeToTransactionType(
+      row.txType,
+      row.walletType,
+      signedAmountCents,
+      row.description
+    );
     const description = buildV2DisplayDescription({
       txType: row.txType,
       walletType: row.walletType,
@@ -983,102 +517,6 @@ async function fetchV2WalletAndTransactionsSnapshotForUser(
 ): Promise<{ wallet: Wallet; transactions: Transaction[] } | null> {
   const result = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(user, options);
   return result.snapshot;
-}
-
-async function submitV2Registration(params: RegisterData): Promise<{
-  success: boolean;
-  message: string;
-  userId?: string;
-  user?: {
-    userId: string;
-    fullName: string;
-    email: string;
-    phone: string;
-    country: string;
-  };
-  warnings: string[];
-}> {
-  const payload = {
-    fullName: String(params.fullName || '').trim(),
-    email: String(params.email || '').trim(),
-    password: String(params.password || ''),
-    transactionPassword: String(params.transactionPassword || ''),
-    phone: normalizePhoneNumber(String(params.phone || '')),
-    country: String(params.country || '').trim(),
-    sponsorId: String(params.sponsorId || '').trim() || undefined,
-    pinCode: String(params.pinCode || '').trim().toUpperCase()
-  };
-
-  const requestId = generateClientRequestId('v2_register');
-  const idempotencyKey = generateClientIdempotencyKey();
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Idempotency-Key': idempotencyKey,
-    'X-System-Version': 'v2',
-    'X-Request-Id': requestId
-  };
-
-  const authState = useAuthStore.getState();
-  const subjectUser = authState.user;
-  const impersonatedUser = authState.impersonatedUser;
-  if (subjectUser) {
-    const bearerTokenResult = resolveV2BearerTokenOrError(subjectUser);
-    if ('token' in bearerTokenResult) {
-      headers['Authorization'] = `Bearer ${bearerTokenResult.token}`;
-      if (impersonatedUser && subjectUser.isAdmin) {
-        headers['X-Impersonate-User-Code'] = impersonatedUser.userId;
-        headers['X-Impersonation-Reason'] = 'create_id_registration';
-      }
-    }
-  }
-
-  const response = await fetch(`${getBackendApiBase()}/api/v2/register`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload)
-  });
-
-  const responsePayload = await response.json().catch(() => ({} as Record<string, unknown>));
-  if (!response.ok || responsePayload?.ok === false) {
-    return {
-      success: false,
-      message: normalizeV2ApiErrorMessage(response.status, responsePayload, 'Registration failed'),
-      warnings: []
-    };
-  }
-
-  const userId = typeof responsePayload?.userId === 'string' ? responsePayload.userId.trim() : '';
-  const userPayload = responsePayload?.user;
-  const userInfo = userPayload && typeof userPayload === 'object'
-    ? {
-      userId: typeof userPayload.userId === 'string' ? userPayload.userId : userId,
-      fullName: typeof userPayload.fullName === 'string' ? userPayload.fullName : payload.fullName,
-      email: typeof userPayload.email === 'string' ? userPayload.email : payload.email,
-      phone: typeof userPayload.phone === 'string' ? userPayload.phone : payload.phone,
-      country: typeof userPayload.country === 'string' ? userPayload.country : payload.country
-    }
-    : undefined;
-
-  const warnings = Array.isArray(responsePayload?.warnings)
-    ? responsePayload.warnings
-      .map((value: unknown) => String(value || '').trim())
-      .filter((value: string) => value.length > 0)
-    : [];
-
-  const message = typeof responsePayload?.message === 'string' && responsePayload.message.trim().length > 0
-    ? responsePayload.message.trim()
-    : userId
-      ? `Registration successful. Your ID is: ${userId}`
-      : 'Registration successful.';
-
-  return {
-    success: true,
-    message,
-    userId: userId || undefined,
-    user: userInfo,
-    warnings
-  };
 }
 
 async function submitV2ReferralCreditBySourceRef(params: {
@@ -1310,31 +748,12 @@ type PendingHelpRetryTask = {
 
 type PendingPostRegistrationRetryTask = PendingReferralRetryTask | PendingHelpRetryTask;
 
-export type PostRegistrationRetryQueueItem = {
-  id: number;
-  taskKey: string;
-  taskType: 'referral_credit' | 'help_event';
-  registrationUserCode: string;
-  registrationUserName: string;
-  targetUserCode: string;
-  targetUserName: string;
-  status: 'queued' | 'processing' | 'failed' | 'completed';
-  attempts: number;
-  maxAttempts: number;
-  nextAttemptAt: string | null;
-  lastError: string | null;
-  createdAt: string | null;
-};
-
 export type PostRegistrationRetryQueueStatus = {
   pendingCount: number;
   oldestPendingAgeMs: number | null;
   oldestCreatedAt: string | null;
   nextAttemptAt: string | null;
   nextAttemptInMs: number | null;
-  source: 'backend' | 'local';
-  backendReachable: boolean;
-  items: PostRegistrationRetryQueueItem[];
 };
 
 let postRegistrationRetryQueueRunning = false;
@@ -1355,207 +774,6 @@ function buildPendingHelpRetryKey(payload: {
   sourceRef: string;
 }): string {
   return `help:${payload.sourceRef}:${payload.sourceUserCode}:${payload.newMemberUserCode}`;
-}
-
-function resolveRetryTaskUserName(userCode: string): string {
-  const normalized = String(userCode || '').trim();
-  if (!normalized) return '';
-  const user = Database.getUserByUserId(normalized);
-  return String(user?.fullName || '').trim();
-}
-
-function mapPendingTaskToQueueItem(task: PendingPostRegistrationRetryTask): PostRegistrationRetryQueueItem {
-  const taskType = task.kind;
-  const registrationUserCode = String(task.payload.sourceUserCode || '').trim();
-  const registrationUserName = resolveRetryTaskUserName(registrationUserCode);
-  const targetUserCode = taskType === 'referral_credit'
-    ? String(task.payload.beneficiaryUserCode || '').trim()
-    : String(task.payload.newMemberUserCode || '').trim();
-  const targetUserName = resolveRetryTaskUserName(targetUserCode);
-
-  return {
-    id: 0,
-    taskKey: task.key,
-    taskType,
-    registrationUserCode,
-    registrationUserName,
-    targetUserCode,
-    targetUserName,
-    status: 'queued',
-    attempts: task.attempts,
-    maxAttempts: 0,
-    nextAttemptAt: Number.isFinite(task.nextAttemptAt) && task.nextAttemptAt > 0
-      ? new Date(task.nextAttemptAt).toISOString()
-      : null,
-    lastError: task.lastError,
-    createdAt: task.createdAt || null
-  };
-}
-
-async function enqueuePendingPostRegistrationRetryTaskToBackend(task: PendingPostRegistrationRetryTask): Promise<boolean> {
-  if (typeof window === 'undefined' || typeof fetch === 'undefined') {
-    return false;
-  }
-
-  const sourceUserCode = String(task.payload.sourceUserCode || '').trim();
-  if (!sourceUserCode) {
-    return false;
-  }
-
-  const registrationUserName = resolveRetryTaskUserName(sourceUserCode);
-  const targetUserCode = task.kind === 'referral_credit'
-    ? String(task.payload.beneficiaryUserCode || '').trim()
-    : String(task.payload.newMemberUserCode || '').trim();
-  const targetUserName = resolveRetryTaskUserName(targetUserCode);
-  const requestId = generateClientRequestId('registration_queue');
-
-  const basePayload: Record<string, unknown> = {
-    taskType: task.kind,
-    taskKey: task.key,
-    sourceUserCode,
-    registrationUserName,
-    targetUserCode,
-    targetUserName,
-    sourceRef: String(task.payload.sourceRef || '').trim(),
-    description: typeof task.payload.description === 'string' ? task.payload.description : undefined,
-    maxAttempts: 40
-  };
-
-  if (task.kind === 'referral_credit') {
-    basePayload.beneficiaryUserCode = String(task.payload.beneficiaryUserCode || '').trim();
-    basePayload.amountCents = Math.round(Number(task.payload.amount || 0) * 100);
-    basePayload.eventType = 'direct_referral';
-    basePayload.levelNo = 1;
-  } else {
-    basePayload.newMemberUserCode = String(task.payload.newMemberUserCode || '').trim();
-    basePayload.eventType = 'activation_join';
-  }
-
-  try {
-    const response = await fetch(`${getBackendApiBase()}/api/v2/registration-queue/tasks`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${sourceUserCode}`,
-        'X-System-Version': 'v2',
-        'X-Request-Id': requestId
-      },
-      body: JSON.stringify(basePayload)
-    });
-
-    if (!response.ok) {
-      return false;
-    }
-    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-    return payload?.ok === true;
-  } catch {
-    return false;
-  }
-}
-
-async function fetchPostRegistrationRetryQueueStatusFromBackend(limit = 25): Promise<PostRegistrationRetryQueueStatus | null> {
-  if (typeof window === 'undefined' || typeof fetch === 'undefined') {
-    return null;
-  }
-
-  const authState = useAuthStore.getState();
-  const adminUser = authState.user;
-  if (!adminUser?.isAdmin) {
-    return null;
-  }
-
-  const bearerTokenResult = resolveV2BearerTokenOrError(adminUser);
-  if (!('token' in bearerTokenResult)) {
-    return null;
-  }
-
-  const requestId = generateClientRequestId('registration_queue_admin');
-  const safeLimit = Number.isFinite(limit)
-    ? Math.max(1, Math.min(200, Math.trunc(limit)))
-    : 25;
-
-  try {
-    const response = await fetch(`${getBackendApiBase()}/api/v2/admin/registration-queue?limit=${safeLimit}`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${bearerTokenResult.token}`,
-        'X-System-Version': 'v2',
-        'X-Request-Id': requestId
-      }
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-    if (payload?.ok !== true) {
-      return null;
-    }
-
-    const now = Date.now();
-    const oldestCreatedAt = typeof payload?.oldestPendingCreatedAt === 'string' && payload.oldestPendingCreatedAt
-      ? payload.oldestPendingCreatedAt
-      : null;
-    const oldestCreatedAtMs = oldestCreatedAt ? new Date(oldestCreatedAt).getTime() : NaN;
-    const oldestPendingAgeMs = Number.isFinite(oldestCreatedAtMs)
-      ? Math.max(0, now - oldestCreatedAtMs)
-      : null;
-    const nextAttemptAt = typeof payload?.nextAttemptAt === 'string' && payload.nextAttemptAt
-      ? payload.nextAttemptAt
-      : null;
-    const nextAttemptAtMs = nextAttemptAt ? new Date(nextAttemptAt).getTime() : NaN;
-    const nextAttemptInMs = Number.isFinite(nextAttemptAtMs)
-      ? Math.max(0, nextAttemptAtMs - now)
-      : null;
-
-    const rawItems: unknown[] = Array.isArray(payload?.items) ? payload.items : [];
-    const items: PostRegistrationRetryQueueItem[] = rawItems.map((item: unknown) => {
-      const queueItem = item && typeof item === 'object'
-        ? (item as Record<string, unknown>)
-        : {};
-      const taskType = String(queueItem.taskType || '').trim().toLowerCase() === 'help_event'
-        ? 'help_event'
-        : 'referral_credit';
-      const statusRaw = String(queueItem.status || '').trim().toLowerCase();
-      const status: PostRegistrationRetryQueueItem['status'] = statusRaw === 'processing'
-        ? 'processing'
-        : statusRaw === 'failed'
-          ? 'failed'
-          : statusRaw === 'completed'
-            ? 'completed'
-            : 'queued';
-
-      return {
-        id: Number(queueItem.id || 0),
-        taskKey: String(queueItem.taskKey || ''),
-        taskType,
-        registrationUserCode: String(queueItem.registrationUserCode || ''),
-        registrationUserName: String(queueItem.registrationUserName || ''),
-        targetUserCode: String(queueItem.targetUserCode || ''),
-        targetUserName: String(queueItem.targetUserName || ''),
-        status,
-        attempts: Number(queueItem.attempts || 0),
-        maxAttempts: Number(queueItem.maxAttempts || 0),
-        nextAttemptAt: typeof queueItem.nextAttemptAt === 'string' ? queueItem.nextAttemptAt : null,
-        lastError: typeof queueItem.lastError === 'string' && queueItem.lastError.trim() ? queueItem.lastError.trim() : null,
-        createdAt: typeof queueItem.createdAt === 'string' ? queueItem.createdAt : null
-      };
-    });
-
-    return {
-      pendingCount: Number(payload?.pendingCount || 0),
-      oldestPendingAgeMs,
-      oldestCreatedAt,
-      nextAttemptAt,
-      nextAttemptInMs,
-      source: 'backend',
-      backendReachable: true,
-      items
-    };
-  } catch {
-    return null;
-  }
 }
 
 function normalizePendingRetryTask(rawTask: unknown): PendingPostRegistrationRetryTask | null {
@@ -1683,7 +901,6 @@ function writePendingPostRegistrationRetryTasks(tasks: PendingPostRegistrationRe
 function upsertPendingPostRegistrationRetryTask(task: PendingPostRegistrationRetryTask): void {
   const tasks = readPendingPostRegistrationRetryTasks();
   const existingIndex = tasks.findIndex((entry) => entry.key === task.key);
-  let queuedTask = task;
   if (existingIndex >= 0) {
     const existingTask = tasks[existingIndex];
     tasks[existingIndex] = {
@@ -1692,14 +909,10 @@ function upsertPendingPostRegistrationRetryTask(task: PendingPostRegistrationRet
       attempts: existingTask.attempts,
       nextAttemptAt: Math.min(existingTask.nextAttemptAt, task.nextAttemptAt)
     };
-    queuedTask = tasks[existingIndex];
   } else {
     tasks.push(task);
   }
   writePendingPostRegistrationRetryTasks(tasks);
-  void enqueuePendingPostRegistrationRetryTaskToBackend(queuedTask).catch(() => {
-    // Local queue remains the fallback if backend enqueue fails.
-  });
 }
 
 function enqueuePendingReferralCreditRetry(payload: {
@@ -1878,10 +1091,7 @@ function getPostRegistrationRetryQueueStatusSnapshot(): PostRegistrationRetryQue
       oldestPendingAgeMs: null,
       oldestCreatedAt: null,
       nextAttemptAt: null,
-      nextAttemptInMs: null,
-      source: 'local',
-      backendReachable: false,
-      items: []
+      nextAttemptInMs: null
     };
   }
 
@@ -1901,14 +1111,7 @@ function getPostRegistrationRetryQueueStatusSnapshot(): PostRegistrationRetryQue
     oldestPendingAgeMs,
     oldestCreatedAt: oldestTask.createdAt,
     nextAttemptAt: new Date(nextAttemptTask.nextAttemptAt).toISOString(),
-    nextAttemptInMs,
-    source: 'local',
-    backendReachable: false,
-    items: tasks
-      .slice()
-      .sort((a, b) => a.nextAttemptAt - b.nextAttemptAt)
-      .slice(0, 25)
-      .map((task) => mapPendingTaskToQueueItem(task))
+    nextAttemptInMs
   };
 }
 
@@ -1916,33 +1119,19 @@ export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 15000): Pos
   const [status, setStatus] = useState<PostRegistrationRetryQueueStatus>(() => getPostRegistrationRetryQueueStatusSnapshot());
 
   useEffect(() => {
-    let isDisposed = false;
-
-    const updateStatus = async () => {
-      const localSnapshot = getPostRegistrationRetryQueueStatusSnapshot();
-      if (isDisposed) return;
-
-      const backendStatus = await fetchPostRegistrationRetryQueueStatusFromBackend(50);
-      if (isDisposed) return;
-
-      if (backendStatus) {
-        setStatus(backendStatus);
-      } else {
-        setStatus(localSnapshot);
-      }
+    const updateStatus = () => {
+      setStatus(getPostRegistrationRetryQueueStatusSnapshot());
     };
 
-    void updateStatus();
+    updateStatus();
     const intervalMs = Number.isFinite(pollIntervalMs)
       ? Math.max(5000, Math.min(60000, Math.trunc(pollIntervalMs)))
       : 15000;
-    const intervalId = setInterval(() => {
-      void updateStatus();
-    }, intervalMs);
+    const intervalId = setInterval(updateStatus, intervalMs);
 
     const handleVisibilityChange = () => {
       if (!document.hidden) {
-        void updateStatus();
+        updateStatus();
       }
     };
 
@@ -1951,7 +1140,6 @@ export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 15000): Pos
     }
 
     return () => {
-      isDisposed = true;
       clearInterval(intervalId);
       if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
@@ -2499,60 +1687,429 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     if (AUTH_MAINTENANCE_ENABLED && !actingUser?.isAdmin) {
       return { success: false, message: AUTH_MAINTENANCE_MESSAGE };
     }
+
+    await Database.ensureFreshData({
+      keys: Database.getRegistrationFreshDataKeys(),
+      timeoutMs: 10000,
+      maxAttempts: 2,
+      retryDelayMs: 700
+    });
+
+    const registrationGate = Database.getSensitiveActionSyncGate();
+    // Allow registration if sync is just pending/slow; only block when truly offline
+    if (!registrationGate.allowed && registrationGate.status.state === 'offline') {
+      return { success: false, message: registrationGate.message };
+    }
+
     const { fullName, email, password, transactionPassword, phone, country, sponsorId, pinCode } = userData;
     const normalizedPhone = normalizePhoneNumber(phone);
 
     if (!isValidPhoneNumberForCountry(phone, country)) {
       return { success: false, message: 'Enter a valid mobile number for the selected country' };
     }
+
+    // Duplicate email/phone is allowed (multiple IDs can share contact info).
+
+    // Validate PIN - MANDATORY
     if (!pinCode) {
       return { success: false, message: 'PIN is required for registration' };
     }
-    const registerResult = await submitV2Registration({
-      fullName,
-      email,
-      password,
-      transactionPassword,
-      phone: normalizedPhone,
-      country,
-      sponsorId,
-      pinCode
-    });
 
-    if (!registerResult.success) {
-      return { success: false, message: registerResult.message };
+    const pin = Database.getPinByCode(pinCode);
+    if (!pin) {
+      return { success: false, message: 'Invalid PIN code' };
+    }
+    if (pin.status === 'suspended') {
+      return { success: false, message: 'PIN is suspended by admin' };
+    }
+    if (pin.status !== 'unused') {
+      return { success: false, message: 'PIN has already been used' };
     }
 
-    const newUserId = String(registerResult.userId || '').trim();
-    if (!newUserId) {
-      return { success: false, message: 'Registration completed but server did not return a valid User ID. Please retry.' };
+    // Validate sponsor if provided
+    let sponsor = null;
+    if (sponsorId) {
+      sponsor = Database.getUserByUserId(sponsorId);
+      if (!sponsor) {
+        return { success: false, message: 'Invalid Sponsor ID' };
+      }
+      if (!Database.isNetworkActiveUser(sponsor)) {
+        return { success: false, message: 'Sponsor account is inactive or blocked' };
+      }
+    }
+
+    let newUser: User;
+    let newUserId = '';
+    let referralBeneficiaryUserCode: string | null = null;
+    let helpEventSourceUserCode: string | null = null;
+    try {
+      const result = await Database.runWithLocalStateTransaction(() => {
+        // Generate unique 7-digit ID
+        const generatedUserId = Database.generateUniqueUserId();
+
+        // Find placement in matrix (Top to Bottom, Left to Right)
+        let parentId: string | null = null;
+        let position: 'left' | 'right' | null = null;
+
+        if (sponsor) {
+          const placement = Database.findNextPosition(sponsor.userId);
+          if (placement) {
+            parentId = placement.parentId;
+            position = placement.position;
+          }
+        }
+
+        // User "level" tracks plan progress (starts at 0). Matrix depth is tracked separately on matrix nodes.
+        const matrixDepthLevel = parentId ? (Database.getMatrixNode(parentId)?.level || 0) + 1 : 0;
+
+        // Create new user - ACTIVE immediately with PIN
+        const createdUser: User = {
+          id: `user_${Date.now()}`,
+          userId: generatedUserId,
+          email,
+          password,
+          fullName,
+          phone: normalizedPhone,
+          country,
+          isActive: true, // Active immediately with PIN
+          isAdmin: false,
+          accountStatus: 'active',
+          blockedAt: null,
+          blockedUntil: null,
+          blockedReason: null,
+          deactivationReason: null,
+          reactivatedAt: null,
+          createdAt: new Date().toISOString(),
+          activatedAt: new Date().toISOString(), // Activated immediately
+          gracePeriodEnd: null,
+          sponsorId: sponsor?.userId || null,
+          parentId,
+          position,
+          level: 0,
+          directCount: 0,
+          totalEarnings: 0,
+          isCapped: false,
+          capLevel: 0,
+          reEntryCount: 0,
+          cycleCount: 0,
+          requiredDirectForNextLevel: 2,
+          completedDirectForCurrentLevel: 0,
+          transactionPassword, // Store transaction password
+          emailVerified: false, // Will be verified via OTP
+          achievements: {
+            nationalTour: false,
+            internationalTour: false,
+            familyTour: false
+          }
+        };
+
+        Database.createUser(createdUser);
+        Database.applyAnnouncementsForNewUser(createdUser.id);
+
+        // Strict PIN guard: re-check right before consuming to prevent stale/duplicate use
+        const latestPin = Database.getPinByCode(pinCode);
+        if (!latestPin || latestPin.status !== 'unused') {
+          throw new Error('PIN has already been used');
+        }
+        const consumedPin = Database.consumePin(pinCode, createdUser.id);
+        if (!consumedPin) {
+          throw new Error('PIN has already been used');
+        }
+
+        // Add to matrix
+        const matrixNode: MatrixNode = {
+          userId: generatedUserId,
+          username: fullName,
+          level: matrixDepthLevel,
+          position: position === 'left' ? 0 : 1,
+          parentId: parentId || undefined,
+          isActive: true
+        };
+        Database.addMatrixNode(matrixNode);
+
+        // Update parent's child reference
+        if (parentId && position) {
+          const matrix = Database.getMatrix();
+          const parentNode = matrix.find(m => m.userId === parentId);
+          if (parentNode) {
+            if (position === 'left') {
+              parentNode.leftChild = generatedUserId;
+            } else {
+              parentNode.rightChild = generatedUserId;
+            }
+            Database.saveMatrix(matrix);
+          }
+        }
+
+        // Update sponsor's direct count
+        if (sponsor) {
+          Database.updateUser(sponsor.id, {
+            directCount: sponsor.directCount + 1
+          });
+          Database.releaseLockedGiveHelp(sponsor.id);
+          Database.releaseLockedReceiveHelp(sponsor.id);
+        }
+
+        // Create PIN usage transaction
+        Database.createTransaction({
+          id: `tx_${Date.now()}_pin_used`,
+          userId: createdUser.id,
+          type: 'pin_used',
+          amount: 11,
+          pinCode: pin.pinCode,
+          pinId: pin.id,
+          status: 'completed',
+          description: 'Account activation using PIN',
+          createdAt: new Date().toISOString(),
+          completedAt: new Date().toISOString()
+        });
+
+        // Distribute activation amount (from PIN value)
+        const directIncome = 5;
+        const adminFee = 1;
+
+        // Referral income
+        if (sponsor) {
+          referralBeneficiaryUserCode = sponsor.userId;
+        } else {
+          Database.addToSafetyPool(directIncome, createdUser.id, 'No sponsor - referral income');
+        }
+
+        // Admin fee to safety pool
+        Database.addToSafetyPool(adminFee, createdUser.id, 'Admin fee');
+
+        // Queue help/give processing to backend V2 help-event flow.
+        helpEventSourceUserCode = createdUser.userId;
+
+        // Send welcome notification
+        Database.createNotification({
+          id: `notif_${Date.now()}`,
+          userId: createdUser.id,
+          title: 'Welcome To ReferNex',
+          message: `Welcome to ReferNex.\n\nAccount created successfully. Your User ID is ${generatedUserId}. Please check your email for your login and transaction passwords.`,
+          type: 'success',
+          isRead: false,
+          createdAt: new Date().toISOString()
+        });
+
+        return { newUser: createdUser, newUserId: generatedUserId };
+      }, {
+        syncOnCommit: true,
+        syncOptions: {
+          full: false,
+          force: true,
+          timeoutMs: 120000,
+          maxAttempts: 3,
+          retryDelayMs: 2000
+        }
+      });
+      newUser = result.newUser;
+      newUserId = result.newUserId;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (message && /pin/i.test(message)) {
+        return { success: false, message };
+      }
+      return { success: false, message: 'ID creation failed. Please try again after some time.' };
     }
 
     try {
-      await Database.hydrateFromServer({
+      await Database.ensureFreshData({
         keys: Database.getRegistrationFreshDataKeys(),
-        strict: false,
+        timeoutMs: 10000,
         maxAttempts: 2,
-        timeoutMs: 20000,
-        retryDelayMs: 900
+        retryDelayMs: 700
       });
     } catch {
-      // Best-effort hydration only.
+      // Best-effort refresh so we can resolve the final saved user after sync.
     }
 
-    const emailTarget = registerResult.user?.email || email;
-    const userNameTarget = registerResult.user?.fullName || fullName;
-    const phoneTarget = registerResult.user?.phone || normalizedPhone;
+    const canonicalRegisteredUser = (() => {
+      const byInternalId = Database.getUserById(newUser.id);
+      if (byInternalId) {
+        return Database.getUserByUserId(byInternalId.userId) || byInternalId;
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      const candidates = Database.getUsers()
+        .filter((candidate) => (
+          (candidate.email || '').trim().toLowerCase() === normalizedEmail
+          && normalizePhoneNumber(candidate.phone) === normalizedPhone
+          && (candidate.fullName || '').trim().toLowerCase() === fullName.trim().toLowerCase()
+          && (sponsor?.userId ? candidate.sponsorId === sponsor.userId : true)
+        ));
+
+      if (candidates.length === 0) {
+        const byGeneratedUserId = Database.getUserByUserId(newUserId);
+        return byGeneratedUserId || newUser;
+      }
+
+      const matrixUserIds = new Set(Database.getMatrix().map((node) => node.userId));
+      return [...candidates].sort((a, b) => {
+        const aMatrixScore = matrixUserIds.has(a.userId) ? 1 : 0;
+        const bMatrixScore = matrixUserIds.has(b.userId) ? 1 : 0;
+        if (aMatrixScore !== bMatrixScore) return bMatrixScore - aMatrixScore;
+
+        const aCreated = new Date(a.createdAt || 0).getTime();
+        const bCreated = new Date(b.createdAt || 0).getTime();
+        return bCreated - aCreated;
+      })[0];
+    })();
+
+    newUser = canonicalRegisteredUser;
+    newUserId = canonicalRegisteredUser.userId;
+
+    try {
+      const consistency = await Database.commitCriticalAction(
+        () => Database.ensureRegistrationConsistency({
+          userId: newUserId,
+          fullName,
+          email,
+          phone: normalizedPhone,
+          country,
+          sponsorId: sponsor?.userId || null,
+          loginPassword: password,
+          transactionPassword,
+          pinCode
+        }),
+        {
+          full: false,
+          force: true,
+          timeoutMs: 90000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        }
+      );
+      newUser = consistency.user;
+      newUserId = consistency.user.userId;
+    } catch {
+      return {
+        success: false,
+        message: 'Registration completed but verification failed. Please contact admin to run user recovery for this ID.'
+      };
+    }
+
+    let referralCreditWarning: string | null = null;
+    if (referralBeneficiaryUserCode) {
+      const sourceUserCode = String(newUser.userId || '').trim();
+      const beneficiaryUserCode = String(referralBeneficiaryUserCode || '').trim();
+      const sourceRef = `reg_pin_${sourceUserCode}_${beneficiaryUserCode}`;
+
+      let referralResult = await submitV2ReferralCreditBySourceRef({
+        sourceUserCode,
+        beneficiaryUserCode,
+        amount: 5,
+        sourceRef,
+        eventType: 'direct_referral',
+        levelNo: 1,
+        description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
+      });
+
+      if (!referralResult.success) {
+        try {
+          await Database.forceRemoteSyncNowWithOptions({
+            full: false,
+            force: true,
+            timeoutMs: 30000,
+            maxAttempts: 2,
+            retryDelayMs: 1000
+          });
+          await Database.hydrateFromServer({
+            keys: [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 15000,
+            retryDelayMs: 800
+          });
+          referralResult = await submitV2ReferralCreditBySourceRef({
+            sourceUserCode,
+            beneficiaryUserCode,
+            amount: 5,
+            sourceRef,
+            eventType: 'direct_referral',
+            levelNo: 1,
+            description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
+          });
+        } catch {
+          // best-effort retry only
+        }
+      }
+
+      if (!referralResult.success) {
+        enqueuePendingReferralCreditRetry({
+          sourceUserCode,
+          beneficiaryUserCode,
+          amount: 5,
+          sourceRef,
+          description: `Referral income from ${newUser.fullName} (${sourceUserCode})`
+        });
+        referralCreditWarning = `Referral credit is queued for auto-retry (${referralResult.message}).`;
+      }
+    }
+
+    let helpEventWarning: string | null = null;
+    if (helpEventSourceUserCode) {
+      const sourceUserCode = String(helpEventSourceUserCode || '').trim();
+      const newMemberUserCode = String(newUser.userId || '').trim();
+      const sourceRef = `reg_help_${sourceUserCode}_${newMemberUserCode}`;
+
+      let helpEventResult = await submitV2HelpEventBySourceRef({
+        sourceUserCode,
+        newMemberUserCode,
+        sourceRef,
+        eventType: 'activation_join',
+        description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+      });
+
+      if (!helpEventResult.success) {
+        try {
+          await Database.forceRemoteSyncNowWithOptions({
+            full: false,
+            force: true,
+            timeoutMs: 30000,
+            maxAttempts: 2,
+            retryDelayMs: 1000
+          });
+          await Database.hydrateFromServer({
+            keys: [DB_KEYS.USERS, DB_KEYS.MATRIX],
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 15000,
+            retryDelayMs: 800
+          });
+          helpEventResult = await submitV2HelpEventBySourceRef({
+            sourceUserCode,
+            newMemberUserCode,
+            sourceRef,
+            eventType: 'activation_join',
+            description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+          });
+        } catch {
+          // best-effort retry only
+        }
+      }
+
+      if (!helpEventResult.success) {
+        enqueuePendingHelpEventRetry({
+          sourceUserCode,
+          newMemberUserCode,
+          sourceRef,
+          description: `Activation help event for ${newUser.fullName} (${newMemberUserCode})`
+        });
+        helpEventWarning = `Help event is queued for auto-retry (${helpEventResult.message}).`;
+      }
+    }
+
     const welcomeSubject = 'Welcome To ReferNex';
     const welcomeBody = [
-      `Hello ${userNameTarget},`,
+      `Hello ${newUser.fullName},`,
       '',
       'Welcome to ReferNex. Your account is now active.',
       '',
-      `Name: ${userNameTarget}`,
-      `User ID: ${newUserId}`,
-      `Email: ${emailTarget}`,
-      `Phone: ${phoneTarget}`,
+      `Name: ${newUser.fullName}`,
+      `User ID: ${newUser.userId}`,
+      `Email: ${newUser.email}`,
+      `Phone: ${newUser.phone}`,
       '',
       `Login Password: ${password}`,
       `Transaction Password: ${transactionPassword}`,
@@ -2561,21 +2118,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     ].join('\n');
 
     void dispatchSystemEmail({
-      to: emailTarget,
+      to: newUser.email,
       subject: welcomeSubject,
       body: welcomeBody,
       purpose: 'welcome',
       timeoutMs: 5000,
       metadata: {
-        userId: newUserId
+        userId: newUser.userId
       }
     });
-
-    const warnings = registerResult.warnings || [];
-    const baseRegistrationMessage = registerResult.message || `Registration successful. Your ID is: ${newUserId}`;
+    const warnings = [referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
     const registrationMessage = warnings.length > 0
-      ? `${baseRegistrationMessage} ${warnings.join(' ')}`
-      : baseRegistrationMessage;
+      ? `Registration successful. Your ID is: ${newUserId}. ${warnings.join(' ')}`
+      : `Registration successful. Your ID is: ${newUserId}`;
 
     void processPendingPostRegistrationRetryQueue({ force: true }).catch(() => {
       // Best-effort background retry only.
@@ -2687,8 +2242,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   verifyTransactionPassword: (userId: string, transactionPassword: string): boolean => {
-    const user = Database.getUserById(userId) || Database.getUserByUserId(userId);
-    return doesTransactionPasswordMatchUser(user, transactionPassword);
+    const user = Database.getUserById(userId);
+    return user?.transactionPassword === transactionPassword;
   }
 }));
 
@@ -2727,31 +2282,18 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
   loadWallet: (userId: string, options?: { v2Only?: boolean }) => {
     void (async () => {
-      const requestSequence = ++walletLoadRequestSequence;
       const v2Only = !!options?.v2Only;
-      const requestedCanonicalUser = resolveCanonicalUserForWalletActions(userId);
-      const requestedResolvedUser = requestedCanonicalUser
+      const canonicalUser = resolveCanonicalUserForWalletActions(userId);
+      const resolvedUser = canonicalUser
         || Database.getUserById(userId)
         || Database.getUserByUserId(userId);
-      const contextUser = resolveActiveWalletContextUser();
-      const resolvedUser = isAdminImpersonationActive() && contextUser
-        ? contextUser
-        : requestedResolvedUser;
       const effectiveUserId = resolvedUser?.id || userId;
-
-      const shouldApplyResult = () => {
-        if (requestSequence !== walletLoadRequestSequence) return false;
-        const latestContextUser = resolveActiveWalletContextUser();
-        if (latestContextUser && latestContextUser.id !== effectiveUserId) return false;
-        return true;
-      };
 
       if (resolvedUser) {
         const v2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(resolvedUser, {
           includeLegacyTransactions: !v2Only
         }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
         if (v2Read.snapshot) {
-          if (!shouldApplyResult()) return;
           set({
             wallet: v2Read.snapshot.wallet,
             transactions: v2Read.snapshot.transactions,
@@ -2762,7 +2304,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         }
 
         if (v2Only) {
-          if (!shouldApplyResult()) return;
           set({
             v2ReadHealthy: false,
             v2ReadError: v2Read.errorMessage || V2_TRANSFER_SYNC_REQUIRED_MESSAGE
@@ -2772,7 +2313,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       }
 
       if (v2Only) {
-        if (!shouldApplyResult()) return;
         set({
           v2ReadHealthy: false,
           v2ReadError: V2_TRANSFER_SYNC_REQUIRED_MESSAGE
@@ -2794,7 +2334,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       Database.checkDirectReferralDeadline(effectiveUserId);
       const wallet = Database.getWallet(effectiveUserId);
       const transactions = Database.getUserTransactions(effectiveUserId);
-      if (!shouldApplyResult()) return;
       set({
         wallet,
         transactions,
@@ -2815,6 +2354,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       otp?: string;
     }
   ) => {
+    await Database.ensureFreshData();
+
     const transferGate = Database.getSensitiveActionSyncGate();
     if (!transferGate.allowed) {
       return { success: false, message: transferGate.message };
@@ -2855,8 +2396,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     });
 
     const normalizedTarget = (toUserId || '').trim();
-    const isSelfIncomeToFundTransfer = sourceWallet === 'income' && destinationWallet === 'fund';
-    const effectiveTargetUserCode = normalizedTarget || (isSelfIncomeToFundTransfer ? fromUser.userId : '');
 
     if (sourceWallet !== 'fund' && sourceWallet !== 'income') {
       return {
@@ -2872,11 +2411,11 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       };
     }
 
-    if (!effectiveTargetUserCode) {
+    if (!normalizedTarget) {
       return { success: false, message: 'Recipient User ID is required' };
     }
 
-    const rawTargetUserForV2 = Database.getUserByUserId(effectiveTargetUserCode);
+    const rawTargetUserForV2 = Database.getUserByUserId(normalizedTarget);
     const toUserForV2 = rawTargetUserForV2
       ? (resolveCanonicalUserForWalletActions(rawTargetUserForV2.id) || rawTargetUserForV2)
       : undefined;
@@ -2884,17 +2423,16 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       return { success: false, message: 'Recipient not found' };
     }
 
-    const isSelfTransfer = toUserForV2.id === effectiveFromUserId;
-    if (isSelfTransfer && !isSelfIncomeToFundTransfer) {
+    if (toUserForV2.id === effectiveFromUserId) {
       return { success: false, message: 'Self transfer is not allowed for Fund Wallet transfer.' };
     }
 
-    if (!isSelfTransfer && !Database.isInSameChain(effectiveFromUserId, toUserForV2.id)) {
+    if (!Database.isInSameChain(effectiveFromUserId, toUserForV2.id)) {
       return { success: false, message: 'Transfer allowed only to upline or downline' };
     }
 
     const sourceWalletBalance = sourceWallet === 'income'
-      ? computeSpendableIncomeBalance(strictSnapshot.wallet)
+      ? Number(strictSnapshot.wallet.incomeWallet || 0)
       : Number(strictSnapshot.wallet.depositWallet || 0);
     if (sourceWalletBalance < amount) {
       return {
@@ -2906,13 +2444,12 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     const txPasswordForV2 = (security?.transactionPassword || '').trim();
-    if (!doesTransactionPasswordMatchUser(fromUser, txPasswordForV2)) {
+    if (!txPasswordForV2 || fromUser.transactionPassword !== txPasswordForV2) {
       return { success: false, message: 'Invalid transaction password' };
     }
 
     const otpForV2 = (security?.otp || '').trim();
-    const otpSubjectKey = String(fromUser.userId || '').trim() || effectiveFromUserId;
-    if (!otpForV2 || !Database.verifyOtp(otpSubjectKey, otpForV2, 'transaction')) {
+    if (!otpForV2 || !Database.verifyOtp(effectiveFromUserId, otpForV2, 'transaction')) {
       return { success: false, message: 'Invalid or expired OTP' };
     }
 
@@ -2943,9 +2480,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         destinationWallet,
         amountCents,
         referenceId: `ui_fund_transfer_${requestId}`,
-        description: isSelfTransfer
-          ? `Income wallet self-transfer from ${fromUser.userId} to fund wallet`
-          : `${sourceWallet === 'income' ? 'Income' : 'Fund'} wallet transfer from ${fromUser.userId} to ${toUserForV2.userId}`
+        description: `${sourceWallet === 'income' ? 'Income' : 'Fund'} wallet transfer from ${fromUser.userId} to ${toUserForV2.userId}`
       })
     });
 
@@ -3026,7 +2561,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       const resolvedPayoutQrCode = String(payoutQrCode || '').trim();
 
       // Use income wallet for withdrawals
-      const availableWithdrawableBalance = computeSpendableIncomeBalance(wallet);
+      const availableWithdrawableBalance = Math.max(0, wallet.incomeWallet - (wallet.giveHelpLocked || 0));
       if (availableWithdrawableBalance < amount) {
         return { success: false, message: 'Insufficient withdrawable balance (some amount is locked for give-help)' };
       }
@@ -3110,31 +2645,17 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
   refreshTransactions: (userId: string, options?: { v2Only?: boolean }) => {
     void (async () => {
-      const requestSequence = ++walletTransactionsRequestSequence;
       const v2Only = !!options?.v2Only;
-      const requestedCanonicalUser = resolveCanonicalUserForWalletActions(userId);
-      const requestedResolvedUser = requestedCanonicalUser
+      const canonicalUser = resolveCanonicalUserForWalletActions(userId);
+      const resolvedUser = canonicalUser
         || Database.getUserById(userId)
         || Database.getUserByUserId(userId);
-      const contextUser = resolveActiveWalletContextUser();
-      const resolvedUser = isAdminImpersonationActive() && contextUser
-        ? contextUser
-        : requestedResolvedUser;
-      const effectiveUserId = resolvedUser?.id || userId;
-
-      const shouldApplyResult = () => {
-        if (requestSequence !== walletTransactionsRequestSequence) return false;
-        const latestContextUser = resolveActiveWalletContextUser();
-        if (latestContextUser && latestContextUser.id !== effectiveUserId) return false;
-        return true;
-      };
 
       if (resolvedUser) {
         const v2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(resolvedUser, {
           includeLegacyTransactions: !v2Only
         }).catch(() => ({ snapshot: null, errorMessage: 'Live read failed: unexpected client exception.' }));
         if (v2Read.snapshot) {
-          if (!shouldApplyResult()) return;
           set({
             wallet: v2Read.snapshot.wallet,
             transactions: v2Read.snapshot.transactions,
@@ -3145,7 +2666,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         }
 
         if (v2Only) {
-          if (!shouldApplyResult()) return;
           set({
             transactions: [],
             v2ReadHealthy: false,
@@ -3154,8 +2674,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
           return;
         }
 
-        const transactions = Database.getUserTransactions(effectiveUserId);
-        if (!shouldApplyResult()) return;
+        const transactions = Database.getUserTransactions(userId);
         set({
           transactions,
           v2ReadHealthy: false,
@@ -3165,7 +2684,6 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       }
 
       if (v2Only) {
-        if (!shouldApplyResult()) return;
         set({
           transactions: [],
           v2ReadHealthy: false,
@@ -3174,8 +2692,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         return;
       }
 
-      const transactions = Database.getUserTransactions(effectiveUserId);
-      if (!shouldApplyResult()) return;
+      const transactions = Database.getUserTransactions(userId);
       set({
         transactions,
         v2ReadHealthy: false,
@@ -3220,44 +2737,19 @@ export const usePinStore = create<PinState>((set, get) => ({
   purchaseRequests: [],
 
   loadPins: (userId: string) => {
-    const applyPinsToState = (ownerId: string) => {
-      const pins = Database.getUserPins(ownerId);
-      const unusedPins = pins.filter((pin) => pin.status === 'unused');
-      const usedPins = pins.filter((pin) => pin.status === 'used');
-      const receivedPins = pins.filter((pin) => !!pin.transferredFrom);
-      const transfers = Database.getUserPinTransfers(ownerId);
+    const pins = Database.getUserPins(userId);
+    const unusedPins = Database.getUnusedPins(userId);
+    const usedPins = Database.getUsedPins(userId);
+    const receivedPins = Database.getReceivedPins(userId);
+    const transfers = Database.getUserPinTransfers(userId);
 
-      set({
-        pins,
-        unusedPins,
-        usedPins,
-        receivedPins,
-        transfers
-      });
-    };
-
-    const canonicalUser = resolveCanonicalUserForWalletActions(userId)
-      || Database.getUserById(userId)
-      || Database.getUserByUserId(userId);
-    const ownerId = String(canonicalUser?.id || userId).trim();
-
-    applyPinsToState(ownerId);
-
-    if (!canonicalUser) {
-      return;
-    }
-
-    void (async () => {
-      const v2Read = await fetchV2PinsSnapshotForUserWithStatus(canonicalUser);
-      if (!v2Read.pins) {
-        return;
-      }
-
-      const allPins = Database.getPins();
-      const pinsForOtherUsers = allPins.filter((pin) => String(pin.ownerId || '').trim() !== ownerId);
-      Database.savePins([...pinsForOtherUsers, ...v2Read.pins]);
-      applyPinsToState(ownerId);
-    })();
+    set({
+      pins,
+      unusedPins,
+      usedPins,
+      receivedPins,
+      transfers
+    });
   },
 
   transferPin: async (pinId: string, fromUserId: string, toUserId: string) => {
@@ -3455,6 +2947,14 @@ export const usePinStore = create<PinState>((set, get) => ({
     }
     const settings = Database.getSettings();
     const amount = quantity * settings.pinAmount;
+    Database.repairFundWalletConsistency(effectiveUserId);
+    const wallet = Database.getWallet(effectiveUserId);
+    if (!wallet) {
+      return { success: false, message: 'Wallet not found' };
+    }
+    if (wallet.depositWallet < amount) {
+      return { success: false, message: 'Insufficient fund wallet balance for direct buy' };
+    }
 
     try {
       const idempotencyKey = generateClientIdempotencyKey();
@@ -3490,14 +2990,6 @@ export const usePinStore = create<PinState>((set, get) => ({
         return { success: false, message: errorMessage };
       }
 
-      const purchasedPinCodes = normalizePurchasedPinCodes(payload?.pinCodes);
-      if (purchasedPinCodes.length === 0 && payload?.idempotentReplay !== true) {
-        return {
-          success: false,
-          message: 'PIN purchase was accepted but no PIN codes were returned. Please contact admin immediately with your request ID.'
-        };
-      }
-
       try {
         await Database.hydrateFromServer({
           keys: [DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS, DB_KEYS.PINS, DB_KEYS.PIN_PURCHASE_REQUESTS],
@@ -3509,25 +3001,6 @@ export const usePinStore = create<PinState>((set, get) => ({
       } catch {
         // Best-effort refresh. Purchase has already been committed server-side.
       }
-
-      if (purchasedPinCodes.length > 0) {
-        upsertPurchasedPinsIntoLocalCache({
-          ownerInternalUserId: effectiveUserId,
-          pinPriceCents,
-          pinCodes: purchasedPinCodes,
-          createdByRef: buyerUser.id
-        });
-      }
-
-      upsertDirectPinPurchaseRequestIntoLocalCache({
-        ownerInternalUserId: effectiveUserId,
-        quantity: Number(payload?.quantity || quantity),
-        amount: Math.max(0, Number(payload?.totalAmountCents || Math.round(amount * 100)) / 100),
-        pinCodes: purchasedPinCodes,
-        txUuid: payload?.txUuid,
-        ledgerTransactionId: payload?.ledgerTransactionId,
-        createdAt: payload?.postedAt
-      });
 
       get().loadPins(effectiveUserId);
       get().loadPurchaseRequests(effectiveUserId);
@@ -3548,41 +3021,8 @@ export const usePinStore = create<PinState>((set, get) => ({
   },
 
   loadPurchaseRequests: (userId: string) => {
-    const applyRequestsToState = (ownerId: string) => {
-      const requests = Database.getUserPinPurchaseRequests(ownerId)
-        .sort((left, right) => {
-          const rightTs = new Date(String(right.createdAt || '')).getTime() || 0;
-          const leftTs = new Date(String(left.createdAt || '')).getTime() || 0;
-          return rightTs - leftTs;
-        });
-      set({ purchaseRequests: requests });
-    };
-
-    const canonicalUser = resolveCanonicalUserForWalletActions(userId)
-      || Database.getUserById(userId)
-      || Database.getUserByUserId(userId);
-    const ownerId = String(canonicalUser?.id || userId).trim();
-
-    applyRequestsToState(ownerId);
-
-    if (!canonicalUser) {
-      return;
-    }
-
-    void (async () => {
-      const v2Read = await fetchV2DirectPinPurchaseRequestsForUserWithStatus(canonicalUser);
-      if (!v2Read.requests) {
-        return;
-      }
-
-      const allRequests = Database.getPinPurchaseRequests();
-      const otherUsers = allRequests.filter((request) => String(request.userId || '').trim() !== ownerId);
-      const ownerRequests = allRequests.filter((request) => String(request.userId || '').trim() === ownerId);
-      const mergedOwner = mergePinRequestRecordsById(ownerRequests, v2Read.requests);
-
-      Database.savePinPurchaseRequests([...otherUsers, ...mergedOwner]);
-      applyRequestsToState(ownerId);
-    })();
+    const requests = Database.getUserPinPurchaseRequests(userId);
+    set({ purchaseRequests: requests });
   },
 
   copyPinToClipboard: async (pinCode: string) => {
@@ -3927,8 +3367,6 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   blockUser: async (targetUserId: string, type: 'temporary' | 'permanent', reason: string = 'Blocked by admin', hours: number = 24) => {
-    await Database.ensureFreshData();
-
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can block users' };
@@ -3943,16 +3381,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Admin account cannot be blocked' };
     }
 
-    try {
-      const result = await Database.commitCriticalAction(() => Database.blockUser(targetUser.id, type, hours, reason));
-      if (!result) {
-        return { success: false, message: 'Failed to block user' };
-      }
-      get().loadAllUsers();
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Failed to persist block user action';
-      return { success: false, message };
+    const result = Database.blockUser(targetUser.id, type, hours, reason);
+    if (!result) {
+      return { success: false, message: 'Failed to block user' };
     }
+
+    get().loadAllUsers();
     return {
       success: true,
       message: type === 'temporary'
@@ -3962,8 +3396,6 @@ export const useAdminStore = create<AdminState>((set, get) => ({
   },
 
   unblockUser: async (targetUserId: string) => {
-    await Database.ensureFreshData();
-
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can unblock users' };
@@ -3974,22 +3406,16 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'User not found' };
     }
 
-    try {
-      const result = await Database.commitCriticalAction(() => Database.unblockUser(targetUser.id));
-      if (!result) {
-        return { success: false, message: 'Failed to unblock user' };
-      }
-      get().loadAllUsers();
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Failed to persist unblock user action';
-      return { success: false, message };
+    const result = Database.unblockUser(targetUser.id);
+    if (!result) {
+      return { success: false, message: 'Failed to unblock user' };
     }
+
+    get().loadAllUsers();
     return { success: true, message: 'User unblocked successfully' };
   },
 
   reactivateAutoDeactivatedUser: async (targetUserId: string) => {
-    await Database.ensureFreshData();
-
     const adminUser = Database.getCurrentUser();
     if (!adminUser?.isAdmin) {
       return { success: false, message: 'Only admin can reactivate users' };
@@ -4004,16 +3430,12 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'User was not auto-deactivated for direct referral deadline' };
     }
 
-    try {
-      const result = await Database.commitCriticalAction(() => Database.reactivateUser(targetUser.id));
-      if (!result) {
-        return { success: false, message: 'Failed to reactivate user' };
-      }
-      get().loadAllUsers();
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Failed to persist reactivation';
-      return { success: false, message };
+    const result = Database.reactivateUser(targetUser.id);
+    if (!result) {
+      return { success: false, message: 'Failed to reactivate user' };
     }
+
+    get().loadAllUsers();
     return { success: true, message: `User ${targetUserId} reactivated. 30-day deadline restarted.` };
   },
 
@@ -4567,7 +3989,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
           deferredHelpEvents.push({
             sourceUserCode: newUser.userId,
             newMemberUserCode: newUser.userId,
-            sourceRef: `reg_help_${newUser.userId}_${newUser.userId}`,
+            sourceRef: `bulk_help_${newUser.userId}`,
             description: `Activation help event for ${newUser.fullName} (${newUser.userId})`
           });
 
@@ -4969,7 +4391,6 @@ export const useOtpStore = create<OtpState>((set) => ({
   otpExpiry: null,
 
   sendOtp: async (userId: string, email: string, purpose, context) => {
-    const otpRecordsBeforeGenerate = Database.getOtpRecords();
     const otpRecord = Database.generateOtp(userId, email, purpose);
     const purposeLabel = purpose === 'withdrawal'
       ? 'withdrawal'
@@ -5012,8 +4433,6 @@ export const useOtpStore = create<OtpState>((set) => ({
       }
     });
     if (!emailResult.success) {
-      // If dispatch failed, restore previous OTP state so a still-valid code is not accidentally invalidated.
-      Database.saveOtpRecords(otpRecordsBeforeGenerate);
       return {
         success: false,
         status: 'failed',
