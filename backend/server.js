@@ -166,6 +166,7 @@ const V2_WALLET_READ_ENDPOINT_NAME = 'v2_wallet_read';
 const V2_TRANSACTIONS_READ_ENDPOINT_NAME = 'v2_transactions_read';
 const V2_PINS_READ_ENDPOINT_NAME = 'v2_pins_read';
 const V2_STATE_SYNC_ENDPOINT_NAME = 'v2_state_sync';
+const V2_ATOMIC_REGISTRATION_ENDPOINT_NAME = 'v2_atomic_registration';
 const V2_IDEMPOTENCY_LOCK_SECONDS = 30;
 const V2_REFERRAL_MAX_LEVEL = 100;
 const V2_REFERRAL_SOURCE_REF_MAX_LENGTH = 120;
@@ -6584,6 +6585,463 @@ const server = createServer(async (req, res) => {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Invalid request body';
       sendJson(res, 400, { ok: false, error: message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v2/registrations') {
+    let connection;
+    let transactionOpen = false;
+    try {
+      if (STORAGE_MODE !== 'mysql') {
+        sendJson(res, 503, { ok: false, error: 'V2 registration API requires STORAGE_MODE=mysql', code: 'V2_REQUIRES_MYSQL' });
+        return;
+      }
+      if (FINANCE_ENGINE_MODE !== 'v2') {
+        sendJson(res, 409, { ok: false, error: 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/registrations', code: 'FINANCE_MODE_MISMATCH' });
+        return;
+      }
+      if (!pool) {
+        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+        return;
+      }
+
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: V2_ATOMIC_REGISTRATION_ENDPOINT_NAME,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+
+      const fullName = String(parsed?.fullName || '').trim();
+      const email = String(parsed?.email || '').trim();
+      const password = String(parsed?.password || '');
+      const transactionPassword = String(parsed?.transactionPassword || '');
+      const phone = String(parsed?.phone || '').trim();
+      const country = String(parsed?.country || '').trim();
+      const sponsorId = String(parsed?.sponsorId || '').replace(/\D/g, '').slice(0, 7);
+      const pinCode = String(parsed?.pinCode || '').trim().toUpperCase();
+
+      if (!fullName || !email || !password || !transactionPassword || !phone || !country) {
+        sendJson(res, 400, { ok: false, error: 'Missing required registration fields', code: 'INVALID_REGISTRATION_PAYLOAD' });
+        return;
+      }
+      if (!/^\d{7}$/.test(sponsorId)) {
+        sendJson(res, 400, { ok: false, error: 'Sponsor ID must be exactly 7 digits', code: 'INVALID_SPONSOR_ID' });
+        return;
+      }
+      if (!/^[A-Z0-9]{6,12}$/.test(pinCode)) {
+        sendJson(res, 400, { ok: false, error: 'PIN code format is invalid', code: 'INVALID_PIN_FORMAT' });
+        return;
+      }
+
+      const normalizeMatrixSide = (position) => {
+        if (position === 'left' || position === 0 || position === '0') return 'left';
+        if (position === 'right' || position === 1 || position === '1') return 'right';
+        return null;
+      };
+
+      const buildDefaultWallet = (userId) => ({
+        userId,
+        depositWallet: 0,
+        fundRecoveryDue: 0,
+        fundRecoveryRecoveredTotal: 0,
+        fundRecoveryReason: null,
+        pinWallet: 0,
+        incomeWallet: 0,
+        royaltyWallet: 0,
+        matrixWallet: 0,
+        lockedIncomeWallet: 0,
+        giveHelpLocked: 0,
+        totalReceived: 0,
+        totalGiven: 0,
+        pendingSystemFee: 0,
+        lastSystemFeeDate: null,
+        rewardPoints: 0,
+        totalRewardPointsEarned: 0,
+        totalRewardPointsRedeemed: 0
+      });
+
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+      transactionOpen = true;
+
+      const keysToLock = [
+        'mlm_users',
+        'mlm_wallets',
+        'mlm_matrix',
+        'mlm_pins',
+        'mlm_transactions',
+        'mlm_notifications',
+        'mlm_safety_pool'
+      ];
+      const placeholders = keysToLock.map(() => '?').join(', ');
+      const [stateRows] = await connection.execute(
+        `SELECT state_key, state_value
+         FROM state_store
+         WHERE state_key IN (${placeholders})
+         FOR UPDATE`,
+        keysToLock
+      );
+
+      const stateByKey = new Map();
+      for (const row of Array.isArray(stateRows) ? stateRows : []) {
+        stateByKey.set(String(row.state_key), String(row.state_value || ''));
+      }
+
+      const parseStateArray = (key) => {
+        const parsedValue = safeParseJSON(stateByKey.get(key));
+        return Array.isArray(parsedValue) ? parsedValue : [];
+      };
+      const parseStateObject = (key, fallback) => {
+        const parsedValue = safeParseJSON(stateByKey.get(key));
+        return parsedValue && typeof parsedValue === 'object' && !Array.isArray(parsedValue)
+          ? parsedValue
+          : fallback;
+      };
+
+      const users = parseStateArray('mlm_users');
+      const wallets = parseStateArray('mlm_wallets');
+      const matrix = parseStateArray('mlm_matrix');
+      const pins = parseStateArray('mlm_pins');
+      const transactions = parseStateArray('mlm_transactions');
+      const notifications = parseStateArray('mlm_notifications');
+      const safetyPool = parseStateObject('mlm_safety_pool', { totalAmount: 0, transactions: [] });
+      if (!Array.isArray(safetyPool.transactions)) {
+        safetyPool.transactions = [];
+      }
+
+      const usersByUserId = new Map(users.map((user) => [String(user?.userId || ''), user]));
+      const usersByInternalId = new Map(users.map((user) => [String(user?.id || ''), user]));
+
+      const actorUserCode = normalizeV2UserCode(authContext.actorUserCode);
+      const actorUser = usersByUserId.get(actorUserCode);
+      if (!actorUser) {
+        throw createApiError(403, 'Actor user is not available in legacy state', 'ACTOR_NOT_FOUND_IN_STATE');
+      }
+
+      const sponsorUser = usersByUserId.get(sponsorId);
+      if (!sponsorUser) {
+        throw createApiError(404, 'Sponsor user not found', 'SPONSOR_NOT_FOUND');
+      }
+      if (!isLegacyUserEligibleForV2Access(sponsorUser)) {
+        throw createApiError(403, 'Sponsor account is inactive or blocked', 'SPONSOR_NOT_ACTIVE');
+      }
+
+      const pinIndex = pins.findIndex((pin) => String(pin?.pinCode || '').trim().toUpperCase() === pinCode);
+      if (pinIndex === -1) {
+        throw createApiError(404, 'PIN not found', 'PIN_NOT_FOUND');
+      }
+
+      const selectedPin = pins[pinIndex];
+      const selectedPinStatus = String(selectedPin?.status || '').toLowerCase();
+      if (selectedPinStatus === 'suspended') {
+        throw createApiError(409, 'PIN is suspended by admin', 'PIN_SUSPENDED');
+      }
+
+      if (selectedPinStatus !== 'unused') {
+        const replayUserRef = String(selectedPin?.registrationUserId || selectedPin?.usedById || '').trim();
+        const replayUser = usersByInternalId.get(replayUserRef) || usersByUserId.get(replayUserRef);
+        if (replayUser?.userId) {
+          await connection.commit();
+          transactionOpen = false;
+          sendJson(res, 200, {
+            ok: true,
+            userId: replayUser.userId,
+            sponsorUserId: String(replayUser.sponsorId || ''),
+            pinCode,
+            idempotentReplay: true,
+            message: `Registration already completed for User ID ${replayUser.userId}`
+          });
+          return;
+        }
+        throw createApiError(409, 'PIN has already been used', 'PIN_ALREADY_USED');
+      }
+
+      const pinOwnerRef = String(selectedPin?.ownerId || '').trim();
+      const pinOwnerUser = usersByInternalId.get(pinOwnerRef) || usersByUserId.get(pinOwnerRef);
+      if (!pinOwnerUser?.userId) {
+        throw createApiError(409, 'PIN owner mapping is invalid', 'PIN_OWNER_NOT_FOUND');
+      }
+      if (String(pinOwnerUser.userId) !== String(actorUser.userId)) {
+        throw createApiError(403, 'PIN does not belong to the authenticated actor', 'PIN_OWNER_MISMATCH');
+      }
+
+      const existingUserIds = new Set(users.map((user) => String(user?.userId || '').trim()));
+      let generatedUserId = '';
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const candidate = `${Math.floor(1000000 + Math.random() * 9000000)}`;
+        if (!existingUserIds.has(candidate)) {
+          generatedUserId = candidate;
+          break;
+        }
+      }
+      if (!generatedUserId) {
+        throw createApiError(500, 'Unable to allocate unique User ID', 'USER_ID_GENERATION_FAILED');
+      }
+
+      const matrixByUserId = new Map(matrix.map((node) => [String(node?.userId || ''), node]));
+      const ensureMatrixNodeForUser = (userCode, visiting = new Set()) => {
+        const normalized = String(userCode || '').trim();
+        if (!normalized) return null;
+        if (matrixByUserId.has(normalized)) {
+          return matrixByUserId.get(normalized);
+        }
+        if (visiting.has(normalized)) {
+          return null;
+        }
+        visiting.add(normalized);
+
+        const user = usersByUserId.get(normalized);
+        if (!user) return null;
+
+        let parentNode = null;
+        if (user.parentId) {
+          parentNode = ensureMatrixNodeForUser(String(user.parentId), visiting);
+          if (!parentNode) return null;
+        } else if (!user.isAdmin && user.userId !== '1000001') {
+          return null;
+        }
+
+        const side = user.parentId ? normalizeMatrixSide(user.position) : 'left';
+        if (user.parentId && !side) return null;
+
+        const node = {
+          userId: user.userId,
+          username: user.fullName,
+          level: parentNode ? Number(parentNode.level || 0) + 1 : 0,
+          position: side === 'right' ? 1 : 0,
+          parentId: parentNode?.userId,
+          isActive: !!user.isActive && user.accountStatus !== 'permanent_blocked' && user.accountStatus !== 'temp_blocked'
+        };
+
+        matrix.push(node);
+        matrixByUserId.set(node.userId, node);
+
+        if (parentNode) {
+          if (side === 'left' && !parentNode.leftChild) parentNode.leftChild = node.userId;
+          if (side === 'right' && !parentNode.rightChild) parentNode.rightChild = node.userId;
+        }
+
+        return node;
+      };
+
+      const sponsorNode = ensureMatrixNodeForUser(sponsorUser.userId);
+      if (!sponsorNode) {
+        throw createApiError(409, 'Sponsor matrix node is not available', 'SPONSOR_MATRIX_NODE_MISSING');
+      }
+
+      const childSideMap = new Map();
+      const setChild = (parentId, side, childId) => {
+        if (!parentId || !childId || !side) return;
+        if (!matrixByUserId.has(parentId) || !matrixByUserId.has(childId)) return;
+        const current = childSideMap.get(parentId) || {};
+        if (side === 'left' && !current.left) current.left = childId;
+        if (side === 'right' && !current.right) current.right = childId;
+        childSideMap.set(parentId, current);
+      };
+
+      for (const node of matrix) {
+        const parentId = String(node?.parentId || '').trim();
+        const nodeUserId = String(node?.userId || '').trim();
+        setChild(parentId, normalizeMatrixSide(node?.position), nodeUserId);
+      }
+      for (const node of matrix) {
+        const nodeUserId = String(node?.userId || '').trim();
+        setChild(nodeUserId, 'left', String(node?.leftChild || '').trim());
+        setChild(nodeUserId, 'right', String(node?.rightChild || '').trim());
+      }
+
+      const queue = [sponsorNode.userId];
+      const visited = new Set();
+      let placement = null;
+      while (queue.length > 0) {
+        const currentId = queue.shift();
+        if (!currentId || visited.has(currentId)) continue;
+        visited.add(currentId);
+
+        const currentNode = matrixByUserId.get(currentId);
+        if (!currentNode) continue;
+        const children = childSideMap.get(currentId) || {};
+        if (!children.left) {
+          placement = { parentId: currentId, position: 'left' };
+          break;
+        }
+        if (!children.right) {
+          placement = { parentId: currentId, position: 'right' };
+          break;
+        }
+        queue.push(children.left, children.right);
+      }
+
+      if (!placement) {
+        throw createApiError(409, 'No matrix placement slot found for sponsor', 'MATRIX_PLACEMENT_NOT_FOUND');
+      }
+
+      const nowIso = new Date().toISOString();
+      const createdUser = {
+        id: `user_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        userId: generatedUserId,
+        email,
+        password,
+        fullName,
+        phone,
+        country,
+        isActive: true,
+        isAdmin: false,
+        accountStatus: 'active',
+        blockedAt: null,
+        blockedUntil: null,
+        blockedReason: null,
+        deactivationReason: null,
+        reactivatedAt: null,
+        createdAt: nowIso,
+        activatedAt: nowIso,
+        gracePeriodEnd: null,
+        sponsorId: sponsorUser.userId,
+        parentId: placement.parentId,
+        position: placement.position,
+        level: 0,
+        directCount: 0,
+        totalEarnings: 0,
+        isCapped: false,
+        capLevel: 0,
+        reEntryCount: 0,
+        cycleCount: 0,
+        requiredDirectForNextLevel: 2,
+        completedDirectForCurrentLevel: 0,
+        transactionPassword,
+        emailVerified: false,
+        achievements: {
+          nationalTour: false,
+          internationalTour: false,
+          familyTour: false
+        }
+      };
+
+      users.push(createdUser);
+      usersByUserId.set(createdUser.userId, createdUser);
+      usersByInternalId.set(createdUser.id, createdUser);
+
+      if (!wallets.some((wallet) => String(wallet?.userId || '') === createdUser.id)) {
+        wallets.push(buildDefaultWallet(createdUser.id));
+      }
+
+      const updatedPin = {
+        ...selectedPin,
+        status: 'used',
+        usedAt: nowIso,
+        usedById: createdUser.id,
+        registrationUserId: createdUser.id
+      };
+      pins[pinIndex] = updatedPin;
+
+      const parentNode = matrixByUserId.get(placement.parentId) || null;
+      const matrixNode = {
+        userId: createdUser.userId,
+        username: createdUser.fullName,
+        level: parentNode ? Number(parentNode.level || 0) + 1 : 0,
+        position: placement.position === 'left' ? 0 : 1,
+        parentId: placement.parentId,
+        isActive: true
+      };
+      matrix.push(matrixNode);
+      matrixByUserId.set(matrixNode.userId, matrixNode);
+
+      if (parentNode) {
+        if (placement.position === 'left' && !parentNode.leftChild) {
+          parentNode.leftChild = matrixNode.userId;
+        }
+        if (placement.position === 'right' && !parentNode.rightChild) {
+          parentNode.rightChild = matrixNode.userId;
+        }
+      }
+
+      sponsorUser.directCount = users.filter((member) => String(member?.sponsorId || '') === sponsorUser.userId).length;
+
+      transactions.push({
+        id: `tx_${Date.now()}_pin_used_backend_${createdUser.userId}`,
+        userId: createdUser.id,
+        type: 'pin_used',
+        amount: Number(updatedPin.amount || 11),
+        pinCode,
+        pinId: String(updatedPin.id || ''),
+        status: 'completed',
+        description: 'Account activation using PIN',
+        createdAt: nowIso,
+        completedAt: nowIso
+      });
+
+      safetyPool.totalAmount = Number(safetyPool.totalAmount || 0) + 1;
+      safetyPool.transactions.push({
+        id: `sp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        amount: 1,
+        fromUserId: createdUser.id,
+        reason: 'Admin fee',
+        createdAt: nowIso
+      });
+
+      notifications.push({
+        id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        userId: createdUser.id,
+        title: 'Welcome To ReferNex',
+        message: `Welcome to ReferNex.\n\nAccount created successfully. Your User ID is ${createdUser.userId}. Please check your email for your login and transaction passwords.`,
+        type: 'success',
+        isRead: false,
+        createdAt: nowIso
+      });
+
+      const nowDb = toMySQLDatetime(nowIso);
+      const upsertStateKey = async (key, value) => {
+        await connection.execute(
+          `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+          [key, JSON.stringify(value), nowDb]
+        );
+      };
+
+      await upsertStateKey('mlm_users', users);
+      await upsertStateKey('mlm_wallets', wallets);
+      await upsertStateKey('mlm_matrix', matrix);
+      await upsertStateKey('mlm_pins', pins);
+      await upsertStateKey('mlm_transactions', transactions);
+      await upsertStateKey('mlm_notifications', notifications);
+      await upsertStateKey('mlm_safety_pool', safetyPool);
+
+      await connection.commit();
+      transactionOpen = false;
+      invalidateStateSnapshotCache();
+
+      sendJson(res, 200, {
+        ok: true,
+        idempotentReplay: false,
+        userId: createdUser.userId,
+        sponsorUserId: sponsorUser.userId,
+        pinCode
+      });
+    } catch (error) {
+      if (transactionOpen && connection) {
+        try {
+          await connection.rollback();
+        } catch {
+          // ignore rollback failure
+        }
+      }
+
+      const status = Number(error?.status) || getHttpStatusForRequestError(error);
+      const message = getErrorMessage(error, 'Failed to register user');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_REGISTRATION_FAILED'
+      });
+    } finally {
+      if (connection) {
+        connection.release();
+      }
     }
     return;
   }

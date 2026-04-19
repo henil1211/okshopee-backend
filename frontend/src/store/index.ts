@@ -914,6 +914,78 @@ async function submitV2AdminAdjustment(params: {
   };
 }
 
+async function submitV2AtomicRegistration(params: RegisterData): Promise<{
+  success: boolean;
+  message: string;
+  userId?: string;
+  sponsorUserId?: string;
+  idempotentReplay?: boolean;
+  code?: string;
+  status?: number;
+  fallbackToLocal?: boolean;
+}> {
+  const idempotencyKey = generateClientIdempotencyKey();
+  const requestId = generateClientRequestId('v2_register');
+  const resolvedHeaders = resolveV2RequestHeaders({
+    idempotencyKey,
+    requestId,
+    impersonationReason: 'create_id_registration'
+  });
+  if (!('headers' in resolvedHeaders)) {
+    return { success: false, message: resolvedHeaders.message };
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${getBackendApiBase()}/api/v2/registrations`, {
+      method: 'POST',
+      headers: resolvedHeaders.headers,
+      body: JSON.stringify({
+        fullName: params.fullName,
+        email: params.email,
+        password: params.password,
+        transactionPassword: params.transactionPassword,
+        phone: params.phone,
+        country: params.country,
+        sponsorId: params.sponsorId,
+        pinCode: params.pinCode
+      })
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Network request error';
+    return { success: false, message: `Registration request failed: ${message}` };
+  }
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false) {
+    const errorMessage = normalizeV2ApiErrorMessage(response.status, payload, 'Registration failed');
+    const code = typeof payload?.code === 'string' ? payload.code : undefined;
+    return {
+      success: false,
+      message: errorMessage,
+      code,
+      status: response.status,
+      fallbackToLocal: response.status === 404
+    };
+  }
+
+  const userId = typeof payload?.userId === 'string' ? payload.userId : '';
+  if (!/^\d{7}$/.test(userId)) {
+    return {
+      success: false,
+      message: 'Registration response did not include a valid User ID.'
+    };
+  }
+
+  return {
+    success: true,
+    message: 'Registration committed on server.',
+    userId,
+    sponsorUserId: typeof payload?.sponsorUserId === 'string' ? payload.sponsorUserId : undefined,
+    idempotentReplay: typeof payload?.idempotentReplay === 'boolean' ? payload.idempotentReplay : false
+  };
+}
+
 const POST_REGISTRATION_RETRY_QUEUE_STORAGE_KEY = 'v2_post_registration_retry_queue';
 const POST_REGISTRATION_RETRY_BASE_DELAY_MS = 30_000;
 const POST_REGISTRATION_RETRY_MAX_DELAY_MS = 15 * 60 * 1000;
@@ -1947,11 +2019,90 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       }
     }
 
-    let newUser: User;
+    let newUser: User | null = null;
     let newUserId = '';
     let referralBeneficiaryUserCode: string | null = null;
     let helpEventSourceUserCode: string | null = null;
-    try {
+    let usedBackendAtomicRegistration = false;
+
+    const backendRegistration = await submitV2AtomicRegistration({
+      ...userData,
+      phone: normalizedPhone,
+      sponsorId: sponsor?.userId || sponsorId,
+      pinCode: normalizedPinCode
+    });
+
+    if (backendRegistration.success && backendRegistration.userId) {
+      usedBackendAtomicRegistration = true;
+      newUserId = backendRegistration.userId;
+      const isReplay = backendRegistration.idempotentReplay === true;
+
+      referralBeneficiaryUserCode = isReplay
+        ? null
+        : (backendRegistration.sponsorUserId || sponsor?.userId || null);
+      helpEventSourceUserCode = isReplay ? null : backendRegistration.userId;
+
+      try {
+        await Database.forceRemoteSyncKeysNow(Database.getRegistrationFreshDataKeys(), {
+          force: true,
+          timeoutMs: 90000,
+          maxAttempts: 3,
+          retryDelayMs: 1500
+        });
+      } catch {
+        // Best effort. Consistency recovery below will still attempt to heal local state.
+      }
+
+      const syncedUser = Database.getUserByUserId(newUserId);
+      if (syncedUser) {
+        newUser = syncedUser;
+      } else {
+        newUser = {
+          id: `pending_${newUserId}`,
+          userId: newUserId,
+          email,
+          password,
+          fullName,
+          phone: normalizedPhone,
+          country,
+          isActive: true,
+          isAdmin: false,
+          accountStatus: 'active',
+          blockedAt: null,
+          blockedUntil: null,
+          blockedReason: null,
+          deactivationReason: null,
+          reactivatedAt: null,
+          createdAt: new Date().toISOString(),
+          activatedAt: new Date().toISOString(),
+          gracePeriodEnd: null,
+          sponsorId: backendRegistration.sponsorUserId || sponsor?.userId || null,
+          parentId: null,
+          position: null,
+          level: 0,
+          directCount: 0,
+          totalEarnings: 0,
+          isCapped: false,
+          capLevel: 0,
+          reEntryCount: 0,
+          cycleCount: 0,
+          requiredDirectForNextLevel: 2,
+          completedDirectForCurrentLevel: 0,
+          transactionPassword,
+          emailVerified: false,
+          achievements: {
+            nationalTour: false,
+            internationalTour: false,
+            familyTour: false
+          }
+        };
+      }
+    } else if (!backendRegistration.fallbackToLocal) {
+      return { success: false, message: backendRegistration.message };
+    }
+
+    if (!usedBackendAtomicRegistration) {
+      try {
       const result = await Database.runWithLocalStateTransaction(() => {
         // Generate unique 7-digit ID
         const generatedUserId = Database.generateUniqueUserId();
@@ -2114,11 +2265,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       });
       newUser = result.newUser;
       newUserId = result.newUserId;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '';
-      if (message && /pin/i.test(message)) {
-        return { success: false, message };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (message && /pin/i.test(message)) {
+          return { success: false, message };
+        }
+        return { success: false, message: 'ID creation failed. Please try again after some time.' };
       }
+    }
+
+    if (!newUser || !newUserId) {
       return { success: false, message: 'ID creation failed. Please try again after some time.' };
     }
 
