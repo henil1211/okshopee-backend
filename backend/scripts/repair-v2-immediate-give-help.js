@@ -39,22 +39,36 @@ function safeParseJson(value, fallback) {
   }
 }
 
-async function resolveParentUserCode(connection, sourceUserCode) {
-  const [matrixRows] = await connection.execute(
-    `SELECT parent_user_code
-     FROM v2_matrix_nodes
-     WHERE user_code = ?
-     LIMIT 1
-     FOR UPDATE`,
-    [sourceUserCode]
-  );
-  const directParent = normalizeUserCode(
-    Array.isArray(matrixRows) && matrixRows[0] ? matrixRows[0].parent_user_code : ''
-  );
-  if (directParent) {
+async function resolveAncestorUserCode(connection, sourceUserCode, ancestorDepth) {
+  const depth = Math.max(1, Number(ancestorDepth || 1));
+
+  // Try resolving from v2 matrix rows first.
+  let currentCode = sourceUserCode;
+  let resolvedDepth = 0;
+  while (resolvedDepth < depth) {
+    const [matrixRows] = await connection.execute(
+      `SELECT parent_user_code
+       FROM v2_matrix_nodes
+       WHERE user_code = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [currentCode]
+    );
+    const parentCode = normalizeUserCode(
+      Array.isArray(matrixRows) && matrixRows[0] ? matrixRows[0].parent_user_code : ''
+    );
+    if (!parentCode) {
+      break;
+    }
+    currentCode = parentCode;
+    resolvedDepth += 1;
+  }
+
+  if (resolvedDepth === depth) {
     return {
-      parentUserCode: directParent,
-      resolvedFrom: 'v2_matrix_nodes'
+      ancestorUserCode: currentCode,
+      resolvedFrom: 'v2_matrix_nodes',
+      depth
     };
   }
 
@@ -69,19 +83,35 @@ async function resolveParentUserCode(connection, sourceUserCode) {
   const matrix = safeParseJson(matrixRaw, []);
 
   if (Array.isArray(matrix) && matrix.length > 0) {
-    const node = matrix.find((candidate) => normalizeUserCode(candidate?.userId) === sourceUserCode);
-    const legacyParent = normalizeUserCode(node?.parentId);
-    if (legacyParent) {
+    const parentByCode = new Map();
+    for (const node of matrix) {
+      const userCode = normalizeUserCode(node?.userId);
+      if (!userCode) continue;
+      parentByCode.set(userCode, normalizeUserCode(node?.parentId));
+    }
+
+    currentCode = sourceUserCode;
+    resolvedDepth = 0;
+    while (resolvedDepth < depth) {
+      const parentCode = normalizeUserCode(parentByCode.get(currentCode));
+      if (!parentCode) break;
+      currentCode = parentCode;
+      resolvedDepth += 1;
+    }
+
+    if (resolvedDepth === depth) {
       return {
-        parentUserCode: legacyParent,
-        resolvedFrom: 'legacy_matrix_state'
+        ancestorUserCode: currentCode,
+        resolvedFrom: 'legacy_matrix_state',
+        depth
       };
     }
   }
 
   return {
-    parentUserCode: '',
-    resolvedFrom: 'unresolved'
+    ancestorUserCode: '',
+    resolvedFrom: 'unresolved',
+    depth
   };
 }
 
@@ -314,13 +344,19 @@ async function main() {
       return;
     }
 
-    const parentResolution = await resolveParentUserCode(connection, sourceUserCode);
-    const parentUserCode = parentResolution.parentUserCode;
-    if (!parentUserCode) {
-      throw new Error(`Parent user code unresolved for ${sourceUserCode} (checked v2_matrix_nodes and legacy matrix state)`);
+    const contributionLevelNo = 2;
+    const beneficiaryResolution = await resolveAncestorUserCode(connection, sourceUserCode, contributionLevelNo);
+    const beneficiaryUserCode = beneficiaryResolution.ancestorUserCode;
+    if (!beneficiaryUserCode) {
+      throw new Error(
+        `Beneficiary user code unresolved at level ${contributionLevelNo} for ${sourceUserCode} `
+        + '(checked v2_matrix_nodes and legacy matrix state)'
+      );
     }
-    if (parentResolution.resolvedFrom !== 'v2_matrix_nodes') {
-      summary.notes.push(`Parent resolved from ${parentResolution.resolvedFrom}: ${parentUserCode}`);
+    if (beneficiaryResolution.resolvedFrom !== 'v2_matrix_nodes') {
+      summary.notes.push(
+        `Level ${contributionLevelNo} beneficiary resolved from ${beneficiaryResolution.resolvedFrom}: ${beneficiaryUserCode}`
+      );
     }
 
     const [beneficiaryRows] = await connection.execute(
@@ -329,11 +365,11 @@ async function main() {
        WHERE user_code = ?
        LIMIT 1
        FOR UPDATE`,
-      [parentUserCode]
+      [beneficiaryUserCode]
     );
     const beneficiaryUser = Array.isArray(beneficiaryRows) ? beneficiaryRows[0] : null;
     if (!beneficiaryUser) {
-      throw new Error(`Beneficiary user not found in v2_users: ${parentUserCode}`);
+      throw new Error(`Beneficiary user not found in v2_users: ${beneficiaryUserCode}`);
     }
     summary.beneficiaryUserCode = String(beneficiaryUser.user_code || '');
 
