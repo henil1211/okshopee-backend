@@ -2898,8 +2898,9 @@ export const usePinStore = create<PinState>((set, get) => ({
       return { success: false, message: 'Payment screenshot is required for manual verification' };
     }
 
+    let syncWarning = '';
     try {
-      await Database.commitCriticalAction(() => {
+      await Database.runWithLocalStateTransaction(() => {
         if (paidFromWallet) {
           const freshWallet = Database.getWallet(effectiveUserId);
           if (!freshWallet || freshWallet.depositWallet < amount) {
@@ -2938,12 +2939,34 @@ export const usePinStore = create<PinState>((set, get) => ({
 
         Database.createPinPurchaseRequest(request);
         return true;
-      }, {
-        full: true,
-        timeoutMs: 90000,
-        maxAttempts: 3,
-        retryDelayMs: 1500
       });
+
+      const syncKeys = paidFromWallet
+        ? [DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.TRANSACTIONS, DB_KEYS.WALLETS]
+        : [DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.TRANSACTIONS];
+
+      const synced = await Database.forceRemoteSyncKeysNow(syncKeys, {
+        force: true,
+        timeoutMs: 25000,
+        maxAttempts: 3,
+        retryDelayMs: 1200
+      });
+
+      if (!synced) {
+        syncWarning = ' Request saved locally; backend sync is pending.';
+      } else {
+        try {
+          await Database.hydrateFromServer({
+            keys: syncKeys,
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 12000,
+            retryDelayMs: 800
+          });
+        } catch {
+          // best-effort refresh
+        }
+      }
     } catch (error) {
       return {
         success: false,
@@ -2956,9 +2979,9 @@ export const usePinStore = create<PinState>((set, get) => ({
 
     return {
       success: true,
-      message: paidFromWallet
+      message: (paidFromWallet
         ? `PIN purchase request for ${quantity} PIN(s) submitted from fund wallet`
-        : `PIN purchase request for ${quantity} PIN(s) submitted for admin verification`
+        : `PIN purchase request for ${quantity} PIN(s) submitted for admin verification`) + syncWarning
     };
   },
 
