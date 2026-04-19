@@ -7473,6 +7473,49 @@ async function getStateSnapshotCached(options = {}) {
 
 // ─── Authentication ──────────────────────────────────────────────────
 
+function toAuthDateMs(value) {
+  const timestamp = value ? new Date(value).getTime() : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function getLegacyAuthCandidateScore(user) {
+  const accountStatus = String(user?.accountStatus || 'active').trim().toLowerCase();
+  let score = 0;
+
+  if (user?.isAdmin) score += 1_000_000;
+  if (user?.isActive) score += 50_000;
+  if (accountStatus === 'active') score += 10_000;
+  if (accountStatus === 'temp_blocked') score += 1_000;
+  if (accountStatus === 'permanent_blocked') score -= 50_000;
+  if (String(user?.deactivationReason || '') === 'direct_referral_deadline') score -= 20_000;
+  score += Math.max(0, Number(user?.directCount || 0));
+
+  return score;
+}
+
+function selectLegacyAuthUserCandidate(usersData, normalizedUserId) {
+  if (!Array.isArray(usersData)) return null;
+
+  const matches = usersData
+    .filter((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId);
+  if (matches.length === 0) return null;
+
+  const sorted = [...matches].sort((left, right) => {
+    const scoreDiff = getLegacyAuthCandidateScore(right) - getLegacyAuthCandidateScore(left);
+    if (scoreDiff !== 0) return scoreDiff;
+
+    const reactivatedDiff = toAuthDateMs(right?.reactivatedAt) - toAuthDateMs(left?.reactivatedAt);
+    if (reactivatedDiff !== 0) return reactivatedDiff;
+
+    const activatedDiff = toAuthDateMs(right?.activatedAt) - toAuthDateMs(left?.activatedAt);
+    if (activatedDiff !== 0) return activatedDiff;
+
+    return toAuthDateMs(right?.createdAt) - toAuthDateMs(left?.createdAt);
+  });
+
+  return sorted[0] || null;
+}
+
 async function authenticateUser(userId, password) {
   const normalizedUserId = typeof userId === 'string' ? userId.trim() : '';
   const normalizedPassword = typeof password === 'string' ? password : '';
@@ -7489,7 +7532,7 @@ async function authenticateUser(userId, password) {
       try {
         usersData = JSON.parse(stateSnapshotCache.snapshot.state.mlm_users);
         if (Array.isArray(usersData)) {
-          user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+          user = selectLegacyAuthUserCandidate(usersData, normalizedUserId);
         }
       } catch {
         user = null;
@@ -7504,7 +7547,7 @@ async function authenticateUser(userId, password) {
       try {
         usersData = JSON.parse(usersRaw);
         if (Array.isArray(usersData)) {
-          user = usersData.find((u) => u && u.userId === normalizedUserId) || null;
+          user = selectLegacyAuthUserCandidate(usersData, normalizedUserId);
         }
       } catch {
         return { ok: false, status: 500, error: 'Failed to parse user data' };
@@ -7575,9 +7618,19 @@ async function authenticateUser(userId, password) {
           user = updatedUser;
 
           if (Array.isArray(usersData)) {
-            const index = usersData.findIndex((item) => item && (item.id === updatedUser.id || item.userId === updatedUser.userId));
-            if (index >= 0) {
-              usersData[index] = updatedUser;
+            let changed = false;
+            for (let i = 0; i < usersData.length; i += 1) {
+              const item = usersData[i];
+              if (!item) continue;
+              if (normalizeV2UserCode(item.userId) !== normalizedUserId) continue;
+              usersData[i] = {
+                ...item,
+                isActive: false,
+                deactivationReason: 'direct_referral_deadline'
+              };
+              changed = true;
+            }
+            if (changed) {
               await writeStateToDB({ mlm_users: JSON.stringify(usersData) }, false);
             }
           }

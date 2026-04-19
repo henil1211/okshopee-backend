@@ -1467,7 +1467,13 @@ class Database {
     let score = 0;
     if ((user.userId || '').trim() === '1000001') score += 1_000_000_000;
     if (user.isAdmin) score += 100_000_000;
-    if (this.isNetworkActiveUser(user)) score += 10_000_000;
+    if ((user.accountStatus || 'active') === 'active' && !!user.isActive) {
+      score += 12_000_000;
+    } else if ((user.accountStatus || 'active') === 'active' && user.deactivationReason === 'direct_referral_deadline') {
+      score += 500_000;
+    } else {
+      score -= 5_000_000;
+    }
     score += Math.max(0, user.directCount || 0) * 10_000;
     score += txCount * 100;
     score += Math.floor(walletMagnitude);
@@ -1495,7 +1501,7 @@ class Database {
       if (scoreDiff !== 0) return scoreDiff;
       const aCreated = new Date(a.createdAt || 0).getTime();
       const bCreated = new Date(b.createdAt || 0).getTime();
-      return aCreated - bCreated;
+      return bCreated - aCreated;
     })[0];
   }
 
