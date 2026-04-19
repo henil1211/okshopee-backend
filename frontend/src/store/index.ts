@@ -393,6 +393,96 @@ type V2WalletReadResult = {
   errorMessage: string | null;
 };
 
+async function fetchV2PinsForUser(user: User): Promise<Pin[]> {
+  const userCode = String(user?.userId || '').trim();
+  const internalUserId = String(user?.id || '').trim();
+  if (!userCode || !internalUserId) return [];
+
+  const requestId = generateClientRequestId('v2_pins_read');
+  const authState = useAuthStore.getState();
+  const subjectUserCode = String(authState.user?.userId || '').trim();
+  const shouldImpersonateTarget = !!authState.user?.isAdmin && !!subjectUserCode && subjectUserCode !== userCode;
+  const resolvedHeaders = resolveV2ReadRequestHeaders({
+    requestId,
+    impersonationReason: 'pins_read_refresh',
+    overrideImpersonateUserCode: shouldImpersonateTarget ? userCode : undefined
+  });
+  if (!('headers' in resolvedHeaders)) return [];
+
+  try {
+    const pinsUrl = `${getBackendApiBase()}/api/v2/pins?userCode=${encodeURIComponent(userCode)}&limit=500`;
+    const response = await fetch(pinsUrl, { method: 'GET', headers: resolvedHeaders.headers });
+    if (!response.ok) return [];
+
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    const rows = Array.isArray((payload as { pins?: unknown[] })?.pins)
+      ? ((payload as { pins?: unknown[] }).pins as Array<Record<string, unknown>>)
+      : [];
+
+    const normalizedPins: Pin[] = [];
+    for (const row of rows) {
+      const pinCode = String(row?.pinCode || '').trim().toUpperCase();
+      if (!/^[A-Z0-9]{6,12}$/.test(pinCode)) continue;
+
+      const rawStatus = String(row?.status || '').trim().toLowerCase();
+      const status = rawStatus === 'used'
+        ? 'used'
+        : rawStatus === 'suspended'
+          ? 'suspended'
+          : rawStatus === 'transferred'
+            ? 'transferred'
+            : 'unused';
+      const createdAt = typeof row?.purchasedAt === 'string' && row.purchasedAt
+        ? row.purchasedAt
+        : new Date().toISOString();
+      const amount = Number.isFinite(Number(row?.priceCents))
+        ? Math.max(0, Number(row.priceCents) / 100)
+        : Number(Database.getSettings().pinAmount || 11);
+      const purchasedTxnId = Number.isFinite(Number(row?.purchasedTxnId))
+        ? Math.trunc(Number(row.purchasedTxnId))
+        : 0;
+
+      normalizedPins.push({
+        id: `v2_pin_${pinCode}_${purchasedTxnId || 0}`,
+        pinCode,
+        amount,
+        status,
+        ownerId: internalUserId,
+        createdBy: internalUserId,
+        createdAt
+      });
+    }
+
+    return normalizedPins;
+  } catch {
+    return [];
+  }
+}
+
+function appendMissingPinsForUser(userId: string, pinsToAppend: Pin[]): boolean {
+  if (!userId || pinsToAppend.length === 0) return false;
+  const currentPins = Database.getPins();
+  const ownedCodes = new Set(
+    currentPins
+      .filter((pin) => pin.ownerId === userId)
+      .map((pin) => String(pin.pinCode || '').trim().toUpperCase())
+  );
+
+  let appended = false;
+  for (const pin of pinsToAppend) {
+    const pinCode = String(pin.pinCode || '').trim().toUpperCase();
+    if (!pinCode || ownedCodes.has(pinCode)) continue;
+    currentPins.push(pin);
+    ownedCodes.add(pinCode);
+    appended = true;
+  }
+
+  if (appended) {
+    Database.savePins(currentPins);
+  }
+  return appended;
+}
+
 async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
   user: User,
   options?: V2WalletReadOptions
@@ -2822,19 +2912,34 @@ export const usePinStore = create<PinState>((set, get) => ({
   purchaseRequests: [],
 
   loadPins: (userId: string) => {
-    const pins = Database.getUserPins(userId);
-    const unusedPins = Database.getUnusedPins(userId);
-    const usedPins = Database.getUsedPins(userId);
-    const receivedPins = Database.getReceivedPins(userId);
-    const transfers = Database.getUserPinTransfers(userId);
+    void (async () => {
+      const canonicalUser = resolveCanonicalUserForWalletActions(userId);
+      const resolvedUser = canonicalUser
+        || Database.getUserById(userId)
+        || Database.getUserByUserId(userId);
+      const effectiveUserId = resolvedUser?.id || userId;
 
-    set({
-      pins,
-      unusedPins,
-      usedPins,
-      receivedPins,
-      transfers
-    });
+      if (resolvedUser) {
+        const v2Pins = await fetchV2PinsForUser(resolvedUser);
+        if (v2Pins.length > 0) {
+          appendMissingPinsForUser(effectiveUserId, v2Pins);
+        }
+      }
+
+      const pins = Database.getUserPins(effectiveUserId);
+      const unusedPins = Database.getUnusedPins(effectiveUserId);
+      const usedPins = Database.getUsedPins(effectiveUserId);
+      const receivedPins = Database.getReceivedPins(effectiveUserId);
+      const transfers = Database.getUserPinTransfers(effectiveUserId);
+
+      set({
+        pins,
+        unusedPins,
+        usedPins,
+        receivedPins,
+        transfers
+      });
+    })();
   },
 
   transferPin: async (pinId: string, fromUserId: string, toUserId: string) => {
