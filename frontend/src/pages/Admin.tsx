@@ -2611,6 +2611,11 @@ export default function Admin() {
   const applyAdminProfileUpdate = async (profile: typeof adminUserProfile) => {
     if (!user?.isAdmin || !searchedUser) return;
 
+    const latestTargetUser =
+      Database.getUserByUserId(String(searchedUser.userId || '').trim())
+      || Database.getUserById(String(searchedUser.id || '').trim())
+      || searchedUser;
+
     const fullName = profile.fullName.trim();
     const email = profile.email.trim();
     const phone = profile.phone.trim();
@@ -2634,10 +2639,10 @@ export default function Admin() {
     }
 
     const now = new Date().toISOString();
-    const nextLastActions = { ...(searchedUser.lastActions || {}) };
-    if (email !== searchedUser.email) nextLastActions.email = now;
-    if (phone !== searchedUser.phone) nextLastActions.phone = now;
-    if (usdtAddress !== (searchedUser.usdtAddress || '')) nextLastActions.usdtAddress = now;
+    const nextLastActions = { ...(latestTargetUser.lastActions || {}) };
+    if (email !== latestTargetUser.email) nextLastActions.email = now;
+    if (phone !== latestTargetUser.phone) nextLastActions.phone = now;
+    if (usdtAddress !== (latestTargetUser.usdtAddress || '')) nextLastActions.usdtAddress = now;
     if (loginPassword) nextLastActions.loginPassword = now;
     if (transactionPassword) nextLastActions.transactionPassword = now;
 
@@ -2653,7 +2658,7 @@ export default function Admin() {
 
     setIsUpdatingUserProfile(true);
     try {
-      const updated = await Database.commitCriticalAction(() => Database.updateUser(searchedUser.id, updates), {
+      const updated = await Database.commitCriticalAction(() => Database.updateUser(latestTargetUser.id, updates), {
         timeoutMs: 120000,
         maxAttempts: 3,
         retryDelayMs: 2000

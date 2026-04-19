@@ -2826,6 +2826,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     if (targetUser) {
       const updatedUser = await Database.commitCriticalAction(() => Database.updateUser(targetUser.id, updates));
+      if (!updatedUser) {
+        throw new Error('Unable to update profile details right now. Please refresh and try again.');
+      }
       if (updatedUser) {
         if (impersonatedUser) {
           set({ impersonatedUser: updatedUser });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore, useOtpStore, useSyncRefreshKey } from '@/store';
 import { Button } from '@/components/ui/button';
@@ -69,6 +69,7 @@ export default function Profile() {
   const contactOtpResend = useOtpResend(30);
   const passwordOtpResend = useOtpResend(30);
   const txOtpResend = useOtpResend(30);
+  const lastHydratedProfileUserIdRef = useRef<string>('');
 
   const applyDialCode = (value: string, countryName?: string | null) => {
     const dial = getDialCodeForCountry(countryName);
@@ -88,17 +89,56 @@ export default function Profile() {
       return;
     }
     if (!displayUser) return;
-    setContactData({
-      email: displayUser.email,
-      newEmail: '',
-      phone: applyDialCode(displayUser.phone || '', displayUser.country),
-      newPhone: '',
-      usdtAddress: displayUser.usdtAddress || '',
-      newUsdtAddress: '',
-      transactionPassword: '',
-      otp: ''
+
+    const activeProfileUserId = String(displayUser.id || displayUser.userId || '').trim();
+    const userChanged = !!activeProfileUserId && lastHydratedProfileUserIdRef.current !== activeProfileUserId;
+    const nextPhone = applyDialCode(displayUser.phone || '', displayUser.country);
+    const nextEmail = String(displayUser.email || '').trim();
+    const nextUsdt = String(displayUser.usdtAddress || '').trim();
+
+    setContactData((prev) => {
+      const hasPendingDraft =
+        prev.newEmail.trim().length > 0
+        || prev.newPhone.trim().length > 0
+        || prev.newUsdtAddress.trim().length > 0
+        || prev.transactionPassword.trim().length > 0
+        || prev.otp.trim().length > 0;
+
+      if (!userChanged && hasPendingDraft) {
+        return {
+          ...prev,
+          email: nextEmail,
+          phone: nextPhone,
+          usdtAddress: nextUsdt
+        };
+      }
+
+      return {
+        email: nextEmail,
+        newEmail: '',
+        phone: nextPhone,
+        newPhone: '',
+        usdtAddress: nextUsdt,
+        newUsdtAddress: '',
+        transactionPassword: '',
+        otp: ''
+      };
     });
-  }, [displayUser, isAuthenticated, navigate, syncKey]);
+
+    if (activeProfileUserId) {
+      lastHydratedProfileUserIdRef.current = activeProfileUserId;
+    }
+  }, [
+    displayUser?.id,
+    displayUser?.userId,
+    displayUser?.email,
+    displayUser?.phone,
+    displayUser?.usdtAddress,
+    displayUser?.country,
+    isAuthenticated,
+    navigate,
+    syncKey
+  ]);
 
   const isContactChanging = showChangeEmail ||
     showChangePhone ||
@@ -199,7 +239,17 @@ export default function Profile() {
         ...(hasContactChanges ? { lastActions: newLastActions } : {})
       });
 
-      setContactData(prev => ({ ...prev, newEmail: '', newPhone: '', newUsdtAddress: '', transactionPassword: '', otp: '' }));
+      setContactData((prev) => ({
+        ...prev,
+        email: finalEmail,
+        phone: applyDialCode(normalizePhoneNumber(finalPhone), displayUser.country),
+        usdtAddress: finalUsdt,
+        newEmail: '',
+        newPhone: '',
+        newUsdtAddress: '',
+        transactionPassword: '',
+        otp: ''
+      }));
       setShowChangeEmail(false);
       setShowChangePhone(false);
       setShowChangeUsdt(false);
