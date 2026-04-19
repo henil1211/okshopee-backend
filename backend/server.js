@@ -1856,15 +1856,16 @@ async function readV2WalletSnapshotByUserId(userId) {
   const syntheticLockedReceiveCents = Number.isFinite(Number(syntheticLockedReceiveRow?.locked_receive_cents))
     ? Math.trunc(Number(syntheticLockedReceiveRow.locked_receive_cents))
     : 0;
+  const effectiveLockedForQualificationCents = Math.max(0, Math.max(lockedForQualificationCents, syntheticLockedReceiveCents));
   const lockedForGiveCents = Math.max(0, pendingGiveCents);
 
   return {
     balancesCents,
     updatedAt: latestUpdatedAt,
     lockedBreakdownCents: {
-      totalLockedIncome: Math.max(0, lockedForGiveCents + lockedForQualificationCents),
+      totalLockedIncome: Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents),
       lockedForGive: Math.max(0, lockedForGiveCents),
-      lockedForQualification: Math.max(0, lockedForQualificationCents),
+      lockedForQualification: Math.max(0, effectiveLockedForQualificationCents),
       pendingGive: Math.max(0, pendingGiveCents),
       lockedFirstTwoLifetime: Math.max(0, lockedFirstTwoLifetimeCents)
     },

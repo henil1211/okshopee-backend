@@ -191,7 +191,9 @@ export function computeSpendableIncomeBalance(wallet?: Wallet | null): number {
   if (!wallet) return 0;
   const incomeWallet = Number(wallet.incomeWallet || 0);
   const giveHelpLocked = Number(wallet.giveHelpLocked || 0);
-  return Math.max(0, incomeWallet - giveHelpLocked);
+  const lockedIncomeWallet = Number(wallet.lockedIncomeWallet || 0);
+  const effectiveLockedIncome = Math.max(giveHelpLocked, lockedIncomeWallet);
+  return Math.max(0, incomeWallet - effectiveLockedIncome);
 }
 
 function mapV2ReadStatusToTransactionStatus(status: unknown): TransactionStatus {
@@ -643,6 +645,34 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
       completedAt: mapV2ReadStatusToTransactionStatus(row.status) === 'completed' ? createdAt : undefined
     } satisfies Transaction;
   }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const derivedLockedIncomeFromTx = Math.max(0, Math.round(v2Transactions.reduce((sum, tx) => {
+    const signedAmount = Number(tx.amount || 0);
+    if (!Number.isFinite(signedAmount) || signedAmount === 0) return sum;
+    const amount = Math.abs(signedAmount);
+    const txType = String(tx.type || '').toLowerCase();
+    const desc = String(tx.description || '').toLowerCase();
+
+    if (txType === 'receive_help') {
+      if (desc.startsWith('released locked receive help')) {
+        return Math.max(0, sum - amount);
+      }
+      if (desc.includes('locked first-two help') || desc.includes('locked receive help')) {
+        return sum + amount;
+      }
+      return sum;
+    }
+
+    if (txType === 'give_help' && desc.includes('from locked income')) {
+      return Math.max(0, sum - amount);
+    }
+
+    return sum;
+  }, 0) * 100) / 100);
+
+  if (derivedLockedIncomeFromTx > Number(wallet.lockedIncomeWallet || 0)) {
+    wallet.lockedIncomeWallet = derivedLockedIncomeFromTx;
+  }
 
   const totalReceivedFromTx = v2Transactions.reduce((sum, tx) => {
     const creditAmount = Number(tx.amount ?? 0);
@@ -2607,7 +2637,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     const sourceWalletBalance = sourceWallet === 'income'
-      ? Number(strictSnapshot.wallet.incomeWallet || 0)
+      ? computeSpendableIncomeBalance(strictSnapshot.wallet)
       : Number(strictSnapshot.wallet.depositWallet || 0);
     if (sourceWalletBalance < amount) {
       return {
@@ -2736,7 +2766,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       const resolvedPayoutQrCode = String(payoutQrCode || '').trim();
 
       // Use income wallet for withdrawals
-      const availableWithdrawableBalance = Math.max(0, wallet.incomeWallet - (wallet.giveHelpLocked || 0));
+      const availableWithdrawableBalance = computeSpendableIncomeBalance(wallet);
       if (availableWithdrawableBalance < amount) {
         return { success: false, message: 'Insufficient withdrawable balance (some amount is locked for give-help)' };
       }
