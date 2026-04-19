@@ -914,7 +914,8 @@ function parseStateJsonObject(raw, fallback = null) {
   return parsed;
 }
 
-function normalizeQualificationDerivedStateForWrite(incomingState, currentState) {
+function normalizeQualificationDerivedStateForWrite(incomingState, currentState, options = {}) {
+  const lockQualificationFields = options?.lockQualificationFields !== false;
   if (!incomingState || typeof incomingState !== 'object') {
     return incomingState;
   }
@@ -959,8 +960,10 @@ function normalizeQualificationDerivedStateForWrite(incomingState, currentState)
         }
 
         const nextUser = { ...incomingUser };
-        for (const field of QUALIFICATION_LOCKED_USER_FIELDS) {
-          nextUser[field] = existingUser[field];
+        if (lockQualificationFields) {
+          for (const field of QUALIFICATION_LOCKED_USER_FIELDS) {
+            nextUser[field] = existingUser[field];
+          }
         }
         return nextUser;
       });
@@ -9428,7 +9431,8 @@ const server = createServer(async (req, res) => {
       if (FINANCE_ENGINE_MODE === 'v2') {
         normalizedIncomingState = normalizeQualificationDerivedStateForWrite(
           incomingState,
-          currentSnapshot?.state || {}
+          currentSnapshot?.state || {},
+          { lockQualificationFields: !stateActorContext?.authSubjectIsAdmin }
         );
       }
 
