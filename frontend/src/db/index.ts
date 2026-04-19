@@ -773,18 +773,30 @@ class Database {
     return qs ? `${base}?${qs}` : base;
   }
 
-  private static getRemoteSyncRequestHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  private static resolveRemoteSyncAuthorizationHeader(): string | null {
     const session = this.getV2AuthSession();
     if (session?.accessToken) {
       const tokenType = session.tokenType && session.tokenType.trim() ? session.tokenType.trim() : 'Bearer';
-      headers.Authorization = `${tokenType} ${session.accessToken}`;
-      return headers;
+      return `${tokenType} ${session.accessToken}`;
     }
 
     const fallbackUserCode = String(this.getCurrentUser()?.userId || '').trim();
     if (fallbackUserCode) {
-      headers.Authorization = `Bearer ${fallbackUserCode}`;
+      return `Bearer ${fallbackUserCode}`;
+    }
+
+    return null;
+  }
+
+  private static hasRemoteSyncWriteAuth(): boolean {
+    return !!this.resolveRemoteSyncAuthorizationHeader();
+  }
+
+  private static getRemoteSyncRequestHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const authorizationHeader = this.resolveRemoteSyncAuthorizationHeader();
+    if (authorizationHeader) {
+      headers.Authorization = authorizationHeader;
     }
 
     return headers;
@@ -1003,6 +1015,14 @@ class Database {
       if (this.remoteSyncStatus.state !== 'synced') {
         this.markSynced();
       }
+      return;
+    }
+
+    if (!this.hasRemoteSyncWriteAuth()) {
+      this.remoteSyncDirtyKeys.clear();
+      this.remoteSyncPending = false;
+      this.remoteSyncQueued = false;
+      this.markSynced('Skipped server write sync for unauthenticated session.');
       return;
     }
 
@@ -1359,7 +1379,7 @@ class Database {
         }
 
         // Server has no state yet. Seed it from local browser state if available.
-        if (this.hasLocalPersistedData()) {
+        if (this.hasLocalPersistedData() && this.hasRemoteSyncWriteAuth()) {
           const pushController = typeof AbortController !== 'undefined' ? new AbortController() : null;
           const pushTimeout = setTimeout(() => pushController?.abort(), 5000);
           let pushResponse: Response;
@@ -10872,16 +10892,18 @@ class Database {
     const maxAttempts = Math.max(1, Number(options?.maxAttempts ?? 2));
     const retryDelayMs = Math.max(100, Number(options?.retryDelayMs ?? 800));
 
-    try {
-      await this.forceRemoteSyncNowWithOptions({
-        full: false,
-        force: true,
-        timeoutMs: Math.max(timeoutMs, 15000),
-        maxAttempts,
-        retryDelayMs: Math.max(300, retryDelayMs)
-      });
-    } catch {
-      // best-effort sync
+    if (this.hasRemoteSyncWriteAuth()) {
+      try {
+        await this.forceRemoteSyncNowWithOptions({
+          full: false,
+          force: true,
+          timeoutMs: Math.max(timeoutMs, 15000),
+          maxAttempts,
+          retryDelayMs: Math.max(300, retryDelayMs)
+        });
+      } catch {
+        // best-effort sync
+      }
     }
 
     try {
