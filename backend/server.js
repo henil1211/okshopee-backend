@@ -2581,12 +2581,14 @@ function resolveEffectiveIncomeWalletCents({
   const v2Income = Math.max(0, Number(v2IncomeWalletCents || 0));
   const legacyIncome = Math.max(0, Number(legacyIncomeWalletCents || 0));
 
-  // Prefer V2 when it is already at least as complete as legacy.
-  if (hasV2IncomeSignals && v2Income >= legacyIncome) {
+  // Once V2 has income activity/signals, treat V2 as source-of-truth.
+  // This prevents stale legacy snapshots from making income appear undecremented
+  // after valid income->fund transfers.
+  if (hasV2IncomeSignals) {
     return v2Income;
   }
 
-  // Otherwise, avoid under-reporting by falling back to the higher reconciled snapshot.
+  // Legacy fallback remains only for users not represented in V2 income state yet.
   return Math.max(v2Income, legacyIncome);
 }
 
