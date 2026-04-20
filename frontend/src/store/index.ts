@@ -884,6 +884,53 @@ async function submitV2HelpEventBySourceRef(params: {
   };
 }
 
+async function submitV2PinTransfer(params: {
+  fromUserCode: string;
+  toUserCode: string;
+  pinId?: string;
+  pinCode?: string;
+}): Promise<{ success: boolean; message: string; status?: number; code?: string }> {
+  const idempotencyKey = generateClientIdempotencyKey();
+  const requestId = generateClientRequestId('pin_transfer');
+  const resolvedHeaders = resolveV2RequestHeaders({
+    idempotencyKey,
+    requestId,
+    impersonationReason: 'pin_transfer'
+  });
+  if (!('headers' in resolvedHeaders)) {
+    return { success: false, message: resolvedHeaders.message };
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${getBackendApiBase()}/api/v2/pin-transfers`, {
+      method: 'POST',
+      headers: resolvedHeaders.headers,
+      body: JSON.stringify({
+        fromUserCode: params.fromUserCode,
+        toUserCode: params.toUserCode,
+        pinId: String(params.pinId || '').trim() || undefined,
+        pinCode: String(params.pinCode || '').trim().toUpperCase() || undefined
+      })
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Network request error';
+    return { success: false, message: `PIN transfer request failed: ${message}` };
+  }
+
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || payload?.ok === false) {
+    return {
+      success: false,
+      message: normalizeV2ApiErrorMessage(response.status, payload, 'PIN transfer failed'),
+      status: response.status,
+      code: typeof payload?.code === 'string' ? payload.code : undefined
+    };
+  }
+
+  return { success: true, message: 'PIN transferred successfully.' };
+}
+
 async function submitV2AdminAdjustment(params: {
   targetUserCode: string;
   approverUserCode: string;
@@ -959,6 +1006,7 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
   userId?: string;
   sponsorUserId?: string;
   idempotentReplay?: boolean;
+  welcomeEmailDispatched?: boolean;
   sideEffectWarnings?: string[];
   code?: string;
   status?: number;
@@ -1020,6 +1068,7 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
     userId,
     sponsorUserId: typeof payload?.sponsorUserId === 'string' ? payload.sponsorUserId : undefined,
     idempotentReplay: typeof payload?.idempotentReplay === 'boolean' ? payload.idempotentReplay : false,
+    welcomeEmailDispatched: typeof payload?.welcomeEmailDispatched === 'boolean' ? payload.welcomeEmailDispatched : undefined,
     sideEffectWarnings: Array.isArray(payload?.sideEffectWarnings)
       ? payload.sideEffectWarnings.filter((item: unknown): item is string => typeof item === 'string' && item.trim().length > 0)
       : []
@@ -1739,7 +1788,9 @@ async function dispatchSystemEmail(params: {
   }
 
   if (hadTimeout && !hadNonTimeoutError) {
-    const pendingMessage = `Email request timed out after ${requestTimeoutMs}ms, but the OTP may still arrive. Please check inbox/spam before retrying.`;
+    const pendingMessage = params.purpose === 'otp'
+      ? `Email request timed out after ${requestTimeoutMs}ms, but the OTP may still arrive. Please check inbox/spam before retrying.`
+      : `Email request timed out after ${requestTimeoutMs}ms, but the email may still arrive. Please check inbox/spam.`;
     Database.updateEmailLog(logId, { status: 'queued', provider: 'api', error: pendingMessage });
     return { success: true, mode: 'api', error: pendingMessage, deliveryState: 'pending' };
   }
@@ -1747,6 +1798,36 @@ async function dispatchSystemEmail(params: {
   const resolvedError = firstError || 'Email API request failed';
   Database.updateEmailLog(logId, { status: 'failed', provider: 'api', error: resolvedError });
   return { success: false, mode: 'api', error: resolvedError, deliveryState: 'failed' };
+}
+
+async function dispatchWelcomeEmailBestEffort(params: {
+  to: string;
+  subject: string;
+  body: string;
+  userId: string;
+}): Promise<void> {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const outcome = await dispatchSystemEmail({
+      to: params.to,
+      subject: params.subject,
+      body: params.body,
+      purpose: 'welcome',
+      timeoutMs: 12000,
+      metadata: {
+        userId: params.userId
+      }
+    });
+
+    if (outcome.success) {
+      return;
+    }
+
+    if (attempt < maxAttempts) {
+      const waitMs = 1500 * attempt;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
 }
 
 // Auth Store - Updated with PIN-based registration
@@ -2155,9 +2236,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
 
     if (canAttemptBackendAtomicRegistration && !backendRegistration.success && !backendRegistration.fallbackToLocal) {
-      const shouldTryRecovery =
-        backendRegistration.code === 'PIN_ALREADY_USED'
-        || /failed to fetch|networkerror|network request error|load failed|fetch failed/i.test(String(backendRegistration.message || ''));
+      const nonRecoverableCodes = new Set([
+        'INVALID_PIN_FORMAT',
+        'PIN_NOT_FOUND',
+        'PIN_SUSPENDED',
+        'INVALID_SPONSOR_ID',
+        'SPONSOR_NOT_FOUND',
+        'SPONSOR_NOT_ACTIVE',
+        'INVALID_REGISTRATION_PAYLOAD'
+      ]);
+      const shouldTryRecovery = !nonRecoverableCodes.has(String(backendRegistration.code || '').trim());
 
       if (shouldTryRecovery) {
         const recoveredRegistration = await reconcileCommittedRegistrationFromPin(normalizedPinCode);
@@ -2168,6 +2256,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             userId: recoveredRegistration.userId,
             sponsorUserId: sponsor?.userId || sponsorId,
             idempotentReplay: true,
+            welcomeEmailDispatched: false,
             sideEffectWarnings: recoveredRegistration.warning ? [recoveredRegistration.warning] : []
           };
         } else if (recoveredRegistration.blockingMessage) {
@@ -2713,16 +2802,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       'This email is for the User ID shown above. Keep these credentials secure.'
     ].join('\n');
 
-    void dispatchSystemEmail({
-      to: newUser.email,
-      subject: welcomeSubject,
-      body: welcomeBody,
-      purpose: 'welcome',
-      timeoutMs: 5000,
-      metadata: {
+    const shouldSendWelcomeEmailFromClient = !usedBackendAtomicRegistration || backendRegistration.welcomeEmailDispatched === false;
+    if (shouldSendWelcomeEmailFromClient) {
+      void dispatchWelcomeEmailBestEffort({
+        to: newUser.email,
+        subject: welcomeSubject,
+        body: welcomeBody,
         userId: newUser.userId
-      }
-    });
+      });
+    }
     const warnings = [backendSideEffectWarning, consistencyWarning, referralCreditWarning, helpEventWarning].filter((value): value is string => !!value);
     const registrationMessage = warnings.length > 0
       ? `Registration successful. Your ID is: ${newUserId}. ${warnings.join(' ')}`
@@ -2857,8 +2945,8 @@ interface WalletState {
     fromUserId: string,
     toUserId: string,
     amount: number,
-    sourceWallet?: 'fund' | 'income' | 'royalty',
-    destinationWallet?: 'fund' | 'income',
+    sourceWallet?: 'fund' | 'income',
+    destinationWallet?: 'fund',
     security?: {
       transactionPassword?: string;
       otp?: string;
@@ -2946,15 +3034,13 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     fromUserId: string,
     toUserId: string,
     amount: number,
-    sourceWallet: 'fund' | 'income' | 'royalty' = 'fund',
-    destinationWallet: 'fund' | 'income' = 'fund',
+    sourceWallet: 'fund' | 'income' = 'fund',
+    destinationWallet: 'fund' = 'fund',
     security?: {
       transactionPassword?: string;
       otp?: string;
     }
   ) => {
-    await Database.ensureFreshData();
-
     const transferGate = Database.getSensitiveActionSyncGate();
     if (!transferGate.allowed) {
       return { success: false, message: transferGate.message };
@@ -3022,11 +3108,13 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       return { success: false, message: 'Recipient not found' };
     }
 
-    if (toUserForV2.id === effectiveFromUserId) {
-      return { success: false, message: 'Self transfer is not allowed for Fund Wallet transfer.' };
+    const isSelfTransfer = toUserForV2.id === effectiveFromUserId;
+    const isAllowedIncomeToFundSelfTransfer = isSelfTransfer && sourceWallet === 'income' && destinationWallet === 'fund';
+    if (isSelfTransfer && !isAllowedIncomeToFundSelfTransfer) {
+      return { success: false, message: 'Self transfer is allowed only from Income Wallet to your own Fund Wallet.' };
     }
 
-    if (!Database.isInSameChain(effectiveFromUserId, toUserForV2.id)) {
+    if (!isAllowedIncomeToFundSelfTransfer && !Database.isInSameChain(effectiveFromUserId, toUserForV2.id)) {
       return { success: false, message: 'Transfer allowed only to upline or downline' };
     }
 
@@ -3048,7 +3136,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
 
     const otpForV2 = (security?.otp || '').trim();
-    if (!otpForV2 || !Database.verifyOtp(effectiveFromUserId, otpForV2, 'transaction')) {
+    const otpVerificationUserKey = String(fromUser.userId || effectiveFromUserId || '').trim();
+    if (!otpForV2 || !Database.verifyOtp(otpVerificationUserKey, otpForV2, 'transaction', false)) {
       return { success: false, message: 'Invalid or expired OTP' };
     }
 
@@ -3086,8 +3175,17 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     const payload = await response.json().catch(() => ({} as Record<string, unknown>));
     if (!response.ok || payload?.ok === false) {
       const errorMessage = normalizeV2ApiErrorMessage(response.status, payload, 'Transfer failed');
+      if (isAllowedIncomeToFundSelfTransfer && /senderusercode\s+and\s+receiverusercode\s+must\s+be\s+different/i.test(errorMessage)) {
+        return {
+          success: false,
+          message: 'Self income-to-fund transfer is blocked by an older backend rule. Please update backend and retry.'
+        };
+      }
       return { success: false, message: errorMessage };
     }
+
+    // Consume OTP only after the transfer is successfully accepted.
+    void Database.verifyOtp(otpVerificationUserKey, otpForV2, 'transaction', true);
 
     const refreshedV2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(fromUser, {
       includeLegacyTransactions: false
@@ -3372,6 +3470,11 @@ export const usePinStore = create<PinState>((set, get) => ({
     try {
       await Database.ensureFreshData();
 
+      const fromUser = Database.getUserById(fromUserId) || Database.getUserByUserId(fromUserId);
+      if (!fromUser) {
+        return { success: false, message: 'Sender not found' };
+      }
+
       const normalizedTarget = (toUserId || '').replace(/\D/g, '').slice(0, 7);
       const toUser = Database.getUserByUserId(normalizedTarget) || Database.getUserById(toUserId);
       if (!toUser) {
@@ -3379,8 +3482,38 @@ export const usePinStore = create<PinState>((set, get) => ({
       }
 
       // Check if in same chain
-      if (!Database.isInSameChain(fromUserId, toUser.id)) {
+      if (!Database.isInSameChain(fromUser.id, toUser.id)) {
         return { success: false, message: 'PIN can only be transferred to upline or downline members' };
+      }
+
+      const pin = Database.getPinById(pinId);
+      const backendTransfer = await submitV2PinTransfer({
+        fromUserCode: fromUser.userId,
+        toUserCode: toUser.userId,
+        pinId,
+        pinCode: pin?.pinCode
+      });
+
+      if (backendTransfer.success) {
+        try {
+          await Database.hydrateFromServer({
+            keys: [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS],
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 12000,
+            retryDelayMs: 800
+          });
+        } catch {
+          // best-effort sync
+        }
+        get().loadPins(fromUser.id);
+        return { success: true, message: `PIN transferred to ${toUser.fullName}` };
+      }
+
+      const shouldFallbackToLocal = backendTransfer.status === 404
+        || /v2_pin_transfer_failed|not found|endpoint/i.test(String(backendTransfer.message || ''));
+      if (!shouldFallbackToLocal) {
+        return { success: false, message: backendTransfer.message };
       }
 
       const result = Database.transferPin(pinId, toUser.id, fromUserId);
@@ -3413,18 +3546,44 @@ export const usePinStore = create<PinState>((set, get) => ({
     try {
       await Database.ensureFreshData();
 
+      const fromUser = Database.getUserById(fromUserId) || Database.getUserByUserId(fromUserId);
+      if (!fromUser) {
+        return { success: false, message: 'Sender not found' };
+      }
+
       const normalizedTarget = (toUserId || '').replace(/\D/g, '').slice(0, 7);
       const toUser = Database.getUserByUserId(normalizedTarget) || Database.getUserById(toUserId);
       if (!toUser) {
         return { success: false, message: 'Recipient not found' };
       }
-      if (!Database.isInSameChain(fromUserId, toUser.id)) {
+      if (!Database.isInSameChain(fromUser.id, toUser.id)) {
         return { success: false, message: 'PIN can only be transferred to upline or downline members' };
       }
 
       let transferred = 0;
+      let usedBackendEndpoint = false;
       for (const pinId of pinIds) {
         try {
+          const pin = Database.getPinById(pinId);
+          const backendTransfer = await submitV2PinTransfer({
+            fromUserCode: fromUser.userId,
+            toUserCode: toUser.userId,
+            pinId,
+            pinCode: pin?.pinCode
+          });
+
+          if (backendTransfer.success) {
+            transferred += 1;
+            usedBackendEndpoint = true;
+            continue;
+          }
+
+          const shouldFallbackToLocal = backendTransfer.status === 404
+            || /v2_pin_transfer_failed|not found|endpoint/i.test(String(backendTransfer.message || ''));
+          if (!shouldFallbackToLocal) {
+            continue;
+          }
+
           const result = Database.transferPin(pinId, toUser.id, fromUserId);
           if (result) {
             transferred += 1;
@@ -3440,12 +3599,19 @@ export const usePinStore = create<PinState>((set, get) => ({
 
       get().loadPins(fromUserId);
 
-      try {
-        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
-        await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
-        get().loadPins(fromUserId);
-      } catch {
-        // best-effort sync
+      if (usedBackendEndpoint) {
+        try {
+          await Database.hydrateFromServer({
+            keys: [DB_KEYS.PINS, DB_KEYS.PIN_TRANSFERS],
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 12000,
+            retryDelayMs: 800
+          });
+          get().loadPins(fromUserId);
+        } catch {
+          // best-effort sync
+        }
       }
 
       const suffix = transferred === pinIds.length ? '' : ` (${transferred}/${pinIds.length})`;

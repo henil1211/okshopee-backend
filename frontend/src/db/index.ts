@@ -10340,17 +10340,31 @@ class Database {
   }
 
   static generateOtp(userId: string, email: string, purpose: OtpRecord['purpose']): OtpRecord {
-    // Invalidate existing OTPs for this user/purpose
+    const normalizedUserKey = String(userId || '').trim();
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const resolvedUser = this.getUserById(normalizedUserKey)
+      || this.getUserByUserId(normalizedUserKey)
+      || this.getUserByEmail(normalizedEmail);
+    const identityKeys = new Set<string>([normalizedUserKey]);
+    if (resolvedUser?.id) identityKeys.add(String(resolvedUser.id));
+    if (resolvedUser?.userId) identityKeys.add(String(resolvedUser.userId));
+    const resolvedEmail = String(resolvedUser?.email || normalizedEmail).trim().toLowerCase();
+
+    // Invalidate existing OTPs for the same person/purpose, even if stored key form differs.
     const records = this.getOtpRecords();
-    const updated = records.map(r =>
-      (r.userId === userId && r.purpose === purpose && !r.isUsed)
-        ? { ...r, isUsed: true }
-        : r
-    );
+    const updated = records.map((r) => {
+      const recordUserKey = String(r.userId || '').trim();
+      const recordEmail = String(r.email || '').trim().toLowerCase();
+      const sameIdentity = identityKeys.has(recordUserKey) || (!!resolvedEmail && recordEmail === resolvedEmail);
+      if (sameIdentity && r.purpose === purpose && !r.isUsed) {
+        return { ...r, isUsed: true };
+      }
+      return r;
+    });
 
     const otp: OtpRecord = {
       id: `otp_${Date.now()}`,
-      userId,
+      userId: normalizedUserKey,
       email,
       otp: generateOTP(),
       purpose,
@@ -10364,21 +10378,50 @@ class Database {
     return otp;
   }
 
-  static verifyOtp(userId: string, otp: string, purpose: OtpRecord['purpose']): boolean {
+  static verifyOtp(userId: string, otp: string, purpose: OtpRecord['purpose'], consume: boolean = true): boolean {
+    const normalizedUserKey = String(userId || '').trim();
+    const normalizedOtp = String(otp || '').trim().replace(/\D/g, '');
+    if (normalizedOtp.length !== 6) return false;
+
+    const resolvedUser = this.getUserById(normalizedUserKey)
+      || this.getUserByUserId(normalizedUserKey)
+      || null;
+    const identityKeys = new Set<string>([normalizedUserKey]);
+    if (resolvedUser?.id) identityKeys.add(String(resolvedUser.id));
+    if (resolvedUser?.userId) identityKeys.add(String(resolvedUser.userId));
+    const resolvedEmail = String(resolvedUser?.email || '').trim().toLowerCase();
+
     const records = this.getOtpRecords();
-    const record = records.find(
-      r => r.userId === userId &&
-        r.otp === otp &&
-        r.purpose === purpose &&
-        !r.isUsed &&
-        new Date(r.expiresAt) > new Date()
-    );
+    const nowMs = Date.now();
+    const candidates = records
+      .map((record, index) => ({ record, index }))
+      .filter(({ record }) => {
+        const recordUserKey = String(record.userId || '').trim();
+        const recordEmail = String(record.email || '').trim().toLowerCase();
+        const isMatchingIdentity = identityKeys.has(recordUserKey)
+          || (!!resolvedEmail && recordEmail === resolvedEmail);
+        const expiresAtMs = new Date(record.expiresAt).getTime();
+        return isMatchingIdentity
+          && String(record.otp || '').trim() === normalizedOtp
+          && record.purpose === purpose
+          && !record.isUsed
+          && Number.isFinite(expiresAtMs)
+          && expiresAtMs > nowMs;
+      })
+      .sort((a, b) => {
+        const aCreated = new Date(a.record.createdAt).getTime();
+        const bCreated = new Date(b.record.createdAt).getTime();
+        return (Number.isFinite(bCreated) ? bCreated : 0) - (Number.isFinite(aCreated) ? aCreated : 0);
+      });
 
-    if (!record) return false;
+    const selected = candidates[0];
+    if (!selected) return false;
 
-    // Mark as used
-    record.isUsed = true;
-    this.saveOtpRecords(records);
+    if (consume) {
+      // Mark the matched OTP as used.
+      records[selected.index] = { ...records[selected.index], isUsed: true };
+      this.saveOtpRecords(records);
+    }
     return true;
   }
 

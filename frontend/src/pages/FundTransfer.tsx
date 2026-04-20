@@ -22,7 +22,7 @@ export default function FundTransfer() {
   const syncKey = useSyncRefreshKey();
   const displayUser = impersonatedUser || user;
 
-  const [transferData, setTransferData] = useState<{ userId: string; amount: string; source: 'fund' | 'income' | 'royalty'; destination: 'fund' | 'income' }>({
+  const [transferData, setTransferData] = useState<{ userId: string; amount: string; source: 'fund' | 'income'; destination: 'fund' }>({
     userId: '',
     amount: '',
     source: 'fund',
@@ -37,19 +37,13 @@ export default function FundTransfer() {
   const [recipientName, setRecipientName] = useState('');
   const transferOtpResend = useOtpResend(30);
 
-  const isRoyaltyTransfer = transferData.source === 'royalty';
-  const isExternalTransfer = transferData.source !== 'royalty';
-  const isIncomeToFundSelfTransferMode = transferData.source === 'income' && transferData.destination === 'fund';
+  const isIncomeToFundSelfTransferMode = transferData.source === 'income';
   const topWalletLabel = transferData.source === 'income'
     ? 'Income Wallet'
-    : transferData.source === 'royalty'
-      ? 'Royalty Wallet'
-      : 'Fund Wallet';
+    : 'Fund Wallet';
   const topWalletAmount = transferData.source === 'income'
     ? formatCurrency(computeSpendableIncomeBalance(wallet, { lockedAlreadyExcluded: v2ReadHealthy }))
-    : transferData.source === 'royalty'
-      ? formatCurrency(wallet?.royaltyWallet || 0)
-      : formatCurrency(wallet?.depositWallet || 0);
+    : formatCurrency(wallet?.depositWallet || 0);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -120,10 +114,8 @@ export default function FundTransfer() {
       return;
     }
 
-    const targetId = transferData.userId.trim();
-    const security = isExternalTransfer
-      ? { transactionPassword: transferTransactionPassword, otp: transferOtp }
-      : undefined;
+    const targetId = (transferData.userId.trim() || (isIncomeToFundSelfTransferMode ? displayUser.userId : '')).trim();
+    const security = { transactionPassword: transferTransactionPassword, otp: transferOtp };
 
     setIsLoading(true);
     const result = await transferFunds(
@@ -154,9 +146,7 @@ export default function FundTransfer() {
   const hasRecipientId = effectiveRecipientUserId.length > 0;
   const recipientResolved = effectiveRecipientUserId.length === 7
     && (effectiveRecipientUserId === displayUser.userId || !!Database.getUserByUserId(effectiveRecipientUserId));
-  const recipientIsInvalid = isRoyaltyTransfer
-    ? false
-    : !hasRecipientId || !recipientResolved;
+  const recipientIsInvalid = !hasRecipientId || !recipientResolved;
 
   return (
     <div className="fund-transfer-page min-h-screen bg-[#0a0e17] pb-24 md:pb-0">
@@ -213,7 +203,7 @@ export default function FundTransfer() {
               Transfer details
             </CardTitle>
             <p className="text-sm text-white/60">
-              Transfer from fund wallet or income wallet to chain members, or from royalty wallet to your own income or fund wallet.
+              Transfer from your fund wallet or income wallet to fund wallet only. Transfers are allowed only within your upline/downline chain.
             </p>
           </CardHeader>
           <CardContent className="space-y-5 py-6">
@@ -230,11 +220,11 @@ export default function FundTransfer() {
               <select
                 value={transferData.source}
                 onChange={(e) => {
-                  const nextSource = e.target.value as 'fund' | 'income' | 'royalty';
+                  const nextSource = e.target.value as 'fund' | 'income';
                   setTransferData({
                     ...transferData,
                     source: nextSource,
-                    userId: nextSource === 'royalty' ? '' : transferData.userId
+                    userId: transferData.userId
                   });
                   resetTransferSecurity();
                 }}
@@ -242,54 +232,36 @@ export default function FundTransfer() {
               >
                 <option value="fund">Fund Wallet</option>
                 <option value="income">Income Wallet</option>
-                <option value="royalty">Royalty Wallet</option>
               </select>
             </div>
 
-            {isRoyaltyTransfer ? (
-              <div className="space-y-2">
-                <Label className="text-white/80">Transfer To</Label>
-                <select
-                  value={transferData.destination}
-                  onChange={(e) => setTransferData({ ...transferData, destination: e.target.value as 'fund' | 'income' })}
-                  className="w-full h-11 rounded-md bg-[#1f2937] border border-white/10 text-white px-3 text-sm"
-                >
-                  <option value="fund">Fund Wallet</option>
-                  <option value="income">Income Wallet</option>
-                </select>
-                <p className="text-xs text-white/50">
-                  Royalty wallet transfers are allowed only to your own fund wallet or income wallet.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <Label className="text-white/80">
-                  Recipient User ID
-                  {' (7 digits)'}
-                </Label>
-                <Input
-                  value={transferData.userId}
-                  onChange={(e) => {
-                    const value = e.target.value.replace(/\D/g, '').slice(0, 7);
-                    setTransferData({ ...transferData, userId: value });
-                  }}
-                  maxLength={7}
-                  placeholder="Enter 7-digit ID"
-                  className="bg-[#1f2937] border-white/10 text-white"
-                />
-                <p className="text-xs text-white/50">
-                  {isIncomeToFundSelfTransferMode
-                    ? 'Leave blank to transfer from your Income Wallet to your own Fund Wallet, or enter an upline/downline User ID.'
-                    : 'Only upline/downline IDs are allowed.'}
-                </p>
-                {effectiveRecipientName && (
-                  <p className="text-xs text-emerald-400">Recipient: {effectiveRecipientName}</p>
-                )}
-                {transferData.userId.length === 7 && !effectiveRecipientName && (
-                  <p className="text-xs text-rose-400">Recipient ID not found</p>
-                )}
-              </div>
-            )}
+            <div className="space-y-2">
+              <Label className="text-white/80">
+                Recipient User ID
+                {' (7 digits)'}
+              </Label>
+              <Input
+                value={transferData.userId}
+                onChange={(e) => {
+                  const value = e.target.value.replace(/\D/g, '').slice(0, 7);
+                  setTransferData({ ...transferData, userId: value });
+                }}
+                maxLength={7}
+                placeholder="Enter 7-digit ID"
+                className="bg-[#1f2937] border-white/10 text-white"
+              />
+              <p className="text-xs text-white/50">
+                {isIncomeToFundSelfTransferMode
+                  ? 'Leave blank to transfer from your Income Wallet to your own Fund Wallet, or enter an upline/downline User ID.'
+                  : 'Only upline/downline IDs are allowed.'}
+              </p>
+              {effectiveRecipientName && (
+                <p className="text-xs text-emerald-400">Recipient: {effectiveRecipientName}</p>
+              )}
+              {transferData.userId.length === 7 && !effectiveRecipientName && (
+                <p className="text-xs text-rose-400">Recipient ID not found</p>
+              )}
+            </div>
 
             <div className="space-y-2">
               <Label className="text-white/80">Amount</Label>
@@ -302,71 +274,68 @@ export default function FundTransfer() {
               />
             </div>
 
-            {isExternalTransfer && (
-              <>
-                <div className="border-t border-white/10 pt-4">
-                  <Badge className="bg-amber-500/15 text-amber-300 border-amber-400/30">
-                    <Shield className="w-4 h-4 mr-2" />
-                    Security verification required
-                  </Badge>
+            <>
+              <div className="border-t border-white/10 pt-4">
+                <Badge className="bg-amber-500/15 text-amber-300 border-amber-400/30">
+                  <Shield className="w-4 h-4 mr-2" />
+                  Security verification required
+                </Badge>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-white/80">Transaction Password</Label>
+                <div className="relative">
+                  <Input
+                    type={showTransferTxPassword ? 'text' : 'password'}
+                    value={transferTransactionPassword}
+                    onChange={(e) => setTransferTransactionPassword(e.target.value)}
+                    placeholder="Enter transaction password"
+                    className="bg-[#1f2937] border-white/10 text-white pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowTransferTxPassword((v) => !v)}
+                    className="absolute inset-y-0 right-3 flex items-center text-white/60 hover:text-white"
+                    tabIndex={-1}
+                  >
+                    {showTransferTxPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
-                <div className="space-y-2">
-                  <Label className="text-white/80">Transaction Password</Label>
-                  <div className="relative">
-                    <Input
-                      type={showTransferTxPassword ? 'text' : 'password'}
-                      value={transferTransactionPassword}
-                      onChange={(e) => setTransferTransactionPassword(e.target.value)}
-                      placeholder="Enter transaction password"
-                      className="bg-[#1f2937] border-white/10 text-white pr-10"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowTransferTxPassword((v) => !v)}
-                      className="absolute inset-y-0 right-3 flex items-center text-white/60 hover:text-white"
-                      tabIndex={-1}
-                    >
-                      {showTransferTxPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
+              </div>
+              <div className="space-y-2">
+                <Label className="text-white/80">Email OTP</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={transferOtp}
+                    onChange={(e) => setTransferOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    maxLength={6}
+                    placeholder="Enter OTP"
+                    className="bg-[#1f2937] border-white/10 text-white"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleSendTransferOtp}
+                    disabled={isSendingTransferOtp || transferOtpResend.isCoolingDown || !v2ReadHealthy}
+                    className="border-white/20 text-white hover:bg-white/10 whitespace-nowrap"
+                  >
+                    {isSendingTransferOtp
+                      ? <RefreshCw className="w-4 h-4 animate-spin" />
+                      : !isTransferOtpSent
+                        ? 'Send OTP'
+                        : transferOtpResend.isCoolingDown
+                          ? `Resend in ${transferOtpResend.remainingSeconds}s`
+                          : 'Resend OTP'}
+                  </Button>
                 </div>
-                <div className="space-y-2">
-                  <Label className="text-white/80">Email OTP</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      value={transferOtp}
-                      onChange={(e) => setTransferOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                      maxLength={6}
-                      placeholder="Enter OTP"
-                      className="bg-[#1f2937] border-white/10 text-white"
-                    />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={handleSendTransferOtp}
-                      disabled={isSendingTransferOtp || transferOtpResend.isCoolingDown || !v2ReadHealthy}
-                      className="border-white/20 text-white hover:bg-white/10 whitespace-nowrap"
-                    >
-                      {isSendingTransferOtp
-                        ? <RefreshCw className="w-4 h-4 animate-spin" />
-                        : !isTransferOtpSent
-                          ? 'Send OTP'
-                          : transferOtpResend.isCoolingDown
-                            ? `Resend in ${transferOtpResend.remainingSeconds}s`
-                            : 'Resend OTP'}
-                    </Button>
-                  </div>
-                  {isTransferOtpSent && (
-                    <p className="text-xs text-emerald-400">OTP sent to your registered email</p>
-                  )}
-                </div>
-              </>
-            )}
+                {isTransferOtpSent && (
+                  <p className="text-xs text-emerald-400">OTP sent to your registered email</p>
+                )}
+              </div>
+            </>
 
             <div className="rounded-lg border border-white/10 bg-[#1f2937] p-3">
               <p className="text-sm text-white/60">Available Fund Wallet Balance: {formatCurrency(wallet?.depositWallet || 0)}</p>
               <p className="text-sm text-white/60">Available Income Wallet Balance: {formatCurrency(computeSpendableIncomeBalance(wallet, { lockedAlreadyExcluded: v2ReadHealthy }))}</p>
-              <p className="text-sm text-white/60">Available Royalty Wallet Balance: {formatCurrency(wallet?.royaltyWallet || 0)}</p>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3 pt-1">
@@ -382,7 +351,7 @@ export default function FundTransfer() {
               </Button>
               <Button
                 onClick={handleTransfer}
-                disabled={isLoading || !v2ReadHealthy || recipientIsInvalid || (isExternalTransfer && (!transferTransactionPassword.trim() || !transferOtp.trim()))}
+                disabled={isLoading || !v2ReadHealthy || recipientIsInvalid || !transferTransactionPassword.trim() || !transferOtp.trim()}
                 className="flex-1 btn-primary"
               >
                 {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Transfer'}

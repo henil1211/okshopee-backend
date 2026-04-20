@@ -726,6 +726,63 @@ function getSmtpTransporter() {
   return smtpTransporter;
 }
 
+async function sendRegistrationWelcomeEmailBestEffort(params) {
+  const to = normalizeEmailRecipients(params?.to);
+  const fullName = String(params?.fullName || '').trim() || 'Member';
+  const userId = String(params?.userId || '').trim();
+  const email = String(params?.email || '').trim();
+  const phone = String(params?.phone || '').trim();
+  const loginPassword = String(params?.loginPassword || '');
+  const transactionPassword = String(params?.transactionPassword || '');
+
+  if (!to || !userId) {
+    return { sent: false, error: 'Missing required recipient data for welcome email' };
+  }
+
+  const smtpErrors = getSmtpConfigErrors();
+  if (smtpErrors.length > 0) {
+    return {
+      sent: false,
+      error: `SMTP is not configured. Missing/invalid env values: ${smtpErrors.join(', ')}`
+    };
+  }
+
+  const subject = 'Welcome To ReferNex';
+  const body = [
+    `Hello ${fullName},`,
+    '',
+    'Welcome to ReferNex. Your account is now active.',
+    '',
+    `Name: ${fullName}`,
+    `User ID: ${userId}`,
+    `Email: ${email}`,
+    `Phone: ${phone}`,
+    '',
+    `Login Password: ${loginPassword}`,
+    `Transaction Password: ${transactionPassword}`,
+    '',
+    'This email is for the User ID shown above. Keep these credentials secure.'
+  ].join('\n');
+
+  const maxAttempts = 2;
+  let lastError = 'Unknown SMTP error';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await getSmtpTransporter().sendMail({
+        from: SMTP_FROM,
+        to,
+        subject,
+        text: body
+      });
+      return { sent: true, error: null };
+    } catch (error) {
+      lastError = getErrorMessage(error, 'Failed to send welcome email');
+    }
+  }
+
+  return { sent: false, error: lastError };
+}
+
 function sanitizeIncomingState(input) {
   if (!input || typeof input !== 'object') return {};
   const out = {};
@@ -1105,6 +1162,53 @@ async function findLegacyUserByPublicUserId(userId) {
   if (!normalizedUserId) return null;
   const users = await loadLegacyUsersForAuth();
   return users.find((candidate) => normalizeV2UserCode(candidate?.userId) === normalizedUserId) || null;
+}
+
+function isLegacyAncestorUserCode(usersByCode, ancestorUserCode, descendantUserCode) {
+  if (!usersByCode || !(usersByCode instanceof Map)) return false;
+  const normalizedAncestor = normalizeV2UserCode(ancestorUserCode);
+  const normalizedDescendant = normalizeV2UserCode(descendantUserCode);
+  if (!normalizedAncestor || !normalizedDescendant || normalizedAncestor === normalizedDescendant) {
+    return false;
+  }
+
+  let currentUserCode = normalizedDescendant;
+  let hops = 0;
+  const maxHops = Math.max(1000, usersByCode.size + 5);
+  while (currentUserCode && hops < maxHops) {
+    const current = usersByCode.get(currentUserCode);
+    const sponsorUserCode = normalizeV2UserCode(current?.sponsorId);
+    if (!sponsorUserCode) return false;
+    if (sponsorUserCode === normalizedAncestor) return true;
+    currentUserCode = sponsorUserCode;
+    hops += 1;
+  }
+
+  return false;
+}
+
+async function areUsersInSameLegacyChain(userCodeA, userCodeB) {
+  const normalizedA = normalizeV2UserCode(userCodeA);
+  const normalizedB = normalizeV2UserCode(userCodeB);
+  if (!normalizedA || !normalizedB || normalizedA === normalizedB) return false;
+
+  const users = await loadLegacyUsersForAuth();
+  if (!Array.isArray(users) || users.length === 0) return false;
+
+  const usersByCode = new Map();
+  for (const user of users) {
+    const code = normalizeV2UserCode(user?.userId);
+    if (code) {
+      usersByCode.set(code, user);
+    }
+  }
+
+  if (!usersByCode.has(normalizedA) || !usersByCode.has(normalizedB)) {
+    return false;
+  }
+
+  return isLegacyAncestorUserCode(usersByCode, normalizedA, normalizedB)
+    || isLegacyAncestorUserCode(usersByCode, normalizedB, normalizedA);
 }
 
 function isLegacyUserEligibleForV2Access(user) {
@@ -7249,6 +7353,7 @@ const server = createServer(async (req, res) => {
             sponsorUserId: String(replayUser.sponsorId || ''),
             pinCode,
             idempotentReplay: true,
+            welcomeEmailDispatched: false,
             message: `Registration already completed for User ID ${replayUser.userId}`,
             referralSettled: !!referralResult,
             helpSettled: !!helpEventResult,
@@ -7551,6 +7656,22 @@ const server = createServer(async (req, res) => {
       const sideEffectWarnings = [];
       let referralResult = null;
       let helpEventResult = null;
+      let welcomeEmailDispatched = false;
+
+      const welcomeEmailResult = await sendRegistrationWelcomeEmailBestEffort({
+        to: createdUser.email,
+        fullName: createdUser.fullName,
+        userId: createdUser.userId,
+        email: createdUser.email,
+        phone: createdUser.phone,
+        loginPassword: createdUser.password,
+        transactionPassword: createdUser.transactionPassword
+      });
+      if (welcomeEmailResult.sent) {
+        welcomeEmailDispatched = true;
+      } else {
+        sideEffectWarnings.push(`Welcome email pending: ${welcomeEmailResult.error}`);
+      }
 
       const referralSourceRef = `reg_pin_${createdUser.userId}_${sponsorUser.userId}`;
       const referralIdempotencyKey = `reg_ref_${createdUser.userId}_${sponsorUser.userId}_${pinCode}`.slice(0, 128);
@@ -7598,6 +7719,7 @@ const server = createServer(async (req, res) => {
         userId: createdUser.userId,
         sponsorUserId: sponsorUser.userId,
         pinCode,
+        welcomeEmailDispatched,
         referralSettled: !!referralResult,
         helpSettled: !!helpEventResult,
         sideEffectWarnings,
@@ -7823,6 +7945,218 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/v2/pin-transfers') {
+    let connection;
+    let transactionOpen = false;
+    try {
+      if (STORAGE_MODE !== 'mysql') {
+        sendJson(res, 503, { ok: false, error: 'V2 pin transfer API requires STORAGE_MODE=mysql', code: 'V2_REQUIRES_MYSQL' });
+        return;
+      }
+      if (FINANCE_ENGINE_MODE !== 'v2') {
+        sendJson(res, 409, { ok: false, error: 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/pin-transfers', code: 'FINANCE_MODE_MISMATCH' });
+        return;
+      }
+      if (!pool) {
+        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+        return;
+      }
+
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: 'v2_pin_transfer',
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+
+      const actorUserCode = authContext.actorUserCode;
+      const fromUserCode = normalizeV2UserCode(parsed?.fromUserCode || actorUserCode);
+      const toUserCode = normalizeV2UserCode(parsed?.toUserCode);
+      const pinId = typeof parsed?.pinId === 'string' ? parsed.pinId.trim() : '';
+      const pinCode = typeof parsed?.pinCode === 'string' ? parsed.pinCode.trim().toUpperCase() : '';
+
+      if (!isValidV2UserCode(fromUserCode) || !isValidV2UserCode(toUserCode)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'fromUserCode and toUserCode are required and must be 3-20 chars [a-zA-Z0-9_-]',
+          code: 'INVALID_USER_CODE'
+        });
+        return;
+      }
+      if (fromUserCode === toUserCode) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'fromUserCode and toUserCode must be different',
+          code: 'SELF_TRANSFER_NOT_ALLOWED'
+        });
+        return;
+      }
+      if (fromUserCode !== actorUserCode) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Actor is only allowed to transfer from their own fromUserCode',
+          code: 'ACTOR_USER_MISMATCH'
+        });
+        return;
+      }
+      if (!pinId && !pinCode) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'pinId or pinCode is required',
+          code: 'MISSING_PIN_REFERENCE'
+        });
+        return;
+      }
+
+      const isInChain = await areUsersInSameLegacyChain(fromUserCode, toUserCode);
+      if (!isInChain) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'PIN can only be transferred to upline or downline members',
+          code: 'CHAIN_TRANSFER_ONLY'
+        });
+        return;
+      }
+
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+      transactionOpen = true;
+
+      const stateKeys = ['mlm_users', 'mlm_pins', 'mlm_pin_transfers'];
+      const placeholders = stateKeys.map(() => '?').join(', ');
+      const [stateRows] = await connection.execute(
+        `SELECT state_key, state_value
+         FROM state_store
+         WHERE state_key IN (${placeholders})
+         FOR UPDATE`,
+        stateKeys
+      );
+
+      const stateByKey = new Map();
+      for (const row of Array.isArray(stateRows) ? stateRows : []) {
+        stateByKey.set(String(row?.state_key || ''), row?.state_value);
+      }
+
+      const usersParsed = safeParseJSON(stateByKey.get('mlm_users'));
+      const pinsParsed = safeParseJSON(stateByKey.get('mlm_pins'));
+      const transfersParsed = safeParseJSON(stateByKey.get('mlm_pin_transfers'));
+      const users = Array.isArray(usersParsed) ? usersParsed : [];
+      const pins = Array.isArray(pinsParsed) ? pinsParsed : [];
+      const pinTransfers = Array.isArray(transfersParsed) ? transfersParsed : [];
+
+      const usersByInternalId = new Map(users.map((user) => [String(user?.id || '').trim(), user]));
+      const usersByUserCode = new Map(
+        users
+          .map((user) => [normalizeV2UserCode(user?.userId), user])
+          .filter(([code]) => !!code)
+      );
+
+      const fromUser = usersByUserCode.get(fromUserCode) || null;
+      const toUser = usersByUserCode.get(toUserCode) || null;
+      if (!fromUser || !toUser) {
+        throw createApiError(404, 'Sender or recipient user not found', 'USER_NOT_FOUND');
+      }
+      if (!isLegacyUserEligibleForV2Access(fromUser) || !isLegacyUserEligibleForV2Access(toUser)) {
+        throw createApiError(403, 'Sender or recipient account is inactive or blocked', 'USER_NOT_ACTIVE');
+      }
+
+      const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
+      const pinIndex = pinId
+        ? pins.findIndex((pin) => String(pin?.id || '').trim() === pinId)
+        : pins.findIndex((pin) => String(pin?.pinCode || '').trim().toUpperCase() === normalizedPinCode);
+      if (pinIndex === -1) {
+        throw createApiError(404, 'PIN not found', 'PIN_NOT_FOUND');
+      }
+
+      const selectedPin = pins[pinIndex];
+      const selectedPinStatus = String(selectedPin?.status || '').toLowerCase();
+      if (selectedPinStatus === 'suspended') {
+        throw createApiError(409, 'Suspended PIN cannot be transferred', 'PIN_SUSPENDED');
+      }
+      if (selectedPinStatus !== 'unused') {
+        throw createApiError(409, 'Only unused PIN can be transferred', 'PIN_ALREADY_USED');
+      }
+
+      const ownerRef = String(selectedPin?.ownerId || '').trim();
+      const ownerUser = usersByInternalId.get(ownerRef) || usersByUserCode.get(normalizeV2UserCode(ownerRef));
+      const ownerMatches = ownerRef === String(fromUser.id)
+        || ownerRef === String(fromUser.userId)
+        || (ownerUser && normalizeV2UserCode(ownerUser.userId) === fromUserCode);
+      if (!ownerMatches) {
+        throw createApiError(403, 'PIN does not belong to sender', 'PIN_NOT_OWNED');
+      }
+
+      const nowIso = new Date().toISOString();
+      pins[pinIndex] = {
+        ...selectedPin,
+        ownerId: String(toUser.id),
+        transferredFrom: String(fromUser.id),
+        transferredAt: nowIso
+      };
+
+      const transferRecord = {
+        id: `pt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        pinId: String(pins[pinIndex].id || ''),
+        pinCode: String(pins[pinIndex].pinCode || ''),
+        fromUserId: String(fromUser.id),
+        fromUserName: String(fromUser.fullName || fromUser.userId || ''),
+        toUserId: String(toUser.id),
+        toUserName: String(toUser.fullName || toUser.userId || ''),
+        transferredAt: nowIso
+      };
+      pinTransfers.push(transferRecord);
+
+      const nowDb = toMySQLDatetime(nowIso);
+      const upsertStateKey = async (key, value) => {
+        await connection.execute(
+          `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+          [key, JSON.stringify(value), nowDb]
+        );
+      };
+
+      await upsertStateKey('mlm_pins', pins);
+      await upsertStateKey('mlm_pin_transfers', pinTransfers);
+
+      await connection.commit();
+      transactionOpen = false;
+      invalidateStateSnapshotCache();
+
+      sendJson(res, 200, {
+        ok: true,
+        transferId: transferRecord.id,
+        pinId: transferRecord.pinId,
+        pinCode: transferRecord.pinCode,
+        fromUserCode,
+        toUserCode,
+        transferredAt: nowIso
+      });
+    } catch (error) {
+      if (transactionOpen && connection) {
+        try {
+          await connection.rollback();
+        } catch {
+          // ignore rollback secondary error
+        }
+      }
+
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to transfer PIN');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_PIN_TRANSFER_FAILED'
+      });
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/v2/fund-transfers') {
     try {
       const body = await getRequestBody(req);
@@ -7882,8 +8216,15 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      if (senderUserCode === receiverUserCode) {
-        sendJson(res, 400, { ok: false, error: 'senderUserCode and receiverUserCode must be different', code: 'SELF_TRANSFER_NOT_ALLOWED' });
+      const isAllowedIncomeToFundSelfTransfer = senderUserCode === receiverUserCode
+        && sourceWallet === 'income'
+        && destinationWallet === 'fund';
+      if (senderUserCode === receiverUserCode && !isAllowedIncomeToFundSelfTransfer) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'Self transfer is allowed only for sourceWallet=income and destinationWallet=fund',
+          code: 'SELF_TRANSFER_NOT_ALLOWED'
+        });
         return;
       }
       if (senderUserCode !== actorUserCode) {
@@ -7893,6 +8234,17 @@ const server = createServer(async (req, res) => {
           code: 'ACTOR_SENDER_MISMATCH'
         });
         return;
+      }
+      if (!isAllowedIncomeToFundSelfTransfer) {
+        const isInChain = await areUsersInSameLegacyChain(senderUserCode, receiverUserCode);
+        if (!isInChain) {
+          sendJson(res, 403, {
+            ok: false,
+            error: 'Transfer allowed only to upline or downline chain members',
+            code: 'CHAIN_TRANSFER_ONLY'
+          });
+          return;
+        }
       }
       if (!Number.isFinite(amountCents) || amountCents <= 0) {
         sendJson(res, 400, { ok: false, error: 'amountCents must be a positive integer', code: 'INVALID_AMOUNT' });
