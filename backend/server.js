@@ -2177,9 +2177,18 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
     ? Math.trunc(Number(syntheticLockedReceiveRow.locked_receive_cents))
     : 0;
   const legacyIncomeMetrics = await readLegacyIncomeMetricsByUserCodeWithPool(userCode);
+  const legacyIncomeWalletCents = Number(legacyIncomeMetrics.incomeWalletCents || 0);
   const legacyLockedIncomeCents = Number(legacyIncomeMetrics.lockedIncomeCents || 0);
   const legacyTotalReceivedCents = Number(legacyIncomeMetrics.totalReceivedCents || 0);
   const legacyTotalGivenCents = Number(legacyIncomeMetrics.totalGivenCents || 0);
+  const hasV2IncomeSignals = Math.max(0, totalReceivedFromLedgerCents) > 0
+    || Math.max(0, totalGivenFromLedgerCents) > 0
+    || Math.max(0, balancesCents.income) > 0;
+  balancesCents.income = resolveEffectiveIncomeWalletCents({
+    v2IncomeWalletCents: balancesCents.income,
+    legacyIncomeWalletCents,
+    hasV2IncomeSignals
+  });
   const effectiveLockedForQualificationCents = Math.max(0, Math.max(lockedForQualificationCents, syntheticLockedReceiveCents));
   const lockedForGiveCents = Math.max(0, pendingGiveCents);
   const v2LockedTotalCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
@@ -2413,6 +2422,7 @@ async function readV2PinsByUserId(userId, limit = 300) {
 function computeLegacyIncomeMetricsFromStateRows(stateRows, normalizedUserCode) {
   if (!isValidV2UserCode(normalizedUserCode)) {
     return {
+      incomeWalletCents: 0,
       lockedIncomeCents: 0,
       totalReceivedCents: 0,
       totalGivenCents: 0
@@ -2425,8 +2435,10 @@ function computeLegacyIncomeMetricsFromStateRows(stateRows, normalizedUserCode) 
   }
 
   const usersParsed = safeParseJSON(stateMap.get('mlm_users'));
+  const walletsParsed = safeParseJSON(stateMap.get('mlm_wallets'));
   const txParsed = safeParseJSON(stateMap.get('mlm_transactions'));
   const users = Array.isArray(usersParsed) ? usersParsed : [];
+  const wallets = Array.isArray(walletsParsed) ? walletsParsed : [];
   const txs = Array.isArray(txParsed) ? txParsed : [];
 
   const matchingLegacyUserIds = new Set(
@@ -2439,6 +2451,17 @@ function computeLegacyIncomeMetricsFromStateRows(stateRows, normalizedUserCode) 
   let lockedIncomeCents = 0;
   let totalReceivedCents = 0;
   let totalGivenCents = 0;
+  let incomeWalletCents = 0;
+
+  for (const wallet of wallets) {
+    const walletUserId = String(wallet?.userId || '').trim();
+    if (!walletUserId) continue;
+    if (walletUserId !== normalizedUserCode && !matchingLegacyUserIds.has(walletUserId)) continue;
+
+    const incomeWallet = Number(wallet?.incomeWallet ?? 0);
+    const incomeWalletCentsCandidate = Number.isFinite(incomeWallet) ? Math.round(incomeWallet * 100) : 0;
+    incomeWalletCents = Math.max(incomeWalletCents, Math.max(0, incomeWalletCentsCandidate));
+  }
 
   for (const tx of txs) {
     const txUserId = String(tx?.userId || '').trim();
@@ -2483,6 +2506,7 @@ function computeLegacyIncomeMetricsFromStateRows(stateRows, normalizedUserCode) 
   }
 
   return {
+    incomeWalletCents: Math.max(0, incomeWalletCents),
     lockedIncomeCents: Math.max(0, lockedIncomeCents),
     totalReceivedCents: Math.max(0, totalReceivedCents),
     totalGivenCents: Math.max(0, totalGivenCents)
@@ -2493,6 +2517,7 @@ async function readLegacyIncomeMetricsByUserCodeWithPool(userCode) {
   const normalizedUserCode = normalizeV2UserCode(userCode);
   if (!isValidV2UserCode(normalizedUserCode)) {
     return {
+      incomeWalletCents: 0,
       lockedIncomeCents: 0,
       totalReceivedCents: 0,
       totalGivenCents: 0
@@ -2503,7 +2528,7 @@ async function readLegacyIncomeMetricsByUserCodeWithPool(userCode) {
     () => pool.execute(
       `SELECT state_key, state_value
        FROM state_store
-       WHERE state_key IN ('mlm_users', 'mlm_transactions')`
+       WHERE state_key IN ('mlm_users', 'mlm_wallets', 'mlm_transactions')`
     ),
     'read_legacy_income_metrics_state'
   );
@@ -2515,6 +2540,7 @@ async function readLegacyIncomeMetricsByUserCodeWithConnection(connection, userC
   const normalizedUserCode = normalizeV2UserCode(userCode);
   if (!isValidV2UserCode(normalizedUserCode)) {
     return {
+      incomeWalletCents: 0,
       lockedIncomeCents: 0,
       totalReceivedCents: 0,
       totalGivenCents: 0
@@ -2524,7 +2550,7 @@ async function readLegacyIncomeMetricsByUserCodeWithConnection(connection, userC
   const [rows] = await connection.execute(
     `SELECT state_key, state_value
      FROM state_store
-     WHERE state_key IN ('mlm_users', 'mlm_transactions')`
+      WHERE state_key IN ('mlm_users', 'mlm_wallets', 'mlm_transactions')`
   );
 
   return computeLegacyIncomeMetricsFromStateRows(rows, normalizedUserCode);
@@ -2545,6 +2571,23 @@ function resolveEffectiveLockedIncomeCents({
 
   // Legacy fallback remains only for users not fully represented in V2 lock state yet.
   return Math.max(v2Locked, legacyLocked);
+}
+
+function resolveEffectiveIncomeWalletCents({
+  v2IncomeWalletCents,
+  legacyIncomeWalletCents,
+  hasV2IncomeSignals
+}) {
+  const v2Income = Math.max(0, Number(v2IncomeWalletCents || 0));
+  const legacyIncome = Math.max(0, Number(legacyIncomeWalletCents || 0));
+
+  // Prefer V2 when it is already at least as complete as legacy.
+  if (hasV2IncomeSignals && v2Income >= legacyIncome) {
+    return v2Income;
+  }
+
+  // Otherwise, avoid under-reporting by falling back to the higher reconciled snapshot.
+  return Math.max(v2Income, legacyIncome);
 }
 
 async function readV2LockedIncomeSnapshotForMutation(connection, userId, userCode = null) {
