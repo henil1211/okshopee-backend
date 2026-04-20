@@ -185,6 +185,26 @@ interface DuplicateLockedGiveHelpMismatchRow {
   clusterEndedAt: string;
 }
 
+interface AvailableIncomeDriftRow {
+  internalUserId: string;
+  userId: string;
+  fullName: string;
+  sponsorUserId: string;
+  sponsorName: string;
+  walletIncome: number;
+  expectedIncome: number;
+  driftAmount: number;
+  driftDirection: 'wallet_above_ledger' | 'wallet_below_ledger';
+  walletTotalReceived: number;
+  expectedTotalReceived: number;
+  receivedDrift: number;
+  walletTotalGiven: number;
+  expectedTotalGiven: number;
+  givenDrift: number;
+  relevantTxCount: number;
+  lastActivityAt: string;
+}
+
 interface PaymentMethodDraft {
   type: PaymentMethodType;
   name: string;
@@ -1196,6 +1216,14 @@ export default function Admin() {
     sponsorName: '',
     minAmount: '',
     status: ''
+  });
+  const [availableIncomeDriftFilters, setAvailableIncomeDriftFilters] = useState({
+    userId: '',
+    name: '',
+    sponsorId: '',
+    sponsorName: '',
+    minDrift: '',
+    direction: ''
   });
   const [fundWalletReportFilters, setFundWalletReportFilters] = useState({
     userId: '',
@@ -4549,6 +4577,33 @@ export default function Admin() {
     return Database.scanReferralIncomeMismatches();
   }, [isReportsTabActive, reportTab, allTransactions, allUsers, reportRefreshTick]);
 
+  const availableIncomeDriftRows = useMemo<AvailableIncomeDriftRow[]>(() => {
+    if (!isReportsTabActive || reportTab !== 'available-income-drift') return [];
+    const minDrift = Number(availableIncomeDriftFilters.minDrift || 0);
+    return Database.scanAvailableIncomeDriftMismatches()
+      .filter((row) => {
+        if (availableIncomeDriftFilters.userId && !safeText(row.userId).includes(availableIncomeDriftFilters.userId)) return false;
+        if (availableIncomeDriftFilters.name && !safeLower(row.fullName).includes(safeLower(availableIncomeDriftFilters.name))) return false;
+        if (availableIncomeDriftFilters.sponsorId && !safeText(row.sponsorUserId).includes(availableIncomeDriftFilters.sponsorId)) return false;
+        if (availableIncomeDriftFilters.sponsorName && !safeLower(row.sponsorName).includes(safeLower(availableIncomeDriftFilters.sponsorName))) return false;
+        if (minDrift > 0 && Math.abs(Number(row.driftAmount || 0)) < minDrift) return false;
+        if (availableIncomeDriftFilters.direction && row.driftDirection !== availableIncomeDriftFilters.direction) return false;
+        return true;
+      })
+      .sort((left, right) => {
+        const driftDiff = Math.abs(right.driftAmount) - Math.abs(left.driftAmount);
+        if (Math.abs(driftDiff) > 0.0001) return driftDiff;
+        return new Date(right.lastActivityAt).getTime() - new Date(left.lastActivityAt).getTime();
+      });
+  }, [
+    allTransactions,
+    allUsers,
+    availableIncomeDriftFilters,
+    isReportsTabActive,
+    reportRefreshTick,
+    reportTab
+  ]);
+
   const duplicateLockedGiveHelpMismatchRows = useMemo<DuplicateLockedGiveHelpMismatchRow[]>(() => {
     if (!isReportsTabActive || reportTab !== 'duplicate-give-mismatch') return [];
     return Database.scanDuplicateLockedGiveHelpMismatches();
@@ -4778,6 +4833,63 @@ export default function Admin() {
         String(row.missingSelfFundCreditCandidates),
         row.currentRecoveryDue.toFixed(2),
         row.txnDerivedFundWallet.toFixed(2)
+      ])
+    ];
+
+    const csv = csvRows
+      .map((cells) => cells.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\r\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${filePrefix}-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    toast.success(`Exported ${rows.length} row(s)`);
+  };
+
+  const exportAvailableIncomeDriftRows = (rows: AvailableIncomeDriftRow[], filePrefix: string) => {
+    const csvRows = [
+      [
+        'User ID',
+        'Name',
+        'Sponsor ID',
+        'Sponsor Name',
+        'Wallet Income',
+        'Expected Income',
+        'Drift Amount',
+        'Direction',
+        'Wallet Total Received',
+        'Expected Total Received',
+        'Received Drift',
+        'Wallet Total Given',
+        'Expected Total Given',
+        'Given Drift',
+        'Relevant Tx Count',
+        'Last Activity'
+      ],
+      ...rows.map((row) => [
+        row.userId,
+        row.fullName,
+        row.sponsorUserId,
+        row.sponsorName,
+        row.walletIncome.toFixed(2),
+        row.expectedIncome.toFixed(2),
+        row.driftAmount.toFixed(2),
+        row.driftDirection,
+        row.walletTotalReceived.toFixed(2),
+        row.expectedTotalReceived.toFixed(2),
+        row.receivedDrift.toFixed(2),
+        row.walletTotalGiven.toFixed(2),
+        row.expectedTotalGiven.toFixed(2),
+        row.givenDrift.toFixed(2),
+        String(row.relevantTxCount),
+        row.lastActivityAt
       ])
     ];
 
@@ -8903,6 +9015,7 @@ export default function Admin() {
                     <TabsTrigger value="safety-pool" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Safety Pool</TabsTrigger>
                     <TabsTrigger value="pin-fund-mismatch" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">PIN Fund Mismatch</TabsTrigger>
                     <TabsTrigger value="referral-income-mismatch" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Referral Income Mismatch</TabsTrigger>
+                    <TabsTrigger value="available-income-drift" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Available Income Drift</TabsTrigger>
                     <TabsTrigger value="duplicate-give-mismatch" className="data-[state=active]:bg-[#118bdd] text-xs sm:text-sm">Duplicate Give-Help</TabsTrigger>
                   </TabsList>
 
@@ -9754,6 +9867,141 @@ export default function Admin() {
                         </tbody>
                       </table>
                       {referralIncomeMismatchRows.length === 0 && <p className="text-center text-white/50 py-6">No referral income mismatch cases found.</p>}
+                    </div>
+                  </TabsContent>
+
+                  <TabsContent value="available-income-drift" className="space-y-4">
+                    <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-4">
+                      <p className="text-sm text-amber-200">
+                        Daily monitor for income-wallet drift. It compares each user&apos;s current available income against
+                        transaction-derived expected income and highlights mismatches that need review.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-3">
+                      <Input
+                        placeholder="User ID"
+                        value={availableIncomeDriftFilters.userId}
+                        onChange={(e) => setAvailableIncomeDriftFilters({ ...availableIncomeDriftFilters, userId: e.target.value.replace(/\D/g, '').slice(0, 7) })}
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                      <Input
+                        placeholder="Name"
+                        value={availableIncomeDriftFilters.name}
+                        onChange={(e) => setAvailableIncomeDriftFilters({ ...availableIncomeDriftFilters, name: e.target.value })}
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                      <Input
+                        placeholder="Sponsor ID"
+                        value={availableIncomeDriftFilters.sponsorId}
+                        onChange={(e) => setAvailableIncomeDriftFilters({ ...availableIncomeDriftFilters, sponsorId: e.target.value.replace(/\D/g, '').slice(0, 7) })}
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                      <Input
+                        placeholder="Sponsor Name"
+                        value={availableIncomeDriftFilters.sponsorName}
+                        onChange={(e) => setAvailableIncomeDriftFilters({ ...availableIncomeDriftFilters, sponsorName: e.target.value })}
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                      <Input
+                        placeholder="Min Absolute Drift"
+                        type="number"
+                        value={availableIncomeDriftFilters.minDrift}
+                        onChange={(e) => setAvailableIncomeDriftFilters({ ...availableIncomeDriftFilters, minDrift: e.target.value })}
+                        className="bg-[#1f2937] border-white/10 text-white"
+                      />
+                      <select
+                        value={availableIncomeDriftFilters.direction}
+                        onChange={(e) => setAvailableIncomeDriftFilters({ ...availableIncomeDriftFilters, direction: e.target.value })}
+                        className="px-3 h-10 bg-[#1f2937] border border-white/10 rounded-md text-white"
+                      >
+                        <option value="">All Directions</option>
+                        <option value="wallet_above_ledger">Wallet Above Ledger</option>
+                        <option value="wallet_below_ledger">Wallet Below Ledger</option>
+                      </select>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        className="border-cyan-400/40 text-cyan-300 hover:bg-cyan-400/10"
+                        onClick={() => exportAvailableIncomeDriftRows(availableIncomeDriftRows, 'available-income-drift')}
+                        disabled={availableIncomeDriftRows.length === 0}
+                      >
+                        <Download className="w-4 h-4 mr-2" />
+                        Export Drift Rows
+                      </Button>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Drift Cases</p>
+                        <p className="text-2xl font-bold text-white">{availableIncomeDriftRows.length}</p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Wallet Above Ledger</p>
+                        <p className="text-2xl font-bold text-rose-300">
+                          {availableIncomeDriftRows.filter((row) => row.driftDirection === 'wallet_above_ledger').length}
+                        </p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Wallet Below Ledger</p>
+                        <p className="text-2xl font-bold text-amber-300">
+                          {availableIncomeDriftRows.filter((row) => row.driftDirection === 'wallet_below_ledger').length}
+                        </p>
+                      </div>
+                      <div className="rounded-lg bg-[#1f2937] p-4">
+                        <p className="text-sm text-white/50">Net Drift (Wallet - Ledger)</p>
+                        <p className="text-2xl font-bold text-cyan-300">
+                          {formatCurrency(availableIncomeDriftRows.reduce((sum, row) => sum + (row.driftAmount || 0), 0))}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="overflow-x-auto admin-table-scroll">
+                      <table className="w-full admin-table">
+                        <thead>
+                          <tr className="border-b border-white/10">
+                            <th className="text-left py-2 px-3 text-white/60">User ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor ID</th>
+                            <th className="text-left py-2 px-3 text-white/60">Sponsor Name</th>
+                            <th className="text-left py-2 px-3 text-white/60">Wallet Income</th>
+                            <th className="text-left py-2 px-3 text-white/60">Expected Income</th>
+                            <th className="text-left py-2 px-3 text-white/60">Drift</th>
+                            <th className="text-left py-2 px-3 text-white/60">Direction</th>
+                            <th className="text-left py-2 px-3 text-white/60">Received Drift</th>
+                            <th className="text-left py-2 px-3 text-white/60">Given Drift</th>
+                            <th className="text-left py-2 px-3 text-white/60">Relevant Tx</th>
+                            <th className="text-left py-2 px-3 text-white/60">Last Activity</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {availableIncomeDriftRows.slice(0, 300).map((row) => (
+                            <tr key={row.internalUserId} className="border-b border-white/5">
+                              <td className="py-2 px-3 text-[#118bdd] font-mono">{row.userId}</td>
+                              <td className="py-2 px-3 text-white">{row.fullName}</td>
+                              <td className="py-2 px-3 text-white/60 font-mono">{row.sponsorUserId}</td>
+                              <td className="py-2 px-3 text-white/60">{row.sponsorName}</td>
+                              <td className="py-2 px-3 text-white/70">{formatCurrency(row.walletIncome)}</td>
+                              <td className="py-2 px-3 text-white/70">{formatCurrency(row.expectedIncome)}</td>
+                              <td className={`py-2 px-3 font-medium ${row.driftAmount >= 0 ? 'text-rose-300' : 'text-amber-300'}`}>
+                                {formatCurrency(row.driftAmount)}
+                              </td>
+                              <td className="py-2 px-3">
+                                <Badge className={row.driftDirection === 'wallet_above_ledger' ? 'bg-rose-500/20 text-rose-300' : 'bg-amber-500/20 text-amber-300'}>
+                                  {row.driftDirection === 'wallet_above_ledger' ? 'Wallet Above Ledger' : 'Wallet Below Ledger'}
+                                </Badge>
+                              </td>
+                              <td className={`py-2 px-3 ${row.receivedDrift >= 0 ? 'text-cyan-300' : 'text-orange-300'}`}>
+                                {formatCurrency(row.receivedDrift)}
+                              </td>
+                              <td className={`py-2 px-3 ${row.givenDrift >= 0 ? 'text-cyan-300' : 'text-orange-300'}`}>
+                                {formatCurrency(row.givenDrift)}
+                              </td>
+                              <td className="py-2 px-3 text-white/60">{row.relevantTxCount}</td>
+                              <td className="py-2 px-3 text-white/50 whitespace-nowrap">{formatDate(row.lastActivityAt)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {availableIncomeDriftRows.length === 0 && <p className="text-center text-white/50 py-6">No available-income drift cases found.</p>}
                     </div>
                   </TabsContent>
 

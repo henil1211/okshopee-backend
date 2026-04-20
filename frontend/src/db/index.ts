@@ -406,6 +406,26 @@ export interface FundTransferIntegrityMismatchRow {
   note: string;
 }
 
+export interface AvailableIncomeDriftMismatchRow {
+  internalUserId: string;
+  userId: string;
+  fullName: string;
+  sponsorUserId: string;
+  sponsorName: string;
+  walletIncome: number;
+  expectedIncome: number;
+  driftAmount: number;
+  driftDirection: 'wallet_above_ledger' | 'wallet_below_ledger';
+  walletTotalReceived: number;
+  expectedTotalReceived: number;
+  receivedDrift: number;
+  walletTotalGiven: number;
+  expectedTotalGiven: number;
+  givenDrift: number;
+  relevantTxCount: number;
+  lastActivityAt: string;
+}
+
 export type RemoteSyncState = 'synced' | 'syncing' | 'pending' | 'offline';
 
 export interface RemoteSyncStatus {
@@ -4096,6 +4116,79 @@ class Database {
     }
 
     return { scanned: targetIds.size, repaired };
+  }
+
+  static scanAvailableIncomeDriftMismatches(): AvailableIncomeDriftMismatchRow[] {
+    const round2 = (value: number): number => Math.round((Number(value) || 0) * 100) / 100;
+    const walletsByInternalId = new Map(this.getWallets().map((wallet) => [wallet.userId, wallet]));
+    const latestTxByInternalId = new Map<string, { timestamp: number; createdAt: string }>();
+
+    for (const tx of this.getTransactions()) {
+      const timestamp = this.getTransactionTime(tx);
+      const previous = latestTxByInternalId.get(tx.userId);
+      if (previous && previous.timestamp >= timestamp) continue;
+      latestTxByInternalId.set(tx.userId, {
+        timestamp,
+        createdAt: tx.completedAt || tx.createdAt || new Date().toISOString()
+      });
+    }
+
+    const rows: AvailableIncomeDriftMismatchRow[] = [];
+    for (const user of this.getUsers()) {
+      if (user.isAdmin) continue;
+      const wallet = walletsByInternalId.get(user.id);
+      if (!wallet) continue;
+
+      const computed = this.computeIncomeLedgerFromTransactions(user.id);
+      if (computed.relevantCount === 0) continue;
+
+      const walletIncome = round2(wallet.incomeWallet || 0);
+      const expectedIncome = round2(computed.incomeWallet || 0);
+      const driftAmount = round2(walletIncome - expectedIncome);
+
+      const walletTotalReceived = round2(wallet.totalReceived || 0);
+      const expectedTotalReceived = round2(computed.totalReceived || 0);
+      const receivedDrift = round2(walletTotalReceived - expectedTotalReceived);
+
+      const walletTotalGiven = round2(wallet.totalGiven || 0);
+      const expectedTotalGiven = round2(computed.totalGiven || 0);
+      const givenDrift = round2(walletTotalGiven - expectedTotalGiven);
+
+      const hasDrift = Math.abs(driftAmount) > 0.009
+        || Math.abs(receivedDrift) > 0.009
+        || Math.abs(givenDrift) > 0.009;
+      if (!hasDrift) continue;
+
+      const sponsor = user.sponsorId ? this.getUserByUserId(user.sponsorId) : undefined;
+      const lastActivity = latestTxByInternalId.get(user.id);
+      rows.push({
+        internalUserId: user.id,
+        userId: user.userId,
+        fullName: user.fullName,
+        sponsorUserId: user.sponsorId || '-',
+        sponsorName: sponsor?.fullName || '-',
+        walletIncome,
+        expectedIncome,
+        driftAmount,
+        driftDirection: driftAmount >= 0 ? 'wallet_above_ledger' : 'wallet_below_ledger',
+        walletTotalReceived,
+        expectedTotalReceived,
+        receivedDrift,
+        walletTotalGiven,
+        expectedTotalGiven,
+        givenDrift,
+        relevantTxCount: computed.relevantCount,
+        lastActivityAt: lastActivity?.createdAt || user.createdAt || new Date().toISOString()
+      });
+    }
+
+    return rows.sort((left, right) => {
+      const driftDiff = Math.abs(right.driftAmount) - Math.abs(left.driftAmount);
+      if (Math.abs(driftDiff) > 0.0001) return driftDiff;
+      const receivedDiff = Math.abs(right.receivedDrift) - Math.abs(left.receivedDrift);
+      if (Math.abs(receivedDiff) > 0.0001) return receivedDiff;
+      return String(left.userId || '').localeCompare(String(right.userId || ''));
+    });
   }
 
   static repairFundWalletConsistency(userId?: string): {
