@@ -503,25 +503,53 @@ async function fetchV2PinsForUser(user: User): Promise<Pin[]> {
 function appendMissingPinsForUser(userId: string, pinsToAppend: Pin[]): boolean {
   if (!userId || pinsToAppend.length === 0) return false;
   const currentPins = Database.getPins();
-  const ownedCodes = new Set(
-    currentPins
-      .filter((pin) => pin.ownerId === userId)
-      .map((pin) => String(pin.pinCode || '').trim().toUpperCase())
-  );
+  const dedupedPins: Pin[] = [];
+  const pinsByCode = new Map<string, Pin>();
+  let removedDuplicates = false;
+  for (const pin of currentPins) {
+    const code = String(pin.pinCode || '').trim().toUpperCase();
+    if (!code) {
+      dedupedPins.push(pin);
+      continue;
+    }
+    if (pinsByCode.has(code)) {
+      removedDuplicates = true;
+      continue;
+    }
+    pinsByCode.set(code, pin);
+    dedupedPins.push(pin);
+  }
 
   let appended = false;
+  let updated = false;
   for (const pin of pinsToAppend) {
     const pinCode = String(pin.pinCode || '').trim().toUpperCase();
-    if (!pinCode || ownedCodes.has(pinCode)) continue;
-    currentPins.push(pin);
-    ownedCodes.add(pinCode);
+    if (!pinCode) continue;
+
+    const existingPin = pinsByCode.get(pinCode);
+    if (existingPin) {
+      // Keep canonical ownership from persisted state; only refresh status fields when same owner.
+      if (String(existingPin.ownerId || '') === String(userId) && String(pin.ownerId || '') === String(userId)) {
+        const normalizedAmount = Number(pin.amount || existingPin.amount || 0);
+        const normalizedStatus = pin.status || existingPin.status;
+        if (existingPin.status !== normalizedStatus || Number(existingPin.amount || 0) !== normalizedAmount) {
+          existingPin.status = normalizedStatus;
+          existingPin.amount = normalizedAmount;
+          updated = true;
+        }
+      }
+      continue;
+    }
+
+    dedupedPins.push(pin);
+    pinsByCode.set(pinCode, pin);
     appended = true;
   }
 
-  if (appended) {
-    Database.savePins(currentPins);
+  if (appended || updated || removedDuplicates) {
+    Database.savePins(dedupedPins);
   }
-  return appended;
+  return appended || updated || removedDuplicates;
 }
 
 async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(

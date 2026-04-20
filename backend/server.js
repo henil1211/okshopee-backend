@@ -8089,12 +8089,24 @@ const server = createServer(async (req, res) => {
       }
 
       const nowIso = new Date().toISOString();
+      const transferredPinCode = String(selectedPin?.pinCode || '').trim().toUpperCase();
       pins[pinIndex] = {
         ...selectedPin,
         ownerId: String(toUser.id),
         transferredFrom: String(fromUser.id),
         transferredAt: nowIso
       };
+
+      if (transferredPinCode) {
+        await connection.execute(
+          `UPDATE v2_pins
+           SET status = 'transferred', updated_at = NOW(3)
+           WHERE pin_code = ? AND status IN ('generated', 'unused')`,
+          [transferredPinCode]
+        ).catch(() => {
+          // Best-effort legacy/v2 alignment; transfer should not fail if v2_pins row is absent.
+        });
+      }
 
       const transferRecord = {
         id: `pt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
