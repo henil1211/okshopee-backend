@@ -136,6 +136,7 @@ async function main() {
       failed: 0,
       processedContributions: 0,
       insertedPendingContributions: 0,
+      skippedSuspiciousFirstTwo: 0,
       usersWithoutPendingGive: 0,
       targetUsers: userCodes,
       results: []
@@ -152,6 +153,9 @@ async function main() {
         }
         if (summary.insertedPendingContribution) {
           report.insertedPendingContributions += 1;
+        }
+        if (summary.skippedDueToSuspiciousFirstTwo) {
+          report.skippedSuspiciousFirstTwo += 1;
         }
         const notes = Array.isArray(summary.notes) ? summary.notes.map((item) => String(item || '')) : [];
         if (notes.some((note) => note.toLowerCase().includes('no pending give found'))) {

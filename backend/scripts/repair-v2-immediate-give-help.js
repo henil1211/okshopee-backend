@@ -162,6 +162,59 @@ async function lockIncomeWalletByUserId(connection, userId) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
+async function loadLevelOneLockedContributionProfile(connection, beneficiaryUserId) {
+  const [rows] = await connection.execute(
+    `SELECT pc.id, pc.source_user_id, src.user_code AS source_user_code,
+            pc.amount_cents, pc.created_at
+     FROM v2_help_pending_contributions pc
+     LEFT JOIN v2_users src ON src.id = pc.source_user_id
+     WHERE pc.beneficiary_user_id = ?
+       AND pc.level_no = 1
+       AND pc.status = 'processed'
+       AND pc.reason = 'locked_for_give'
+     ORDER BY pc.created_at ASC, pc.id ASC
+     FOR UPDATE`,
+    [beneficiaryUserId]
+  );
+
+  const list = Array.isArray(rows) ? rows : [];
+  const firstContributionBySource = new Map();
+  const sourceCounts = new Map();
+  let rawLockedCents = 0;
+
+  for (const row of list) {
+    const sourceUserId = Number(row?.source_user_id || 0);
+    if (!Number.isFinite(sourceUserId) || sourceUserId <= 0) continue;
+    const amountCents = Math.max(0, Number(row?.amount_cents || 0));
+    rawLockedCents += amountCents;
+    sourceCounts.set(sourceUserId, Number(sourceCounts.get(sourceUserId) || 0) + 1);
+
+    if (!firstContributionBySource.has(sourceUserId)) {
+      firstContributionBySource.set(sourceUserId, {
+        amountCents,
+        sourceUserCode: normalizeUserCode(row?.source_user_code)
+      });
+    }
+  }
+
+  let dedupedLockedCents = 0;
+  const duplicateSources = [];
+  for (const [sourceUserId, entry] of firstContributionBySource.entries()) {
+    dedupedLockedCents += Math.max(0, Number(entry?.amountCents || 0));
+    if (Number(sourceCounts.get(sourceUserId) || 0) > 1) {
+      duplicateSources.push(entry?.sourceUserCode || String(sourceUserId));
+    }
+  }
+
+  return {
+    rawLockedRows: list.length,
+    rawLockedCents,
+    distinctContributors: firstContributionBySource.size,
+    dedupedLockedCents,
+    duplicateSources
+  };
+}
+
 async function loadSystemGlAccountForUpdate(connection, {
   accountCode,
   accountName,
@@ -316,11 +369,17 @@ async function main() {
   const summary = {
     sourceUserCode,
     apply: !dryRun,
+    sourcePendingGiveCents: 0,
     insertedPendingContribution: false,
     processedContribution: false,
     pendingContributionId: null,
     pendingAmountCents: 0,
     beneficiaryUserCode: null,
+    sourceLevel1LockedRows: 0,
+    sourceLevel1DistinctContributors: 0,
+    sourceLevel1RawLockedCents: 0,
+    sourceLevel1DedupedLockedCents: 0,
+    skippedDueToSuspiciousFirstTwo: false,
     settlementMode: null,
     ledgerTransactionId: null,
     notes: []
@@ -352,9 +411,58 @@ async function main() {
     }
 
     const pendingGiveCents = Number(sourceLevelState.pending_give_cents || 0);
-    summary.pendingAmountCents = pendingGiveCents;
+    summary.sourcePendingGiveCents = pendingGiveCents;
     if (pendingGiveCents <= 0) {
       summary.notes.push('No pending give found at source level 1; nothing to process.');
+      if (dryRun) {
+        await connection.rollback();
+      } else {
+        await connection.commit();
+      }
+      txOpen = false;
+      console.log(JSON.stringify(summary, null, 2));
+      return;
+    }
+
+    const levelOneProfile = await loadLevelOneLockedContributionProfile(connection, Number(sourceUser.id));
+    summary.sourceLevel1LockedRows = Number(levelOneProfile.rawLockedRows || 0);
+    summary.sourceLevel1DistinctContributors = Number(levelOneProfile.distinctContributors || 0);
+    summary.sourceLevel1RawLockedCents = Number(levelOneProfile.rawLockedCents || 0);
+    summary.sourceLevel1DedupedLockedCents = Number(levelOneProfile.dedupedLockedCents || 0);
+
+    if (summary.sourceLevel1DistinctContributors < 2) {
+      summary.skippedDueToSuspiciousFirstTwo = true;
+      summary.notes.push(
+        `Skipped immediate give: only ${summary.sourceLevel1DistinctContributors} distinct level-1 contributor(s); requires 2 distinct contributors.`
+      );
+      if (Array.isArray(levelOneProfile.duplicateSources) && levelOneProfile.duplicateSources.length > 0) {
+        summary.notes.push(`Duplicate contributor(s) detected at level 1: ${levelOneProfile.duplicateSources.join(', ')}`);
+      }
+      if (dryRun) {
+        await connection.rollback();
+      } else {
+        await connection.commit();
+      }
+      txOpen = false;
+      console.log(JSON.stringify(summary, null, 2));
+      return;
+    }
+
+    const safePendingGiveCents = Math.max(
+      0,
+      Number(levelOneProfile.dedupedLockedCents || 0) - Number(sourceLevelState.given_cents || 0)
+    );
+    const effectivePendingGiveCents = Math.min(pendingGiveCents, safePendingGiveCents);
+    summary.pendingAmountCents = effectivePendingGiveCents;
+
+    if (pendingGiveCents > safePendingGiveCents) {
+      summary.notes.push(
+        `Pending give capped by dedupe guard: state=${pendingGiveCents}, safe=${safePendingGiveCents}.`
+      );
+    }
+
+    if (effectivePendingGiveCents <= 0) {
+      summary.notes.push('No safe pending give remains after dedupe validation; nothing to process.');
       if (dryRun) {
         await connection.rollback();
       } else {
@@ -417,7 +525,7 @@ async function main() {
             (source_event_key, source_user_id, beneficiary_user_id, level_no, side, amount_cents, status, reason)
            VALUES
             (?, ?, ?, 2, 'unknown', ?, 'pending', 'repair_missing_pending_from_backfill')`,
-          [syntheticEventKey, sourceUser.id, beneficiaryUser.id, pendingGiveCents]
+          [syntheticEventKey, sourceUser.id, beneficiaryUser.id, effectivePendingGiveCents]
         );
 
         const [pendingRows] = await connection.execute(
@@ -446,7 +554,24 @@ async function main() {
       return;
     }
 
-    const contributionAmountCents = Number(pendingContribution.amount_cents || 0);
+    let contributionAmountCents = Number(pendingContribution.amount_cents || 0);
+
+    if (contributionAmountCents > effectivePendingGiveCents) {
+      if (dryRun) {
+        summary.notes.push(
+          `Would cap pending contribution amount from ${contributionAmountCents} to ${effectivePendingGiveCents} due to dedupe guard.`
+        );
+      } else {
+        await connection.execute(
+          `UPDATE v2_help_pending_contributions
+           SET amount_cents = ?
+           WHERE id = ? AND status = 'pending'`,
+          [effectivePendingGiveCents, pendingContribution.id]
+        );
+        contributionAmountCents = effectivePendingGiveCents;
+      }
+    }
+
     summary.pendingContributionId = Number(pendingContribution.id || 0) || null;
 
     if (pendingGiveCents < contributionAmountCents) {
