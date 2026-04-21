@@ -2154,6 +2154,26 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
     'read_v2_wallet_synthetic_locked_receives'
   );
 
+  const [syntheticEarningReceiveRows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT
+         COALESCE(SUM(pc.amount_cents), 0) AS synthetic_received_cents
+       FROM v2_help_pending_contributions pc
+       LEFT JOIN v2_ledger_entries income_le
+         ON income_le.ledger_txn_id = pc.processed_txn_id
+        AND income_le.user_id = pc.beneficiary_user_id
+        AND income_le.wallet_type = 'income'
+        AND income_le.entry_side = 'credit'
+       WHERE pc.beneficiary_user_id = ?
+         AND pc.status = 'processed'
+         AND pc.processed_txn_id IS NOT NULL
+         AND pc.reason IN ('locked_for_give', 'locked_for_qualification')
+         AND income_le.id IS NULL`,
+      [userId]
+    ),
+    'read_v2_wallet_synthetic_earnings'
+  );
+
   const balancesCents = {
     fund: 0,
     income: 0,
@@ -2181,6 +2201,9 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
   const lifetimeRow = Array.isArray(lifetimeRows) && lifetimeRows.length > 0 ? lifetimeRows[0] : null;
   const syntheticLockedReceiveRow = Array.isArray(syntheticLockedReceiveRows) && syntheticLockedReceiveRows.length > 0
     ? syntheticLockedReceiveRows[0]
+    : null;
+  const syntheticEarningReceiveRow = Array.isArray(syntheticEarningReceiveRows) && syntheticEarningReceiveRows.length > 0
+    ? syntheticEarningReceiveRows[0]
     : null;
   const lockedFirstTwoLifetimeCents = Number.isFinite(Number(lockRow?.locked_first_two_cents))
     ? Math.trunc(Number(lockRow.locked_first_two_cents))
@@ -2214,6 +2237,9 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
     : 0;
   const syntheticLockedReceiveCents = Number.isFinite(Number(syntheticLockedReceiveRow?.locked_receive_cents))
     ? Math.trunc(Number(syntheticLockedReceiveRow.locked_receive_cents))
+    : 0;
+  const syntheticEarningReceiveCents = Number.isFinite(Number(syntheticEarningReceiveRow?.synthetic_received_cents))
+    ? Math.trunc(Number(syntheticEarningReceiveRow.synthetic_received_cents))
     : 0;
   const legacyIncomeMetrics = await readLegacyIncomeMetricsByUserCodeWithPool(userCode);
   const legacyIncomeWalletCents = Number(legacyIncomeMetrics.incomeWalletCents || 0);
@@ -2252,7 +2278,7 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
       lockedFirstTwoLifetime: Math.max(0, lockedFirstTwoLifetimeCents)
     },
     lifetimeTotalsCents: {
-      totalReceived: Math.max(0, Math.max(totalReceivedFromLedgerCents + syntheticLockedReceiveCents, legacyTotalReceivedCents)),
+      totalReceived: Math.max(0, Math.max(totalReceivedFromLedgerCents + syntheticEarningReceiveCents, legacyTotalReceivedCents)),
       totalGiven: Math.max(0, Math.max(totalGivenFromLedgerCents, legacyTotalGivenCents))
     }
   };

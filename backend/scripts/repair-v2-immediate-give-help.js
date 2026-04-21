@@ -119,6 +119,7 @@ function usageAndExit() {
   console.log('Usage:');
   console.log('  node scripts/repair-v2-immediate-give-help.js --source-user-code 7497863 --dry-run');
   console.log('  node scripts/repair-v2-immediate-give-help.js --source-user-code 7497863 --apply');
+  console.log('  node scripts/repair-v2-immediate-give-help.js --source-user-code 7497863 --source-level-no 2 --dry-run');
   process.exit(1);
 }
 
@@ -162,19 +163,20 @@ async function lockIncomeWalletByUserId(connection, userId) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
-async function loadLevelOneLockedContributionProfile(connection, beneficiaryUserId) {
+async function loadLockedContributionProfile(connection, beneficiaryUserId, sourceLevelNo) {
+  const levelNo = Math.max(1, Number(sourceLevelNo || 1));
   const [rows] = await connection.execute(
     `SELECT pc.id, pc.source_user_id, src.user_code AS source_user_code,
             pc.amount_cents, pc.created_at
      FROM v2_help_pending_contributions pc
      LEFT JOIN v2_users src ON src.id = pc.source_user_id
      WHERE pc.beneficiary_user_id = ?
-       AND pc.level_no = 1
+       AND pc.level_no = ?
        AND pc.status = 'processed'
        AND pc.reason = 'locked_for_give'
      ORDER BY pc.created_at ASC, pc.id ASC
      FOR UPDATE`,
-    [beneficiaryUserId]
+    [beneficiaryUserId, levelNo]
   );
 
   const list = Array.isArray(rows) ? rows : [];
@@ -347,6 +349,7 @@ async function createHelpLedgerTransaction(connection, {
 
 async function main() {
   const sourceUserCode = normalizeUserCode(readArg('--source-user-code', ''));
+  const sourceLevelNo = Math.max(1, Math.min(10, Number(readArg('--source-level-no', '1')) || 1));
   const apply = hasFlag('--apply');
   const dryRun = hasFlag('--dry-run') || !apply;
 
@@ -368,6 +371,8 @@ async function main() {
 
   const summary = {
     sourceUserCode,
+    sourceLevelNo,
+    contributionLevelNo: sourceLevelNo + 1,
     apply: !dryRun,
     sourcePendingGiveCents: 0,
     insertedPendingContribution: false,
@@ -405,15 +410,15 @@ async function main() {
       throw new Error(`Source user not found in v2_users: ${sourceUserCode}`);
     }
 
-    const sourceLevelState = await lockHelpLevelState(connection, Number(sourceUser.id), 1);
+    const sourceLevelState = await lockHelpLevelState(connection, Number(sourceUser.id), sourceLevelNo);
     if (!sourceLevelState) {
-      throw new Error('Failed to lock source level 1 help state');
+      throw new Error(`Failed to lock source level ${sourceLevelNo} help state`);
     }
 
     const pendingGiveCents = Number(sourceLevelState.pending_give_cents || 0);
     summary.sourcePendingGiveCents = pendingGiveCents;
     if (pendingGiveCents <= 0) {
-      summary.notes.push('No pending give found at source level 1; nothing to process.');
+      summary.notes.push(`No pending give found at source level ${sourceLevelNo}; nothing to process.`);
       if (dryRun) {
         await connection.rollback();
       } else {
@@ -424,19 +429,19 @@ async function main() {
       return;
     }
 
-    const levelOneProfile = await loadLevelOneLockedContributionProfile(connection, Number(sourceUser.id));
-    summary.sourceLevel1LockedRows = Number(levelOneProfile.rawLockedRows || 0);
-    summary.sourceLevel1DistinctContributors = Number(levelOneProfile.distinctContributors || 0);
-    summary.sourceLevel1RawLockedCents = Number(levelOneProfile.rawLockedCents || 0);
-    summary.sourceLevel1DedupedLockedCents = Number(levelOneProfile.dedupedLockedCents || 0);
+    const levelProfile = await loadLockedContributionProfile(connection, Number(sourceUser.id), sourceLevelNo);
+    summary.sourceLevel1LockedRows = Number(levelProfile.rawLockedRows || 0);
+    summary.sourceLevel1DistinctContributors = Number(levelProfile.distinctContributors || 0);
+    summary.sourceLevel1RawLockedCents = Number(levelProfile.rawLockedCents || 0);
+    summary.sourceLevel1DedupedLockedCents = Number(levelProfile.dedupedLockedCents || 0);
 
     if (summary.sourceLevel1DistinctContributors < 2) {
       summary.skippedDueToSuspiciousFirstTwo = true;
       summary.notes.push(
-        `Skipped immediate give: only ${summary.sourceLevel1DistinctContributors} distinct level-1 contributor(s); requires 2 distinct contributors.`
+        `Skipped immediate give: only ${summary.sourceLevel1DistinctContributors} distinct level-${sourceLevelNo} contributor(s); requires 2 distinct contributors.`
       );
-      if (Array.isArray(levelOneProfile.duplicateSources) && levelOneProfile.duplicateSources.length > 0) {
-        summary.notes.push(`Duplicate contributor(s) detected at level 1: ${levelOneProfile.duplicateSources.join(', ')}`);
+      if (Array.isArray(levelProfile.duplicateSources) && levelProfile.duplicateSources.length > 0) {
+        summary.notes.push(`Duplicate contributor(s) detected at level ${sourceLevelNo}: ${levelProfile.duplicateSources.join(', ')}`);
       }
       if (dryRun) {
         await connection.rollback();
@@ -450,7 +455,7 @@ async function main() {
 
     const safePendingGiveCents = Math.max(
       0,
-      Number(levelOneProfile.dedupedLockedCents || 0) - Number(sourceLevelState.given_cents || 0)
+      Number(levelProfile.dedupedLockedCents || 0) - Number(sourceLevelState.given_cents || 0)
     );
     const effectivePendingGiveCents = Math.min(pendingGiveCents, safePendingGiveCents);
     summary.pendingAmountCents = effectivePendingGiveCents;
@@ -473,7 +478,7 @@ async function main() {
       return;
     }
 
-    const contributionLevelNo = 2;
+    const contributionLevelNo = sourceLevelNo + 1;
     const beneficiaryResolution = await resolveAncestorUserCode(connection, sourceUserCode, contributionLevelNo);
     const beneficiaryUserCode = beneficiaryResolution.ancestorUserCode;
     if (!beneficiaryUserCode) {
@@ -508,24 +513,24 @@ async function main() {
        FROM v2_help_pending_contributions
        WHERE source_user_id = ?
          AND beneficiary_user_id = ?
-         AND level_no = 2
+         AND level_no = ?
          AND status = 'pending'
        ORDER BY id ASC
        LIMIT 1
        FOR UPDATE`,
-      [sourceUser.id, beneficiaryUser.id]
+      [sourceUser.id, beneficiaryUser.id, contributionLevelNo]
     );
 
     let pendingContribution = Array.isArray(existingPendingRows) ? existingPendingRows[0] : null;
     if (!pendingContribution) {
-      const syntheticEventKey = `repair_pending_${sourceUserCode}_L2_${Date.now()}`.slice(0, 180);
+      const syntheticEventKey = `repair_pending_${sourceUserCode}_L${contributionLevelNo}_${Date.now()}`.slice(0, 180);
       if (!dryRun) {
         await connection.execute(
           `INSERT INTO v2_help_pending_contributions
             (source_event_key, source_user_id, beneficiary_user_id, level_no, side, amount_cents, status, reason)
            VALUES
-            (?, ?, ?, 2, 'unknown', ?, 'pending', 'repair_missing_pending_from_backfill')`,
-          [syntheticEventKey, sourceUser.id, beneficiaryUser.id, effectivePendingGiveCents]
+            (?, ?, ?, ?, 'unknown', ?, 'pending', 'repair_missing_pending_from_backfill')`,
+          [syntheticEventKey, sourceUser.id, beneficiaryUser.id, contributionLevelNo, effectivePendingGiveCents]
         );
 
         const [pendingRows] = await connection.execute(
@@ -534,12 +539,12 @@ async function main() {
            FROM v2_help_pending_contributions
            WHERE source_user_id = ?
              AND beneficiary_user_id = ?
-             AND level_no = 2
+             AND level_no = ?
              AND status = 'pending'
            ORDER BY id DESC
            LIMIT 1
            FOR UPDATE`,
-          [sourceUser.id, beneficiaryUser.id]
+          [sourceUser.id, beneficiaryUser.id, contributionLevelNo]
         );
         pendingContribution = Array.isArray(pendingRows) ? pendingRows[0] : null;
       }
@@ -547,7 +552,7 @@ async function main() {
     }
 
     if (!pendingContribution) {
-      summary.notes.push('Dry run: missing pending level 2 row would be inserted and processed.');
+      summary.notes.push(`Dry run: missing pending level ${contributionLevelNo} row would be inserted and processed.`);
       await connection.rollback();
       txOpen = false;
       console.log(JSON.stringify(summary, null, 2));
@@ -576,7 +581,7 @@ async function main() {
 
     if (pendingGiveCents < contributionAmountCents) {
       summary.notes.push(
-        `Insufficient pending_give_cents at source level 1: pending=${pendingGiveCents}, needed=${contributionAmountCents}`
+        `Insufficient pending_give_cents at source level ${sourceLevelNo}: pending=${pendingGiveCents}, needed=${contributionAmountCents}`
       );
       if (dryRun) {
         await connection.rollback();
@@ -596,7 +601,7 @@ async function main() {
       return;
     }
 
-    // Consume pending give from source level 1 for level 2 contribution.
+    // Consume pending give from selected source level for next-level contribution.
     const nextSourceEventSeq = Number(sourceLevelState.last_event_seq || 0) + 1;
     const nextSourcePending = pendingGiveCents - contributionAmountCents;
     const nextSourceGiven = Number(sourceLevelState.given_cents || 0) + contributionAmountCents;
@@ -611,15 +616,15 @@ async function main() {
     );
 
     const qualificationContext = await loadLegacyHelpQualificationContext(connection);
-    const beneficiaryLevelState = await lockHelpLevelState(connection, Number(beneficiaryUser.id), 2);
+    const beneficiaryLevelState = await lockHelpLevelState(connection, Number(beneficiaryUser.id), contributionLevelNo);
     if (!beneficiaryLevelState) {
-      throw new Error('Failed to lock beneficiary level 2 help state');
+      throw new Error(`Failed to lock beneficiary level ${contributionLevelNo} help state`);
     }
 
     const decision = computeV2HelpSettlementDecision({
       receiveCountBefore: Number(beneficiaryLevelState.receive_count || 0),
       safetyDeductedCents: Number(beneficiaryLevelState.safety_deducted_cents || 0),
-      isQualifiedForLevel: isQualifiedForLevel(qualificationContext, beneficiaryUser.user_code, 2),
+      isQualifiedForLevel: isQualifiedForLevel(qualificationContext, beneficiaryUser.user_code, contributionLevelNo),
       amountCents: contributionAmountCents,
       lockedQualificationCents: Number(beneficiaryLevelState.locked_qualification_cents || 0)
     });
@@ -648,20 +653,20 @@ async function main() {
     });
 
     const summaryDescription = settlementMode === 'locked_for_give'
-      ? `Locked first-two help level 2 for ${beneficiaryUser.user_code}`
+      ? `Locked first-two help level ${contributionLevelNo} for ${beneficiaryUser.user_code}`
       : settlementMode === 'locked_for_qualification'
-        ? `Locked receive help level 2 for ${beneficiaryUser.user_code}`
+        ? `Locked receive help level ${contributionLevelNo} for ${beneficiaryUser.user_code}`
         : settlementMode === 'safety_pool_diversion'
-          ? `5th help diversion level 2 for ${beneficiaryUser.user_code}`
+          ? `5th help diversion level ${contributionLevelNo} for ${beneficiaryUser.user_code}`
           : qualificationReleaseCents > 0
-            ? `Released locked receive + help credit level 2 for ${beneficiaryUser.user_code}`
-            : `Help credit level 2 for ${beneficiaryUser.user_code}`;
+            ? `Released locked receive + help credit level ${contributionLevelNo} for ${beneficiaryUser.user_code}`
+            : `Help credit level ${contributionLevelNo} for ${beneficiaryUser.user_code}`;
     const ledgerTransactionTotalCents = settlementMode === 'income_credit_with_release'
       ? incomeCreditCents
       : contributionAmountCents;
 
     const idempotencyKey = `repair_immediate_${sourceUserCode}_${Date.now()}`.slice(0, 120);
-    const eventKey = `HELP:repair_immediate:${sourceUserCode}:${beneficiaryUser.user_code}:level2`.slice(0, 180);
+    const eventKey = `HELP:repair_immediate:${sourceUserCode}:${beneficiaryUser.user_code}:level${contributionLevelNo}`.slice(0, 180);
 
     const { txUuid, ledgerTxnId } = await createHelpLedgerTransaction(connection, {
       idempotencyKey,
