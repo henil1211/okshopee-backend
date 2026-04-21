@@ -737,8 +737,29 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
     return sum;
   }, 0) * 100) / 100);
 
-  if (derivedLockedIncomeFromTx > Number(wallet.lockedIncomeWallet || 0)) {
-    wallet.lockedIncomeWallet = derivedLockedIncomeFromTx;
+  const backendLockedQualification = Math.max(0, Number(walletData.lockedForQualificationCents || 0) / 100);
+  const projectedLockedIncome = Math.max(0, Math.max(derivedLockedIncomeFromTx, backendLockedQualification));
+  const hasLockedGiveConsumeSignal = v2Transactions.some((tx) => {
+    if (String(tx.type || '').toLowerCase() !== 'give_help') return false;
+    return String(tx.description || '').toLowerCase().includes('from locked income');
+  });
+  const hasLockedIncomeSignal = v2Transactions.some((tx) => {
+    const txType = String(tx.type || '').toLowerCase();
+    if (txType === 'give_help') {
+      return String(tx.description || '').toLowerCase().includes('from locked income');
+    }
+    if (txType !== 'receive_help') return false;
+    const desc = String(tx.description || '').toLowerCase();
+    return desc.includes('locked first-two help')
+      || desc.includes('locked receive help')
+      || desc.startsWith('released locked receive help');
+  });
+
+  if (hasLockedGiveConsumeSignal) {
+    wallet.lockedIncomeWallet = Math.max(0, Math.min(Number(wallet.lockedIncomeWallet || 0), projectedLockedIncome));
+    wallet.giveHelpLocked = Math.max(0, Math.min(Number(wallet.giveHelpLocked || 0), Number(wallet.lockedIncomeWallet || 0)));
+  } else if (hasLockedIncomeSignal && projectedLockedIncome > Number(wallet.lockedIncomeWallet || 0)) {
+    wallet.lockedIncomeWallet = projectedLockedIncome;
   }
 
   const totalReceivedFromTx = v2Transactions.reduce((sum, tx) => {
