@@ -2127,6 +2127,7 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
        WHERE pc.beneficiary_user_id = ?
          AND pc.status = 'processed'
          AND pc.processed_txn_id IS NOT NULL
+         AND pc.reason = 'locked_for_qualification'
          AND income_le.id IS NULL`,
       [userId]
     ),
@@ -2615,6 +2616,7 @@ async function readV2LockedIncomeSnapshotForMutation(connection, userId, userCod
      WHERE pc.beneficiary_user_id = ?
        AND pc.status = 'processed'
        AND pc.processed_txn_id IS NOT NULL
+       AND pc.reason = 'locked_for_qualification'
        AND income_le.id IS NULL
      FOR UPDATE`,
     [userId]
