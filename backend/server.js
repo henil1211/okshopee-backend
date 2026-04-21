@@ -4758,27 +4758,35 @@ async function applyV2HelpContributionSettlement(connection, {
   );
 
   let autoGiveEnqueued = null;
-  // New rule: each first-two lock should immediately queue an upstream give.
-  // This makes 1st + 2nd receives at a level auto-give without waiting for future events.
-  if (settlementMode === 'locked_for_give' && lockFirstTwoCents > 0 && levelNo < 10) {
+  // Aggregate Give Logic: wait for the 2nd receive before sending the total to the upline.
+  // This satisfies the user's requirement of 1 aggregated transaction rather than 2 split ones.
+  if (settlementMode === 'locked_for_give' && nextReceiveCount === 2 && levelNo < 10) {
     const autoGiveTarget = await resolveV2ImmediateUplineForAutoGive(connection, beneficiaryUser.user_code);
     if (autoGiveTarget?.beneficiaryUserId) {
-      const autoGiveEventKey = `AUTO_GIVE:${pendingContribution.id}:${nextReceiveCount}`.slice(0, 180);
-      await upsertV2HelpPendingContribution(connection, {
-        sourceEventKey: autoGiveEventKey,
-        sourceUserId: beneficiaryUser.id,
-        beneficiaryUserId: autoGiveTarget.beneficiaryUserId,
-        levelNo: levelNo + 1,
-        side: autoGiveTarget.side,
-        amountCents: lockFirstTwoCents
-      });
+      const autoGiveEventKey = `AUTO_GIVE:${beneficiaryUser.id}:${levelNo}:AGGREGATE`.slice(0, 180);
+      
+      // Calculate how much is still needed to reach the target upgrade amount.
+      // Usually nextLockedFirstTwo is $10. If they already gave $0, they give $10.
+      // If they already gave $5 (from old logic), they give the remaining $5.
+      const aggregateAmountCents = Math.max(0, nextLockedFirstTwo - Number(beneficiaryState.given_cents || 0));
+      
+      if (aggregateAmountCents > 0) {
+        await upsertV2HelpPendingContribution(connection, {
+          sourceEventKey: autoGiveEventKey,
+          sourceUserId: beneficiaryUser.id,
+          beneficiaryUserId: autoGiveTarget.beneficiaryUserId,
+          levelNo: levelNo + 1,
+          side: autoGiveTarget.side,
+          amountCents: aggregateAmountCents
+        });
 
-      autoGiveEnqueued = {
-        sourceUserCode: beneficiaryUser.user_code,
-        beneficiaryUserCode: autoGiveTarget.beneficiaryUserCode,
-        levelNo: levelNo + 1,
-        amountCents: lockFirstTwoCents
-      };
+        autoGiveEnqueued = {
+          sourceUserCode: beneficiaryUser.user_code,
+          beneficiaryUserCode: autoGiveTarget.beneficiaryUserCode,
+          levelNo: levelNo + 1,
+          amountCents: aggregateAmountCents
+        };
+      }
     }
   }
 

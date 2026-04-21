@@ -217,6 +217,20 @@ async function loadLockedContributionProfile(connection, beneficiaryUserId, sour
   };
 }
 
+async function loadActualGivenCents(connection, sourceUserId, contributionLevelNo) {
+  const [rows] = await connection.execute(
+    `SELECT COALESCE(SUM(amount_cents), 0) AS total_cents
+     FROM v2_help_pending_contributions
+     WHERE source_user_id = ?
+       AND level_no = ?
+       AND status IN ('processed', 'pending')
+     FOR UPDATE`,
+    [sourceUserId, contributionLevelNo]
+  );
+  const list = Array.isArray(rows) ? rows : [];
+  return Number(list[0]?.total_cents || 0);
+}
+
 async function loadSystemGlAccountForUpdate(connection, {
   accountCode,
   accountName,
@@ -442,9 +456,21 @@ async function main() {
       return;
     }
 
+    const stateGivenCents = Number(sourceLevelState.given_cents || 0);
+    const contributionLevelNo = sourceLevelNo + 1;
+    const historyGivenCents = await loadActualGivenCents(connection, Number(sourceUser.id), contributionLevelNo);
+
+    let effectiveAlreadyGivenCents = stateGivenCents;
+    if (historyGivenCents < stateGivenCents) {
+      summary.notes.push(
+        `History/State mismatch at source level ${sourceLevelNo}: state_given=${stateGivenCents}, history_given=${historyGivenCents}. Overriding with history.`
+      );
+      effectiveAlreadyGivenCents = historyGivenCents;
+    }
+
     const safePendingGiveCents = Math.max(
       0,
-      Number(levelProfile.dedupedLockedCents || 0) - Number(sourceLevelState.given_cents || 0)
+      Number(levelProfile.dedupedLockedCents || 0) - effectiveAlreadyGivenCents
     );
     const effectivePendingGiveCents = safePendingGiveCents;
     summary.pendingAmountCents = effectivePendingGiveCents;
@@ -473,7 +499,7 @@ async function main() {
       return;
     }
 
-    const contributionLevelNo = sourceLevelNo + 1;
+    // const contributionLevelNo = sourceLevelNo + 1; // moved up
     const beneficiaryResolution = await resolveAncestorUserCode(connection, sourceUserCode, contributionLevelNo);
     const beneficiaryUserCode = beneficiaryResolution.ancestorUserCode;
     if (!beneficiaryUserCode) {
@@ -599,7 +625,7 @@ async function main() {
     // Consume pending give from selected source level for next-level contribution.
     const nextSourceEventSeq = Number(sourceLevelState.last_event_seq || 0) + 1;
     const nextSourcePending = Math.max(0, effectivePendingGiveCents - contributionAmountCents);
-    const nextSourceGiven = Number(sourceLevelState.given_cents || 0) + contributionAmountCents;
+    const nextSourceGiven = effectiveAlreadyGivenCents + contributionAmountCents;
     await connection.execute(
       `UPDATE v2_help_level_state
        SET pending_give_cents = ?,
