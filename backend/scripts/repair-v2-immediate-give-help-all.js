@@ -77,33 +77,101 @@ function runSingleUserRepair({ sourceUserCode, apply }) {
   });
 }
 
-async function loadCandidateUserCodes(connection, limit, explicitUserCodes = []) {
+async function loadCandidateUsers(connection, limit, explicitUserCodes = []) {
   if (explicitUserCodes.length > 0) {
-    return explicitUserCodes;
+    return explicitUserCodes.map((userCode) => ({
+      userCode,
+      candidateReasons: ['explicit_user_codes'],
+      pendingGiveCents: 0,
+      impliedPendingGiveCents: 0,
+      pendingLevel2Rows: 0
+    }));
   }
 
   const safeLimit = Math.max(1, Math.min(5000, Number(limit || 500)));
   const [rows] = await connection.execute(
-    `SELECT u.user_code
-     FROM v2_help_level_state hs
-     INNER JOIN v2_users u ON u.id = hs.user_id
-     WHERE hs.level_no = 1
-       AND hs.pending_give_cents > 0
-       AND u.status = 'active'
-     ORDER BY hs.pending_give_cents DESC, hs.updated_at ASC
+    `SELECT
+       u.user_code,
+       COALESCE(hs.pending_give_cents, 0) AS pending_give_cents,
+       COALESCE(hs.given_cents, 0) AS given_cents,
+       COALESCE(l1.distinct_sources, 0) AS distinct_sources,
+       COALESCE(l1.total_locked_cents, 0) AS total_locked_cents,
+       COALESCE(p2.pending_rows, 0) AS pending_level2_rows,
+       COALESCE(p2.pending_cents, 0) AS pending_level2_cents,
+       GREATEST(0, COALESCE(l1.total_locked_cents, 0) - COALESCE(hs.given_cents, 0)) AS implied_pending_give_cents
+     FROM v2_users u
+     LEFT JOIN v2_help_level_state hs
+       ON hs.user_id = u.id
+      AND hs.level_no = 1
+     LEFT JOIN (
+       SELECT
+         pc.beneficiary_user_id AS user_id,
+         COUNT(DISTINCT pc.source_user_id) AS distinct_sources,
+         COALESCE(SUM(pc.amount_cents), 0) AS total_locked_cents
+       FROM v2_help_pending_contributions pc
+       WHERE pc.level_no = 1
+         AND pc.status = 'processed'
+         AND pc.reason = 'locked_for_give'
+       GROUP BY pc.beneficiary_user_id
+     ) l1 ON l1.user_id = u.id
+     LEFT JOIN (
+       SELECT
+         pc.source_user_id AS user_id,
+         COUNT(*) AS pending_rows,
+         COALESCE(SUM(pc.amount_cents), 0) AS pending_cents
+       FROM v2_help_pending_contributions pc
+       WHERE pc.level_no = 2
+         AND pc.status = 'pending'
+       GROUP BY pc.source_user_id
+     ) p2 ON p2.user_id = u.id
+     WHERE u.status = 'active'
+       AND (
+         COALESCE(hs.pending_give_cents, 0) > 0
+         OR (
+           COALESCE(l1.distinct_sources, 0) >= 2
+           AND GREATEST(0, COALESCE(l1.total_locked_cents, 0) - COALESCE(hs.given_cents, 0)) > 0
+         )
+         OR COALESCE(p2.pending_rows, 0) > 0
+       )
+     ORDER BY
+       GREATEST(
+         COALESCE(hs.pending_give_cents, 0),
+         GREATEST(0, COALESCE(l1.total_locked_cents, 0) - COALESCE(hs.given_cents, 0)),
+         COALESCE(p2.pending_cents, 0)
+       ) DESC,
+       u.created_at ASC
      LIMIT ?`,
     [safeLimit]
   );
 
   const list = Array.isArray(rows) ? rows : [];
-  const unique = new Set();
+  const users = [];
+  const seen = new Set();
   for (const row of list) {
-    const code = normalizeUserCode(row?.user_code);
-    if (!code) continue;
-    unique.add(code);
+    const userCode = normalizeUserCode(row?.user_code);
+    if (!userCode || seen.has(userCode)) continue;
+    seen.add(userCode);
+
+    const pendingGiveCents = Math.max(0, Number(row?.pending_give_cents || 0));
+    const impliedPendingGiveCents = Math.max(0, Number(row?.implied_pending_give_cents || 0));
+    const pendingLevel2Rows = Math.max(0, Number(row?.pending_level2_rows || 0));
+    const distinctSources = Math.max(0, Number(row?.distinct_sources || 0));
+
+    const candidateReasons = [];
+    if (pendingGiveCents > 0) candidateReasons.push('level1_pending_give');
+    if (impliedPendingGiveCents > 0 && distinctSources >= 2) candidateReasons.push('locked_first_two_implied_pending');
+    if (pendingLevel2Rows > 0) candidateReasons.push('pending_level2_rows');
+
+    users.push({
+      userCode,
+      candidateReasons,
+      pendingGiveCents,
+      impliedPendingGiveCents,
+      pendingLevel2Rows
+    });
   }
 
-  return Array.from(unique);
+  return users;
 }
 
 async function main() {
@@ -127,7 +195,8 @@ async function main() {
   let connection;
   try {
     connection = await pool.getConnection();
-    const userCodes = await loadCandidateUserCodes(connection, limitArg, explicitUserCodes);
+    const candidateUsers = await loadCandidateUsers(connection, limitArg, explicitUserCodes);
+    const userCodes = candidateUsers.map((item) => item.userCode);
 
     const report = {
       mode: dryRun ? 'dry-run' : 'apply',
@@ -139,6 +208,7 @@ async function main() {
       skippedSuspiciousFirstTwo: 0,
       usersWithoutPendingGive: 0,
       targetUsers: userCodes,
+      candidateUsers,
       results: []
     };
 
