@@ -4549,10 +4549,13 @@ async function applyV2HelpContributionSettlement(connection, {
   usersById
 }) {
   const beneficiaryUser = usersById.get(Number(pendingContribution.beneficiary_user_id)) || null;
+  const sourceUser = usersById.get(Number(pendingContribution.source_user_id)) || null;
+  const sourceLabel = sourceUser ? `${sourceUser.full_name || sourceUser.user_code} (${sourceUser.user_code})` : `User ${pendingContribution.source_user_id}`;
+
   if (!beneficiaryUser || String(beneficiaryUser.status) !== 'active') {
     const amountCents = Number(pendingContribution.amount_cents);
     const levelNo = Number(pendingContribution.level_no);
-    const holdDescription = `Help hold level ${levelNo} for inactive beneficiary`;
+    const holdDescription = `Help hold level ${levelNo} from ${sourceLabel} for inactive beneficiary`;
     const { txUuid, ledgerTxnId } = await createV2HelpLedgerTransaction(connection, {
       idempotencyKey,
       actorUserId,
@@ -4613,14 +4616,14 @@ async function applyV2HelpContributionSettlement(connection, {
   const divertedSafetyCents = Number(decision.divertedSafetyCents || 0);
 
   const summaryDescription = settlementMode === 'locked_for_give'
-    ? `Locked first-two help level ${levelNo} for ${beneficiaryUser.user_code}`
+    ? `Locked first-two help level ${levelNo} from ${sourceLabel}`
     : settlementMode === 'locked_for_qualification'
-      ? `Locked receive help level ${levelNo} for ${beneficiaryUser.user_code}`
+      ? `Locked receive help level ${levelNo} from ${sourceLabel}`
       : settlementMode === 'safety_pool_diversion'
-        ? `5th help diversion level ${levelNo} for ${beneficiaryUser.user_code}`
+        ? `5th help diversion level ${levelNo} from ${sourceLabel}`
         : qualificationReleaseCents > 0
-          ? `Released locked receive + help credit level ${levelNo} for ${beneficiaryUser.user_code}`
-          : `Help credit level ${levelNo} for ${beneficiaryUser.user_code}`;
+          ? `Released locked receive + help credit level ${levelNo} from ${sourceLabel}`
+          : `Help credit level ${levelNo} from ${sourceLabel}`;
   const ledgerTransactionTotalCents = settlementMode === 'income_credit_with_release'
     ? incomeCreditCents
     : amountCents;
@@ -4766,9 +4769,12 @@ async function applyV2HelpContributionSettlement(connection, {
       const autoGiveEventKey = `AUTO_GIVE:${beneficiaryUser.id}:${levelNo}:AGGREGATE`.slice(0, 180);
       
       // Calculate how much is still needed to reach the target upgrade amount.
-      // Usually nextLockedFirstTwo is $10. If they already gave $0, they give $10.
-      // If they already gave $5 (from old logic), they give the remaining $5.
-      const aggregateAmountCents = Math.max(0, nextLockedFirstTwo - Number(beneficiaryState.given_cents || 0));
+      // We explicitly skip the Level 1 "Activation" help currently in given_cents,
+      // as Level 1 activation is NOT part of the Level 2 upgrade goal.
+      // Target for upgrade help is nextLockedFirstTwo (usually $10).
+      
+      // We only subtract helps given FOR THE SAME LEVEL or intended for this upgrade.
+      const aggregateAmountCents = nextLockedFirstTwo; 
       
       if (aggregateAmountCents > 0) {
         await upsertV2HelpPendingContribution(connection, {

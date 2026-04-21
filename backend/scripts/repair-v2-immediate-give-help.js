@@ -412,7 +412,7 @@ async function main() {
     txOpen = true;
 
     const [sourceRows] = await connection.execute(
-      `SELECT id, user_code, status
+      `SELECT id, user_code, full_name, status
        FROM v2_users
        WHERE user_code = ?
        LIMIT 1
@@ -438,14 +438,16 @@ async function main() {
     summary.sourceLevel1RawLockedCents = Number(levelProfile.rawLockedCents || 0);
     summary.sourceLevel1DedupedLockedCents = Number(levelProfile.dedupedLockedCents || 0);
 
-    if (summary.sourceLevel1DistinctContributors < 2) {
+    const contributionLevelNo = sourceLevelNo + 1;
+    const targetLevelState = await lockHelpLevelState(connection, Number(sourceUser.id), contributionLevelNo);
+    const stateGivenCents = Number(targetLevelState?.given_cents || 0);
+    const historyGivenCents = await loadActualGivenCents(connection, Number(sourceUser.id), contributionLevelNo);
+
+    if (summary.sourceLevel1DistinctContributors < 2 && contributionLevelNo > 1) {
       summary.skippedDueToSuspiciousFirstTwo = true;
       summary.notes.push(
         `Skipped immediate give: only ${summary.sourceLevel1DistinctContributors} distinct level-${sourceLevelNo} contributor(s); requires 2 distinct contributors.`
       );
-      if (Array.isArray(levelProfile.duplicateSources) && levelProfile.duplicateSources.length > 0) {
-        summary.notes.push(`Duplicate contributor(s) detected at level ${sourceLevelNo}: ${levelProfile.duplicateSources.join(', ')}`);
-      }
       if (dryRun) {
         await connection.rollback();
       } else {
@@ -456,21 +458,9 @@ async function main() {
       return;
     }
 
-    const stateGivenCents = Number(sourceLevelState.given_cents || 0);
-    const contributionLevelNo = sourceLevelNo + 1;
-    const historyGivenCents = await loadActualGivenCents(connection, Number(sourceUser.id), contributionLevelNo);
-
-    let effectiveAlreadyGivenCents = stateGivenCents;
-    if (historyGivenCents < stateGivenCents) {
-      summary.notes.push(
-        `History/State mismatch at source level ${sourceLevelNo}: state_given=${stateGivenCents}, history_given=${historyGivenCents}. Overriding with history.`
-      );
-      effectiveAlreadyGivenCents = historyGivenCents;
-    }
-
     const safePendingGiveCents = Math.max(
       0,
-      Number(levelProfile.dedupedLockedCents || 0) - effectiveAlreadyGivenCents
+      Number(levelProfile.dedupedLockedCents || 0) - stateGivenCents
     );
     const effectivePendingGiveCents = safePendingGiveCents;
     summary.pendingAmountCents = effectivePendingGiveCents;
@@ -488,7 +478,7 @@ async function main() {
     }
 
     if (effectivePendingGiveCents <= 0) {
-      summary.notes.push(`No safe pending give available at source level ${sourceLevelNo}; nothing to process.`);
+      summary.notes.push(`No safe pending give available at target level ${contributionLevelNo}; nothing to process.`);
       if (dryRun) {
         await connection.rollback();
       } else {
@@ -499,7 +489,6 @@ async function main() {
       return;
     }
 
-    // const contributionLevelNo = sourceLevelNo + 1; // moved up
     const beneficiaryResolution = await resolveAncestorUserCode(connection, sourceUserCode, contributionLevelNo);
     const beneficiaryUserCode = beneficiaryResolution.ancestorUserCode;
     if (!beneficiaryUserCode) {
@@ -515,7 +504,7 @@ async function main() {
     }
 
     const [beneficiaryRows] = await connection.execute(
-      `SELECT id, user_code, status
+      `SELECT id, user_code, full_name, status
        FROM v2_users
        WHERE user_code = ?
        LIMIT 1
@@ -602,7 +591,7 @@ async function main() {
 
     if (effectivePendingGiveCents < contributionAmountCents) {
       summary.notes.push(
-        `Insufficient safe pending_give_cents at source level ${sourceLevelNo}: safe=${effectivePendingGiveCents}, needed=${contributionAmountCents}`
+        `Insufficient safe pending_give_cents for level ${contributionLevelNo}: safe=${effectivePendingGiveCents}, needed=${contributionAmountCents}`
       );
       if (dryRun) {
         await connection.rollback();
@@ -615,25 +604,34 @@ async function main() {
     }
 
     if (dryRun) {
-      summary.notes.push(`Would consume ${contributionAmountCents} pending give from ${sourceUserCode} and process pending contribution.`);
+      summary.notes.push(`Would consume ${contributionAmountCents} for upgrade and process pending contribution.`);
       await connection.rollback();
       txOpen = false;
       console.log(JSON.stringify(summary, null, 2));
       return;
     }
 
-    // Consume pending give from selected source level for next-level contribution.
+    // Consume pending give from source level for target level contribution.
     const nextSourceEventSeq = Number(sourceLevelState.last_event_seq || 0) + 1;
-    const nextSourcePending = Math.max(0, effectivePendingGiveCents - contributionAmountCents);
-    const nextSourceGiven = effectiveAlreadyGivenCents + contributionAmountCents;
+    const nextSourcePending = Math.max(0, pendingGiveCents - contributionAmountCents);
+    // given_cents for upgrade levels is tracked in the target level state.
+    const nextTargetGiven = stateGivenCents + contributionAmountCents;
+
     await connection.execute(
       `UPDATE v2_help_level_state
        SET pending_give_cents = ?,
-           given_cents = ?,
            last_event_seq = ?,
            updated_at = NOW(3)
        WHERE id = ?`,
-      [nextSourcePending, nextSourceGiven, nextSourceEventSeq, sourceLevelState.id]
+      [nextSourcePending, nextSourceEventSeq, sourceLevelState.id]
+    );
+
+    await connection.execute(
+      `UPDATE v2_help_level_state
+       SET given_cents = ?,
+           updated_at = NOW(3)
+       WHERE id = ?`,
+      [nextTargetGiven, targetLevelState.id]
     );
 
     const qualificationContext = await loadLegacyHelpQualificationContext(connection);
@@ -673,26 +671,28 @@ async function main() {
       accountType: 'LIABILITY'
     });
 
+    const sourceLabel = `${sourceUser.full_name || sourceUser.user_code} (${sourceUser.user_code})`;
     const summaryDescription = settlementMode === 'locked_for_give'
-      ? `Locked first-two help level ${contributionLevelNo} for ${beneficiaryUser.user_code}`
+      ? `Locked first-two help level ${contributionLevelNo} from ${sourceLabel}`
       : settlementMode === 'locked_for_qualification'
-        ? `Locked receive help level ${contributionLevelNo} for ${beneficiaryUser.user_code}`
+        ? `Locked receive help level ${contributionLevelNo} from ${sourceLabel}`
         : settlementMode === 'safety_pool_diversion'
-          ? `5th help diversion level ${contributionLevelNo} for ${beneficiaryUser.user_code}`
+          ? `5th help diversion level ${contributionLevelNo} from ${sourceLabel}`
           : qualificationReleaseCents > 0
-            ? `Released locked receive + help credit level ${contributionLevelNo} for ${beneficiaryUser.user_code}`
-            : `Help credit level ${contributionLevelNo} for ${beneficiaryUser.user_code}`;
+            ? `Released locked receive + help credit level ${contributionLevelNo} from ${sourceLabel}`
+            : `Help credit level ${contributionLevelNo} from ${sourceLabel}`;
+
     const ledgerTransactionTotalCents = settlementMode === 'income_credit_with_release'
       ? incomeCreditCents
       : contributionAmountCents;
 
     const idempotencyKey = `repair_immediate_${sourceUserCode}_${Date.now()}`.slice(0, 120);
-    const eventKey = `HELP:repair_immediate:${sourceUserCode}:${beneficiaryUser.user_code}:level${contributionLevelNo}`.slice(0, 180);
+    const repairEventKey = `HELP:repair_immediate:${sourceUserCode}:${beneficiaryUser.user_code}:level${contributionLevelNo}`.slice(0, 180);
 
     const { txUuid, ledgerTxnId } = await createHelpLedgerTransaction(connection, {
       idempotencyKey,
       actorUserId: Number(sourceUser.id),
-      eventKey,
+      eventKey: repairEventKey,
       contributionId: Number(pendingContribution.id),
       description: summaryDescription,
       amountCents: ledgerTransactionTotalCents
@@ -855,4 +855,7 @@ async function main() {
   }
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
