@@ -417,17 +417,6 @@ async function main() {
 
     const pendingGiveCents = Number(sourceLevelState.pending_give_cents || 0);
     summary.sourcePendingGiveCents = pendingGiveCents;
-    if (pendingGiveCents <= 0) {
-      summary.notes.push(`No pending give found at source level ${sourceLevelNo}; nothing to process.`);
-      if (dryRun) {
-        await connection.rollback();
-      } else {
-        await connection.commit();
-      }
-      txOpen = false;
-      console.log(JSON.stringify(summary, null, 2));
-      return;
-    }
 
     const levelProfile = await loadLockedContributionProfile(connection, Number(sourceUser.id), sourceLevelNo);
     summary.sourceLevel1LockedRows = Number(levelProfile.rawLockedRows || 0);
@@ -457,7 +446,7 @@ async function main() {
       0,
       Number(levelProfile.dedupedLockedCents || 0) - Number(sourceLevelState.given_cents || 0)
     );
-    const effectivePendingGiveCents = Math.min(pendingGiveCents, safePendingGiveCents);
+    const effectivePendingGiveCents = safePendingGiveCents;
     summary.pendingAmountCents = effectivePendingGiveCents;
 
     if (pendingGiveCents > safePendingGiveCents) {
@@ -466,8 +455,14 @@ async function main() {
       );
     }
 
+    if (pendingGiveCents <= 0 && safePendingGiveCents > 0) {
+      summary.notes.push(
+        `Pending give rebuilt from locked history at source level ${sourceLevelNo}: state=${pendingGiveCents}, safe=${safePendingGiveCents}.`
+      );
+    }
+
     if (effectivePendingGiveCents <= 0) {
-      summary.notes.push('No safe pending give remains after dedupe validation; nothing to process.');
+      summary.notes.push(`No safe pending give available at source level ${sourceLevelNo}; nothing to process.`);
       if (dryRun) {
         await connection.rollback();
       } else {
@@ -579,9 +574,9 @@ async function main() {
 
     summary.pendingContributionId = Number(pendingContribution.id || 0) || null;
 
-    if (pendingGiveCents < contributionAmountCents) {
+    if (effectivePendingGiveCents < contributionAmountCents) {
       summary.notes.push(
-        `Insufficient pending_give_cents at source level ${sourceLevelNo}: pending=${pendingGiveCents}, needed=${contributionAmountCents}`
+        `Insufficient safe pending_give_cents at source level ${sourceLevelNo}: safe=${effectivePendingGiveCents}, needed=${contributionAmountCents}`
       );
       if (dryRun) {
         await connection.rollback();
@@ -603,7 +598,7 @@ async function main() {
 
     // Consume pending give from selected source level for next-level contribution.
     const nextSourceEventSeq = Number(sourceLevelState.last_event_seq || 0) + 1;
-    const nextSourcePending = pendingGiveCents - contributionAmountCents;
+    const nextSourcePending = Math.max(0, effectivePendingGiveCents - contributionAmountCents);
     const nextSourceGiven = Number(sourceLevelState.given_cents || 0) + contributionAmountCents;
     await connection.execute(
       `UPDATE v2_help_level_state
