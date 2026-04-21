@@ -87,17 +87,35 @@ async function loadCandidateUsers(connection, limit, explicitUserCodes = []) {
   const [rows] = await connection.execute(
     `SELECT
        u.user_code,
-       hs.level_no AS source_level_no,
+       lvl.source_level_no,
        COALESCE(hs.pending_give_cents, 0) AS pending_give_cents,
        COALESCE(hs.given_cents, 0) AS given_cents,
        COALESCE(lp.distinct_sources, 0) AS distinct_sources,
        COALESCE(lp.total_locked_cents, 0) AS total_locked_cents,
-       GREATEST(0, COALESCE(lp.total_locked_cents, 0) - COALESCE(hs.given_cents, 0)) AS implied_pending_give_cents,
+       COALESCE(nx.processed_next_cents, 0) AS processed_next_cents,
+       GREATEST(0, COALESCE(lp.total_locked_cents, 0) - COALESCE(nx.processed_next_cents, 0)) AS implied_pending_give_history_cents,
+       GREATEST(0, COALESCE(lp.total_locked_cents, 0) - COALESCE(hs.given_cents, 0)) AS implied_pending_give_state_cents,
        COALESCE(pn.pending_rows, 0) AS pending_next_level_rows,
        COALESCE(pn.pending_cents, 0) AS pending_next_level_cents
-     FROM v2_users u
-     INNER JOIN v2_help_level_state hs
-       ON hs.user_id = u.id
+     FROM (
+       SELECT user_id, level_no AS source_level_no
+       FROM v2_help_level_state
+       WHERE level_no BETWEEN 1 AND 9
+
+       UNION
+
+       SELECT pc.beneficiary_user_id AS user_id, pc.level_no AS source_level_no
+       FROM v2_help_pending_contributions pc
+       WHERE pc.level_no BETWEEN 1 AND 9
+         AND pc.status = 'processed'
+         AND pc.reason = 'locked_for_give'
+       GROUP BY pc.beneficiary_user_id, pc.level_no
+     ) lvl
+     INNER JOIN v2_users u
+       ON u.id = lvl.user_id
+     LEFT JOIN v2_help_level_state hs
+       ON hs.user_id = lvl.user_id
+      AND hs.level_no = lvl.source_level_no
      LEFT JOIN (
        SELECT
          t.user_id,
@@ -116,7 +134,16 @@ async function loadCandidateUsers(connection, limit, explicitUserCodes = []) {
          GROUP BY pc.beneficiary_user_id, pc.level_no, pc.source_user_id
        ) t
        GROUP BY t.user_id, t.level_no
-     ) lp ON lp.user_id = u.id AND lp.level_no = hs.level_no
+     ) lp ON lp.user_id = lvl.user_id AND lp.level_no = lvl.source_level_no
+     LEFT JOIN (
+       SELECT
+         pc.source_user_id AS user_id,
+         pc.level_no,
+         COALESCE(SUM(pc.amount_cents), 0) AS processed_next_cents
+       FROM v2_help_pending_contributions pc
+       WHERE pc.status = 'processed'
+       GROUP BY pc.source_user_id, pc.level_no
+     ) nx ON nx.user_id = lvl.user_id AND nx.level_no = lvl.source_level_no + 1
      LEFT JOIN (
        SELECT
          pc.source_user_id AS user_id,
@@ -126,24 +153,25 @@ async function loadCandidateUsers(connection, limit, explicitUserCodes = []) {
        FROM v2_help_pending_contributions pc
        WHERE pc.status = 'pending'
        GROUP BY pc.source_user_id, pc.level_no
-     ) pn ON pn.user_id = u.id AND pn.level_no = hs.level_no + 1
+     ) pn ON pn.user_id = lvl.user_id AND pn.level_no = lvl.source_level_no + 1
      WHERE u.status = 'active'
-       AND hs.level_no BETWEEN 1 AND 9
+       AND lvl.source_level_no BETWEEN 1 AND 9
        AND (
          COALESCE(hs.pending_give_cents, 0) > 0
          OR (
            COALESCE(lp.distinct_sources, 0) >= 2
-           AND GREATEST(0, COALESCE(lp.total_locked_cents, 0) - COALESCE(hs.given_cents, 0)) > 0
+           AND GREATEST(0, COALESCE(lp.total_locked_cents, 0) - COALESCE(nx.processed_next_cents, 0)) > 0
          )
+         OR COALESCE(pn.pending_rows, 0) > 0
        )
        ${useExplicitFilter ? `AND u.user_code IN (${explicitPlaceholders})` : ''}
      ORDER BY
        GREATEST(
          COALESCE(hs.pending_give_cents, 0),
-         GREATEST(0, COALESCE(lp.total_locked_cents, 0) - COALESCE(hs.given_cents, 0)),
+         GREATEST(0, COALESCE(lp.total_locked_cents, 0) - COALESCE(nx.processed_next_cents, 0)),
          COALESCE(pn.pending_cents, 0)
        ) DESC,
-       hs.level_no ASC,
+       lvl.source_level_no ASC,
        u.created_at ASC
      LIMIT ?`,
     [...explicitUserCodes, safeLimit]
@@ -161,14 +189,18 @@ async function loadCandidateUsers(connection, limit, explicitUserCodes = []) {
     seen.add(candidateKey);
 
     const pendingGiveCents = Math.max(0, Number(row?.pending_give_cents || 0));
-    const impliedPendingGiveCents = Math.max(0, Number(row?.implied_pending_give_cents || 0));
+    const impliedPendingGiveHistoryCents = Math.max(0, Number(row?.implied_pending_give_history_cents || 0));
+    const impliedPendingGiveStateCents = Math.max(0, Number(row?.implied_pending_give_state_cents || 0));
     const pendingNextLevelRows = Math.max(0, Number(row?.pending_next_level_rows || 0));
+    const processedNextCents = Math.max(0, Number(row?.processed_next_cents || 0));
     const distinctSources = Math.max(0, Number(row?.distinct_sources || 0));
 
     const candidateReasons = [];
     if (pendingGiveCents > 0) candidateReasons.push('pending_give_state');
-    if (impliedPendingGiveCents > 0 && distinctSources >= 2) candidateReasons.push('locked_first_two_implied_pending');
-    if (pendingNextLevelRows > 0 && (pendingGiveCents > 0 || impliedPendingGiveCents > 0)) {
+    if (impliedPendingGiveHistoryCents > 0 && distinctSources >= 2) {
+      candidateReasons.push('locked_first_two_implied_pending_history');
+    }
+    if (pendingNextLevelRows > 0) {
       candidateReasons.push('pending_next_level_rows');
     }
     if (useExplicitFilter) candidateReasons.push('explicit_user_codes');
@@ -178,7 +210,10 @@ async function loadCandidateUsers(connection, limit, explicitUserCodes = []) {
       sourceLevelNo,
       candidateReasons,
       pendingGiveCents,
-      impliedPendingGiveCents,
+      impliedPendingGiveCents: Math.max(impliedPendingGiveHistoryCents, impliedPendingGiveStateCents),
+      impliedPendingGiveHistoryCents,
+      impliedPendingGiveStateCents,
+      processedNextCents,
       pendingNextLevelRows
     });
   }
