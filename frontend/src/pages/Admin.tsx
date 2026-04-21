@@ -194,7 +194,7 @@ interface AvailableIncomeDriftRow {
   walletIncome: number;
   expectedIncome: number;
   driftAmount: number;
-  driftDirection: 'wallet_above_ledger' | 'wallet_below_ledger';
+  driftDirection: 'wallet_above_ledger' | 'wallet_below_ledger' | 'balanced';
   walletTotalReceived: number;
   expectedTotalReceived: number;
   receivedDrift: number;
@@ -1225,6 +1225,7 @@ export default function Admin() {
     minDrift: '',
     direction: ''
   });
+  const [showBalancedAvailableIncomeRows, setShowBalancedAvailableIncomeRows] = useState(false);
   const [fundWalletReportFilters, setFundWalletReportFilters] = useState({
     userId: '',
     name: '',
@@ -4582,6 +4583,8 @@ export default function Admin() {
     const minDrift = Number(availableIncomeDriftFilters.minDrift || 0);
     return Database.scanAvailableIncomeDriftMismatches()
       .filter((row) => {
+        const isBalanced = Math.abs(Number(row.driftAmount || 0)) <= 0.009;
+        if (!showBalancedAvailableIncomeRows && isBalanced) return false;
         if (availableIncomeDriftFilters.userId && !safeText(row.userId).includes(availableIncomeDriftFilters.userId)) return false;
         if (availableIncomeDriftFilters.name && !safeLower(row.fullName).includes(safeLower(availableIncomeDriftFilters.name))) return false;
         if (availableIncomeDriftFilters.sponsorId && !safeText(row.sponsorUserId).includes(availableIncomeDriftFilters.sponsorId)) return false;
@@ -4601,7 +4604,8 @@ export default function Admin() {
     availableIncomeDriftFilters,
     isReportsTabActive,
     reportRefreshTick,
-    reportTab
+    reportTab,
+    showBalancedAvailableIncomeRows
   ]);
 
   const duplicateLockedGiveHelpMismatchRows = useMemo<DuplicateLockedGiveHelpMismatchRow[]>(() => {
@@ -9917,9 +9921,19 @@ export default function Admin() {
                         <option value="">All Directions</option>
                         <option value="wallet_above_ledger">Wallet Above Ledger</option>
                         <option value="wallet_below_ledger">Wallet Below Ledger</option>
+                        <option value="balanced">Balanced</option>
                       </select>
                     </div>
                     <div className="flex flex-wrap gap-2">
+                      <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-white/15 bg-[#1f2937] text-white/80 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={showBalancedAvailableIncomeRows}
+                          onChange={(e) => setShowBalancedAvailableIncomeRows(e.target.checked)}
+                          className="rounded"
+                        />
+                        Show Balanced (Drift = 0)
+                      </label>
                       <Button
                         variant="outline"
                         className="border-cyan-400/40 text-cyan-300 hover:bg-cyan-400/10"
@@ -9981,12 +9995,22 @@ export default function Admin() {
                               <td className="py-2 px-3 text-white/60">{row.sponsorName}</td>
                               <td className="py-2 px-3 text-white/70">{formatCurrency(row.walletIncome)}</td>
                               <td className="py-2 px-3 text-white/70">{formatCurrency(row.expectedIncome)}</td>
-                              <td className={`py-2 px-3 font-medium ${row.driftAmount >= 0 ? 'text-rose-300' : 'text-amber-300'}`}>
+                              <td className={`py-2 px-3 font-medium ${Math.abs(row.driftAmount) <= 0.009 ? 'text-emerald-300' : (row.driftAmount >= 0 ? 'text-rose-300' : 'text-amber-300')}`}>
                                 {formatCurrency(row.driftAmount)}
                               </td>
                               <td className="py-2 px-3">
-                                <Badge className={row.driftDirection === 'wallet_above_ledger' ? 'bg-rose-500/20 text-rose-300' : 'bg-amber-500/20 text-amber-300'}>
-                                  {row.driftDirection === 'wallet_above_ledger' ? 'Wallet Above Ledger' : 'Wallet Below Ledger'}
+                                <Badge className={
+                                  row.driftDirection === 'wallet_above_ledger'
+                                    ? 'bg-rose-500/20 text-rose-300'
+                                    : row.driftDirection === 'wallet_below_ledger'
+                                      ? 'bg-amber-500/20 text-amber-300'
+                                      : 'bg-emerald-500/20 text-emerald-300'
+                                }>
+                                  {row.driftDirection === 'wallet_above_ledger'
+                                    ? 'Wallet Above Ledger'
+                                    : row.driftDirection === 'wallet_below_ledger'
+                                      ? 'Wallet Below Ledger'
+                                      : 'Balanced'}
                                 </Badge>
                               </td>
                               <td className={`py-2 px-3 ${row.receivedDrift >= 0 ? 'text-cyan-300' : 'text-orange-300'}`}>

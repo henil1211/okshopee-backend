@@ -415,7 +415,7 @@ export interface AvailableIncomeDriftMismatchRow {
   walletIncome: number;
   expectedIncome: number;
   driftAmount: number;
-  driftDirection: 'wallet_above_ledger' | 'wallet_below_ledger';
+  driftDirection: 'wallet_above_ledger' | 'wallet_below_ledger' | 'balanced';
   walletTotalReceived: number;
   expectedTotalReceived: number;
   receivedDrift: number;
@@ -4170,7 +4170,9 @@ class Database {
         walletIncome,
         expectedIncome,
         driftAmount,
-        driftDirection: driftAmount >= 0 ? 'wallet_above_ledger' : 'wallet_below_ledger',
+        driftDirection: Math.abs(driftAmount) <= 0.009
+          ? 'balanced'
+          : (driftAmount >= 0 ? 'wallet_above_ledger' : 'wallet_below_ledger'),
         walletTotalReceived,
         expectedTotalReceived,
         receivedDrift,

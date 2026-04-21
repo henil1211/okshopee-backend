@@ -4250,6 +4250,45 @@ async function buildLegacyActivationContributionPlanFromMatrixState(connection, 
   return plan;
 }
 
+async function resolveV2ImmediateUplineForAutoGive(connection, sourceUserCode) {
+  const normalizedSourceUserCode = normalizeV2UserCode(sourceUserCode);
+  if (!isValidV2UserCode(normalizedSourceUserCode)) return null;
+
+  const [matrixRows] = await connection.execute(
+    `SELECT parent_user_code, position
+     FROM v2_matrix_nodes
+     WHERE user_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [normalizedSourceUserCode]
+  );
+
+  const matrixNode = Array.isArray(matrixRows) ? matrixRows[0] : null;
+  const parentUserCode = normalizeV2UserCode(matrixNode?.parent_user_code);
+  if (!isValidV2UserCode(parentUserCode)) return null;
+
+  const [parentRows] = await connection.execute(
+    `SELECT id, user_code, status
+     FROM v2_users
+     WHERE user_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [parentUserCode]
+  );
+
+  const parentUser = Array.isArray(parentRows) ? parentRows[0] : null;
+  if (!parentUser || String(parentUser.status) !== 'active') return null;
+
+  const position = Number(matrixNode?.position);
+  const side = position === 0 ? 'left' : position === 1 ? 'right' : 'unknown';
+
+  return {
+    beneficiaryUserId: Number(parentUser.id),
+    beneficiaryUserCode: String(parentUser.user_code || parentUserCode),
+    side: normalizeV2HelpContributionSide(side)
+  };
+}
+
 async function ensureV2HelpLevelStateRow(connection, userId, levelNo) {
   await connection.execute(
     `INSERT INTO v2_help_level_state
@@ -4616,6 +4655,31 @@ async function applyV2HelpContributionSettlement(connection, {
     ]
   );
 
+  let autoGiveEnqueued = null;
+  // New rule: each first-two lock should immediately queue an upstream give.
+  // This makes 1st + 2nd receives at a level auto-give without waiting for future events.
+  if (settlementMode === 'locked_for_give' && lockFirstTwoCents > 0 && levelNo < 10) {
+    const autoGiveTarget = await resolveV2ImmediateUplineForAutoGive(connection, beneficiaryUser.user_code);
+    if (autoGiveTarget?.beneficiaryUserId) {
+      const autoGiveEventKey = `AUTO_GIVE:${pendingContribution.id}:${nextReceiveCount}`.slice(0, 180);
+      await upsertV2HelpPendingContribution(connection, {
+        sourceEventKey: autoGiveEventKey,
+        sourceUserId: beneficiaryUser.id,
+        beneficiaryUserId: autoGiveTarget.beneficiaryUserId,
+        levelNo: levelNo + 1,
+        side: autoGiveTarget.side,
+        amountCents: lockFirstTwoCents
+      });
+
+      autoGiveEnqueued = {
+        sourceUserCode: beneficiaryUser.user_code,
+        beneficiaryUserCode: autoGiveTarget.beneficiaryUserCode,
+        levelNo: levelNo + 1,
+        amountCents: lockFirstTwoCents
+      };
+    }
+  }
+
   const sourceProgress = await upsertV2HelpPendingGiveProgress(connection, {
     userId: Number(pendingContribution.source_user_id),
     levelNo,
@@ -4640,6 +4704,7 @@ async function applyV2HelpContributionSettlement(connection, {
     beneficiaryProgress,
     unlockedIncomeCents: incomeCreditCents,
     lockedForGiveCents: lockFirstTwoCents,
+    autoGiveEnqueued,
     lockedForQualificationCents: lockQualificationCents,
     releasedQualificationCents: qualificationReleaseCents,
     divertedSafetyCents

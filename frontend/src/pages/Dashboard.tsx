@@ -340,13 +340,159 @@ export default function Dashboard() {
     () => (displayUser ? Database.getQualifiedLevel(displayUser.id) : 0),
     [displayUser?.id]
   );
-  const lockedIncomeBreakdown = useMemo(
+  const dbLockedIncomeBreakdown = useMemo(
     () => (displayUser ? Database.getLockedIncomeBreakdown(displayUser.id) : []),
     [displayUser?.id]
   );
   const effectiveDirectCount = useMemo(
     () => (displayUser ? Database.getEffectiveDirectCount(displayUser) : 0),
     [displayUser]
+  );
+  const liveLockedIncomeBreakdown = useMemo(() => {
+    if (!displayUser) return [] as Array<{
+      level: number;
+      lockedAmount: number;
+      lockedFirstTwoAmount: number;
+      lockedQualificationAmount: number;
+      requiredDirect: number;
+      currentDirect: number;
+      remainingDirect: number;
+      qualified: boolean;
+      reason: string;
+    }>;
+
+    const levelMap = new Map<number, { firstTwo: number; qualification: number }>();
+    const ensureLevel = (level: number) => {
+      const existing = levelMap.get(level);
+      if (existing) return existing;
+      const created = { firstTwo: 0, qualification: 0 };
+      levelMap.set(level, created);
+      return created;
+    };
+
+    const resolveLevel = (tx: { level?: number; description?: string }): number | null => {
+      const numericLevel = Number(tx.level);
+      if (Number.isFinite(numericLevel) && numericLevel >= 1 && numericLevel <= helpDistributionTable.length) {
+        return numericLevel;
+      }
+      const match = String(tx.description || '').match(/\blevel\s+(\d+)\b/i);
+      if (!match) return null;
+      const parsed = Number(match[1]);
+      if (!Number.isFinite(parsed) || parsed < 1 || parsed > helpDistributionTable.length) return null;
+      return parsed;
+    };
+
+    const txs = [...transactions]
+      .filter((tx) => tx.userId === displayUser.id)
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    for (const tx of txs) {
+      const level = resolveLevel(tx);
+      if (!level) continue;
+      const amount = Math.max(0, Math.abs(Number(tx.amount || 0)));
+      if (!(amount > 0.0001)) continue;
+      const desc = String(tx.description || '').toLowerCase();
+      const slot = ensureLevel(level);
+
+      if (tx.type === 'receive_help' && Number(tx.amount || 0) > 0) {
+        if (desc.includes('locked first-two help')) {
+          slot.firstTwo += amount;
+          continue;
+        }
+        if (desc.includes('locked receive help')) {
+          slot.qualification += amount;
+          continue;
+        }
+        if (desc.startsWith('released locked receive help')) {
+          slot.qualification = Math.max(0, slot.qualification - amount);
+        }
+        continue;
+      }
+
+      if (tx.type === 'give_help' && desc.includes('from locked income')) {
+        let remaining = amount;
+        const preferredLevel = Math.max(1, level - 1);
+        const orderedLevels = Array.from(levelMap.keys()).sort((left, right) => left - right);
+        const ordered = orderedLevels.includes(preferredLevel)
+          ? [preferredLevel, ...orderedLevels.filter((entry) => entry !== preferredLevel)]
+          : orderedLevels;
+
+        for (const targetLevel of ordered) {
+          if (remaining <= 0.0001) break;
+          const state = ensureLevel(targetLevel);
+          const take = Math.min(state.qualification, remaining);
+          state.qualification -= take;
+          remaining -= take;
+        }
+        for (const targetLevel of ordered) {
+          if (remaining <= 0.0001) break;
+          const state = ensureLevel(targetLevel);
+          const take = Math.min(state.firstTwo, remaining);
+          state.firstTwo -= take;
+          remaining -= take;
+        }
+      }
+    }
+
+    const rows = Array.from(levelMap.entries())
+      .map(([level, state]) => {
+        const lockedFirstTwoAmount = Math.max(0, Math.round((state.firstTwo || 0) * 100) / 100);
+        const lockedQualificationAmount = Math.max(0, Math.round((state.qualification || 0) * 100) / 100);
+        const lockedAmount = Math.max(0, Math.round((lockedFirstTwoAmount + lockedQualificationAmount) * 100) / 100);
+        if (lockedAmount <= 0.0001) return null;
+        const requiredDirect = Database.getCumulativeDirectRequired(level);
+        const remainingDirect = Math.max(0, requiredDirect - effectiveDirectCount);
+        const reasons: string[] = [];
+        if (lockedQualificationAmount > 0) {
+          reasons.push(
+            remainingDirect > 0
+              ? `Locked due to Direct Referral Rule: Level ${level} requires ${requiredDirect} directs, you currently have ${effectiveDirectCount}.`
+              : `Locked receive for Level ${level} is waiting for automatic release.`
+          );
+        }
+        if (lockedFirstTwoAmount > 0) {
+          reasons.push('Locked because first two received helps at this level are reserved for auto give-help settlement.');
+        }
+
+        return {
+          level,
+          lockedAmount,
+          lockedFirstTwoAmount,
+          lockedQualificationAmount,
+          requiredDirect,
+          currentDirect: effectiveDirectCount,
+          remainingDirect,
+          qualified: remainingDirect === 0,
+          reason: reasons.join(' ')
+        };
+      })
+      .filter((row): row is NonNullable<typeof row> => !!row)
+      .sort((left, right) => left.level - right.level);
+
+    const walletLockedTotal = Math.max(0, Number(wallet?.lockedIncomeWallet || 0));
+    const derivedTotal = rows.reduce((sum, item) => sum + Math.max(0, Number(item.lockedAmount || 0)), 0);
+    const lockedGap = Math.max(0, Math.round((walletLockedTotal - derivedTotal) * 100) / 100);
+    if (lockedGap > 0.0001) {
+      const levelOneRequired = Database.getCumulativeDirectRequired(1);
+      const levelOneRemaining = Math.max(0, levelOneRequired - effectiveDirectCount);
+      rows.unshift({
+        level: 1,
+        lockedAmount: lockedGap,
+        lockedFirstTwoAmount: lockedGap,
+        lockedQualificationAmount: 0,
+        requiredDirect: levelOneRequired,
+        currentDirect: effectiveDirectCount,
+        remainingDirect: levelOneRemaining,
+        qualified: levelOneRemaining === 0,
+        reason: `Locked because first two received helps at this level are reserved for auto give-help settlement. Includes $${lockedGap.toFixed(2)} pending amount reflected from live wallet snapshot.`
+      });
+    }
+
+    return rows.sort((left, right) => left.level - right.level);
+  }, [displayUser, effectiveDirectCount, transactions, wallet?.lockedIncomeWallet]);
+  const lockedIncomeBreakdown = useMemo(
+    () => (dbLockedIncomeBreakdown.length > 0 ? dbLockedIncomeBreakdown : liveLockedIncomeBreakdown),
+    [dbLockedIncomeBreakdown, liveLockedIncomeBreakdown]
   );
   const currentRoyaltyMilestone = ROYALTY_MILESTONES
     .filter((milestone) => qualifiedLevel >= milestone.qualifiedLevel)
