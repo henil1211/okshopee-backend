@@ -131,7 +131,6 @@ async function loadCandidateUsers(connection, limit, explicitUserCodes = []) {
            COALESCE(l1.distinct_sources, 0) >= 2
            AND GREATEST(0, COALESCE(l1.total_locked_cents, 0) - COALESCE(hs.given_cents, 0)) > 0
          )
-         OR COALESCE(p2.pending_rows, 0) > 0
        )
      ORDER BY
        GREATEST(
@@ -160,7 +159,9 @@ async function loadCandidateUsers(connection, limit, explicitUserCodes = []) {
     const candidateReasons = [];
     if (pendingGiveCents > 0) candidateReasons.push('level1_pending_give');
     if (impliedPendingGiveCents > 0 && distinctSources >= 2) candidateReasons.push('locked_first_two_implied_pending');
-    if (pendingLevel2Rows > 0) candidateReasons.push('pending_level2_rows');
+    if (pendingLevel2Rows > 0 && (pendingGiveCents > 0 || impliedPendingGiveCents > 0)) {
+      candidateReasons.push('pending_level2_rows');
+    }
 
     users.push({
       userCode,
