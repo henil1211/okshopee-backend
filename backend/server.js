@@ -2059,12 +2059,32 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
       `SELECT
          COALESCE(SUM(locked_first_two_cents), 0) AS locked_first_two_cents,
          COALESCE(SUM(locked_qualification_cents), 0) AS locked_qualification_cents,
-         COALESCE(SUM(pending_give_cents), 0) AS pending_give_cents
+         COALESCE(SUM(pending_give_cents), 0) AS pending_give_cents,
+         COALESCE(SUM(CASE WHEN level_no = 1 THEN pending_give_cents ELSE 0 END), 0) AS level1_pending_give_cents,
+         COALESCE(SUM(CASE WHEN level_no = 1 THEN given_cents ELSE 0 END), 0) AS level1_given_cents,
+         COALESCE(SUM(CASE WHEN level_no <> 1 THEN pending_give_cents ELSE 0 END), 0) AS non_level1_pending_give_cents
        FROM v2_help_level_state
        WHERE user_id = ?`,
       [userId]
     ),
     'read_v2_help_lock_snapshot'
+  );
+
+  const [level1DedupedLockedRows] = await executeV2ReadWithRetry(
+    () => pool.execute(
+      `SELECT COALESCE(SUM(t.amount_cents), 0) AS level1_deduped_locked_cents
+       FROM (
+         SELECT source_user_id, MAX(amount_cents) AS amount_cents
+         FROM v2_help_pending_contributions
+         WHERE beneficiary_user_id = ?
+           AND level_no = 1
+           AND status = 'processed'
+           AND reason = 'locked_for_give'
+         GROUP BY source_user_id
+       ) t`,
+      [userId]
+    ),
+    'read_v2_help_level1_deduped_locked'
   );
 
   const [lifetimeRows] = await executeV2ReadWithRetry(
@@ -2155,6 +2175,9 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
   }
 
   const lockRow = Array.isArray(lockRows) && lockRows.length > 0 ? lockRows[0] : null;
+  const level1DedupedLockedRow = Array.isArray(level1DedupedLockedRows) && level1DedupedLockedRows.length > 0
+    ? level1DedupedLockedRows[0]
+    : null;
   const lifetimeRow = Array.isArray(lifetimeRows) && lifetimeRows.length > 0 ? lifetimeRows[0] : null;
   const syntheticLockedReceiveRow = Array.isArray(syntheticLockedReceiveRows) && syntheticLockedReceiveRows.length > 0
     ? syntheticLockedReceiveRows[0]
@@ -2168,6 +2191,21 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
   const pendingGiveCents = Number.isFinite(Number(lockRow?.pending_give_cents))
     ? Math.trunc(Number(lockRow.pending_give_cents))
     : 0;
+  const level1PendingGiveCents = Number.isFinite(Number(lockRow?.level1_pending_give_cents))
+    ? Math.trunc(Number(lockRow.level1_pending_give_cents))
+    : 0;
+  const level1GivenCents = Number.isFinite(Number(lockRow?.level1_given_cents))
+    ? Math.trunc(Number(lockRow.level1_given_cents))
+    : 0;
+  const nonLevel1PendingGiveCents = Number.isFinite(Number(lockRow?.non_level1_pending_give_cents))
+    ? Math.trunc(Number(lockRow.non_level1_pending_give_cents))
+    : 0;
+  const level1DedupedLockedCents = Number.isFinite(Number(level1DedupedLockedRow?.level1_deduped_locked_cents))
+    ? Math.trunc(Number(level1DedupedLockedRow.level1_deduped_locked_cents))
+    : 0;
+  const level1SafePendingGiveCents = Math.max(0, level1DedupedLockedCents - level1GivenCents);
+  const effectiveLevel1PendingGiveCents = Math.max(0, Math.min(level1PendingGiveCents, level1SafePendingGiveCents));
+  const effectivePendingGiveCents = Math.max(0, nonLevel1PendingGiveCents + effectiveLevel1PendingGiveCents);
   const totalReceivedFromLedgerCents = Number.isFinite(Number(lifetimeRow?.total_received_cents))
     ? Math.trunc(Number(lifetimeRow.total_received_cents))
     : 0;
@@ -2191,7 +2229,7 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
     hasV2IncomeSignals
   });
   const effectiveLockedForQualificationCents = Math.max(0, Math.max(lockedForQualificationCents, syntheticLockedReceiveCents));
-  const lockedForGiveCents = Math.max(0, pendingGiveCents);
+  const lockedForGiveCents = Math.max(0, effectivePendingGiveCents);
   const v2LockedTotalCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
   const hasV2LockSignals =
     lockedForGiveCents > 0
@@ -2210,7 +2248,7 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
       totalLockedIncome: effectiveLockedTotalCents,
       lockedForGive: Math.max(0, lockedForGiveCents),
       lockedForQualification: Math.max(0, effectiveLockedForQualificationCents),
-      pendingGive: Math.max(0, pendingGiveCents),
+      pendingGive: Math.max(0, effectivePendingGiveCents),
       lockedFirstTwoLifetime: Math.max(0, lockedFirstTwoLifetimeCents)
     },
     lifetimeTotalsCents: {
@@ -2597,9 +2635,27 @@ async function readV2LockedIncomeSnapshotForMutation(connection, userId, userCod
   const [lockRows] = await connection.execute(
     `SELECT
        COALESCE(SUM(locked_qualification_cents), 0) AS locked_qualification_cents,
-       COALESCE(SUM(pending_give_cents), 0) AS pending_give_cents
+       COALESCE(SUM(pending_give_cents), 0) AS pending_give_cents,
+       COALESCE(SUM(CASE WHEN level_no = 1 THEN pending_give_cents ELSE 0 END), 0) AS level1_pending_give_cents,
+       COALESCE(SUM(CASE WHEN level_no = 1 THEN given_cents ELSE 0 END), 0) AS level1_given_cents,
+       COALESCE(SUM(CASE WHEN level_no <> 1 THEN pending_give_cents ELSE 0 END), 0) AS non_level1_pending_give_cents
      FROM v2_help_level_state
      WHERE user_id = ?
+     FOR UPDATE`,
+    [userId]
+  );
+
+  const [level1DedupedLockedRows] = await connection.execute(
+    `SELECT COALESCE(SUM(t.amount_cents), 0) AS level1_deduped_locked_cents
+     FROM (
+       SELECT source_user_id, MAX(amount_cents) AS amount_cents
+       FROM v2_help_pending_contributions
+       WHERE beneficiary_user_id = ?
+         AND level_no = 1
+         AND status = 'processed'
+         AND reason = 'locked_for_give'
+       GROUP BY source_user_id
+     ) t
      FOR UPDATE`,
     [userId]
   );
@@ -2623,6 +2679,9 @@ async function readV2LockedIncomeSnapshotForMutation(connection, userId, userCod
   );
 
   const lockRow = Array.isArray(lockRows) && lockRows.length > 0 ? lockRows[0] : null;
+  const level1DedupedLockedRow = Array.isArray(level1DedupedLockedRows) && level1DedupedLockedRows.length > 0
+    ? level1DedupedLockedRows[0]
+    : null;
   const syntheticLockedReceiveRow = Array.isArray(syntheticLockedReceiveRows) && syntheticLockedReceiveRows.length > 0
     ? syntheticLockedReceiveRows[0]
     : null;
@@ -2633,12 +2692,27 @@ async function readV2LockedIncomeSnapshotForMutation(connection, userId, userCod
   const pendingGiveCents = Number.isFinite(Number(lockRow?.pending_give_cents))
     ? Math.trunc(Number(lockRow.pending_give_cents))
     : 0;
+  const level1PendingGiveCents = Number.isFinite(Number(lockRow?.level1_pending_give_cents))
+    ? Math.trunc(Number(lockRow.level1_pending_give_cents))
+    : 0;
+  const level1GivenCents = Number.isFinite(Number(lockRow?.level1_given_cents))
+    ? Math.trunc(Number(lockRow.level1_given_cents))
+    : 0;
+  const nonLevel1PendingGiveCents = Number.isFinite(Number(lockRow?.non_level1_pending_give_cents))
+    ? Math.trunc(Number(lockRow.non_level1_pending_give_cents))
+    : 0;
+  const level1DedupedLockedCents = Number.isFinite(Number(level1DedupedLockedRow?.level1_deduped_locked_cents))
+    ? Math.trunc(Number(level1DedupedLockedRow.level1_deduped_locked_cents))
+    : 0;
+  const level1SafePendingGiveCents = Math.max(0, level1DedupedLockedCents - level1GivenCents);
+  const effectiveLevel1PendingGiveCents = Math.max(0, Math.min(level1PendingGiveCents, level1SafePendingGiveCents));
+  const effectivePendingGiveCents = Math.max(0, nonLevel1PendingGiveCents + effectiveLevel1PendingGiveCents);
   const syntheticLockedReceiveCents = Number.isFinite(Number(syntheticLockedReceiveRow?.locked_receive_cents))
     ? Math.trunc(Number(syntheticLockedReceiveRow.locked_receive_cents))
     : 0;
 
   const effectiveLockedForQualificationCents = Math.max(0, Math.max(lockedForQualificationCents, syntheticLockedReceiveCents));
-  const lockedForGiveCents = Math.max(0, pendingGiveCents);
+  const lockedForGiveCents = Math.max(0, effectivePendingGiveCents);
   const v2LockedIncomeCents = Math.max(0, lockedForGiveCents + effectiveLockedForQualificationCents);
   const legacyIncomeMetrics = await readLegacyIncomeMetricsByUserCodeWithConnection(connection, userCode);
   const legacyLockedIncomeCents = Number(legacyIncomeMetrics.lockedIncomeCents || 0);
