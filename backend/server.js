@@ -8999,8 +8999,82 @@ const server = createServer(async (req, res) => {
     }
     return;
   }
+  // Atomic PIN Status Update (Admin Only)
+  if (req.method === 'POST' && url.pathname === '/api/v2/admin/pins/status-update') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: 'v2AdminPinStatusUpdate',
+        requiredRole: 'admin',
+        allowImpersonation: false
+      });
 
-  // POST state
+      const pinCode = String(parsed?.pinCode || '').trim().toUpperCase();
+      const newStatus = String(parsed?.status || '').trim().toLowerCase();
+
+      if (!pinCode || !['unused', 'suspended', 'generated'].includes(newStatus)) {
+        sendJson(res, 400, {
+          ok: false,
+          error: 'pinCode and valid status (unused|suspended|generated) are required',
+          code: 'PIN_STATUS_UPDATE_INVALID_INPUT'
+        });
+        return;
+      }
+
+      const result = await executeV2TransactionWithRetry(async (connection) => {
+        // Lock the state store row to prevent concurrent race conditions
+        const [rows] = await connection.execute(
+          'SELECT state_value FROM state_store WHERE state_key = "mlm_pins" FOR UPDATE'
+        );
+        if (!rows.length) {
+          throw createApiError(404, 'PIN state store not found', 'STATE_NOT_FOUND');
+        }
+
+        const pins = JSON.parse(rows[0].state_value);
+        const pinIndex = pins.findIndex((p) => String(p.pinCode || '').trim().toUpperCase() === pinCode);
+        if (pinIndex === -1) {
+          throw createApiError(404, `PIN ${pinCode} not found in state store`, 'PIN_NOT_FOUND');
+        }
+
+        const oldStatus = pins[pinIndex].status;
+        pins[pinIndex].status = newStatus;
+        pins[pinIndex].updatedAt = new Date().toISOString();
+
+        // Update Legacy State
+        await connection.execute(
+          'UPDATE state_store SET state_value = ?, updated_at = NOW(3) WHERE state_key = "mlm_pins"',
+          [JSON.stringify(pins)]
+        );
+
+        // Update V2 Ledger Sync
+        const targetV2Status = newStatus === 'suspended' ? 'suspended' : 'generated';
+        await connection.execute(
+          "UPDATE v2_pins SET status = ?, updated_at = NOW(3) WHERE pin_code = ? AND status NOT IN ('used', 'expired')",
+          [targetV2Status, pinCode]
+        );
+
+        return {
+          status: 200,
+          payload: { ok: true, pinCode, oldStatus, newStatus }
+        };
+      }, 'v2AdminPinStatusUpdate');
+
+      sendJson(res, result.status, result.payload);
+      return;
+    } catch (error) {
+      const status = Number(error?.status) || 500;
+      const message = getErrorMessage(error, 'Failed to update PIN status');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || 'PIN_STATUS_UPDATE_FAILED'
+      });
+      return;
+    }
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/state') {
     try {
       const body = await getRequestBody(req);
