@@ -12337,6 +12337,36 @@ class Database {
     this.setStorageItem(DB_KEYS.PAYMENT_METHODS, JSON.stringify(methods));
   }
 
+  static async fetchUserWalletSummary(userCode: string): Promise<any | null> {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') {
+      return null;
+    }
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeout = setTimeout(() => controller?.abort(), 30000);
+
+    try {
+      const response = await fetch(`${this.REMOTE_SYNC_BASE_URL}/api/v2/wallet?userCode=${userCode}&t=${Date.now()}`, {
+        method: 'GET',
+        headers: this.getRemoteSyncRequestHeaders(),
+        signal: controller?.signal
+      });
+
+      if (!response.ok) {
+        if (response.status === 403 || response.status === 404) return null;
+        throw new Error(`Wallet summary request failed with HTTP ${response.status}`);
+      }
+
+      const payload = await response.json();
+      return payload.ok ? payload.wallet : null;
+    } catch (error) {
+      console.warn('[Database] Failed to fetch wallet summary:', error);
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   static async fetchPaymentMethodsFromBackend(): Promise<PaymentMethod[]> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') {
       return this.getPaymentMethods();

@@ -7999,7 +7999,7 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      if (requestedUserCode !== authContext.actorUserCode) {
+      if (requestedUserCode !== authContext.actorUserCode && !authContext.authSubjectIsAdmin) {
         sendJson(res, 403, {
           ok: false,
           error: 'Actor is only allowed to read their effective userCode wallet snapshot',

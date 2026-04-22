@@ -87,6 +87,8 @@ export default function Matrix() {
   const syncKey = useSyncRefreshKey();
   const displayUser = impersonatedUser || user;
   const [selectedNode, setSelectedNode] = useState<MatrixNode | null>(null);
+  const [fetchedMemberStats, setFetchedMemberStats] = useState<any>(null);
+  const [isFetchingStats, setIsFetchingStats] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [downlineVisibleCount, setDownlineVisibleCount] = useState(DOWNLINE_CHUNK_SIZE);
   const treeContainerRef = useRef<HTMLDivElement>(null);
@@ -117,6 +119,27 @@ export default function Matrix() {
     }
     loadMatrix();
   }, [isAuthenticated, navigate, loadMatrix, syncKey]);
+
+  useEffect(() => {
+    if (selectedNode) {
+      const fetchStats = async () => {
+        setIsFetchingStats(true);
+        setFetchedMemberStats(null);
+        try {
+          const stats = await Database.fetchUserWalletSummary(selectedNode.userId);
+          if (stats) {
+            setFetchedMemberStats(stats);
+          }
+        } finally {
+          setIsFetchingStats(false);
+        }
+      };
+      fetchStats();
+    } else {
+      setFetchedMemberStats(null);
+      setIsFetchingStats(false);
+    }
+  }, [selectedNode]);
 
   const handleZoomIn = () => {
     setZoom(prev => Math.min(prev + 0.2, 2));
@@ -927,7 +950,13 @@ export default function Matrix() {
                       </div>
                       <div className="p-3 rounded-lg bg-[#1f2937]">
                         <p className="text-sm text-white/50">Total Earnings</p>
-                        <p className="text-lg font-bold text-emerald-400">{formatCurrency(memberTotalEarnings)}</p>
+                        <p className="text-lg font-bold text-emerald-400">
+                          {isFetchingStats ? (
+                            <span className="text-xs opacity-50">Loading...</span>
+                          ) : (
+                            formatCurrency(fetchedMemberStats ? fetchedMemberStats.totalReceivedCents / 100 : memberTotalEarnings)
+                          )}
+                        </p>
                       </div>
                     </div>
 
