@@ -9173,6 +9173,41 @@ const server = createServer(async (req, res) => {
         );
       }
 
+      // Consensus Merge Interceptor for mlm_pins (Fixes stale UI rollbacks)
+      // This prevents a stale Admin UI from accidentally "unsuspending" or "re-enabling" used/suspended PINs.
+      if (normalizedIncomingState.mlm_pins && !forceWrite) {
+        try {
+          const currentPinsRaw = await readStateKeyValue('mlm_pins');
+          if (currentPinsRaw) {
+            const currentPins = safeParseJSON(currentPinsRaw);
+            const incomingPins = safeParseJSON(normalizedIncomingState.mlm_pins);
+            if (Array.isArray(currentPins) && Array.isArray(incomingPins)) {
+              const currentByCode = new Map(currentPins.map((p) => [String(p.pinCode || '').trim().toUpperCase(), p]));
+              let mergedAny = false;
+              const mergedPins = incomingPins.map((p) => {
+                const pinCode = String(p.pinCode || '').trim().toUpperCase();
+                const serverPin = currentByCode.get(pinCode);
+                if (serverPin) {
+                  const sStatus = String(serverPin.status || '').toLowerCase();
+                  const iStatus = String(p.status || '').toLowerCase();
+                  // Rule: Cannot downgrade from 'suspended' or 'used' back to 'unused' via bulk state update.
+                  if ((iStatus === 'unused' || iStatus === 'generated') && (sStatus === 'suspended' || sStatus === 'used')) {
+                    mergedAny = true;
+                    return { ...p, status: serverPin.status };
+                  }
+                }
+                return p;
+              });
+              if (mergedAny) {
+                normalizedIncomingState.mlm_pins = JSON.stringify(mergedPins);
+              }
+            }
+          }
+        } catch (mergeError) {
+          console.warn('Consensus merge failed (skipped):', mergeError.message);
+        }
+      }
+
       const replaceMissing = isChunked ? false : hasFullStateSnapshot(normalizedIncomingState);
       const saved = await writeStateToDB(normalizedIncomingState, replaceMissing);
 
