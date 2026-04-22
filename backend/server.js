@@ -267,14 +267,6 @@ const QUALIFICATION_LOCKED_USER_FIELDS = Object.freeze([
   'sponsorId',
   'parentId',
   'directCount',
-  'isActive',
-  'accountStatus',
-  'deactivationReason',
-  'activatedAt',
-  'reactivatedAt',
-  'blockedAt',
-  'blockedUntil',
-  'blockedReason',
   'isAdmin'
 ]);
 

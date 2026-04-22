@@ -1898,6 +1898,19 @@ interface AuthState {
 function evaluateUserAccess(user: User): { allowed: boolean; user: User; message?: string } {
   let resolvedUser = Database.getUserByUserId(user.userId) || Database.getUserById(user.id) || user;
 
+  // If the passed 'user' object has fresh data (e.g. from backend login), use its state as truth
+  // This prevents locally-stale 'reactivatedAt' timestamps from immediately re-deactivating the user
+  if (user) {
+    resolvedUser = {
+      ...resolvedUser,
+      isActive: user.isActive,
+      deactivationReason: user.deactivationReason,
+      reactivatedAt: user.reactivatedAt,
+      accountStatus: user.accountStatus,
+      blockedUntil: user.blockedUntil,
+      blockedReason: user.blockedReason
+    };
+  }
   if (AUTH_MAINTENANCE_ENABLED && !resolvedUser.isAdmin) {
     return {
       allowed: false,
@@ -4347,9 +4360,11 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Only admin can reactivate users' };
     }
 
-    const syncGate = Database.getSensitiveActionSyncGate();
-    if (!syncGate.allowed) {
-      return { success: false, message: syncGate.message || 'Server sync is not ready. Please wait and retry reactivation.' };
+    // Fetch fresh data so we have the latest user state before checking/modifying
+    try {
+      await Database.ensureFreshData({ keys: [DB_KEYS.USERS] });
+    } catch {
+      // best-effort; proceed with cached data
     }
 
     const targetUser = Database.getUserByUserId(targetUserId);
@@ -4357,8 +4372,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'User not found' };
     }
 
-    if (targetUser.deactivationReason !== 'direct_referral_deadline') {
-      return { success: false, message: 'User was not auto-deactivated for direct referral deadline' };
+    // Allow admin to reactivate any deactivated user regardless of deactivation reason
+    if (targetUser.isActive) {
+      return { success: false, message: 'User is already active' };
     }
 
     const result = Database.reactivateUser(targetUser.id);
@@ -4384,7 +4400,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     await Database.ensureFreshData({ keys: [DB_KEYS.USERS] });
     get().loadAllUsers();
-    return { success: true, message: `User ${targetUserId} reactivated. 30-day deadline restarted.` };
+    return { success: true, message: `User ${targetUserId} has been successfully reactivated.` };
   },
 
   addFundsToUser: async (userId: string, amount: number, walletType: 'deposit' | 'income' | 'royalty' = 'deposit', note?: string) => {
