@@ -9055,12 +9055,15 @@ const server = createServer(async (req, res) => {
           [targetV2Status, pinCode]
         );
 
+      const result = await executeV2TransactionWithRetry(async (connection) => {
+        // ... (transaction logic) ...
         return {
           status: 200,
           payload: { ok: true, pinCode, oldStatus, newStatus }
         };
       }, 'v2AdminPinStatusUpdate');
 
+      invalidateStateSnapshotCache();
       sendJson(res, result.status, result.payload);
       return;
     } catch (error) {
@@ -9180,7 +9183,10 @@ const server = createServer(async (req, res) => {
           const currentPinsRaw = await readStateKeyValue('mlm_pins');
           if (currentPinsRaw) {
             const currentPins = safeParseJSON(currentPinsRaw);
-            const incomingPins = safeParseJSON(normalizedIncomingState.mlm_pins);
+            // Handle both stringified and already-parsed incoming pins
+            const rawIncomingPins = normalizedIncomingState.mlm_pins;
+            const incomingPins = typeof rawIncomingPins === 'string' ? safeParseJSON(rawIncomingPins) : rawIncomingPins;
+
             if (Array.isArray(currentPins) && Array.isArray(incomingPins)) {
               const currentByCode = new Map(currentPins.map((p) => [String(p.pinCode || '').trim().toUpperCase(), p]));
               let mergedAny = false;
@@ -9199,7 +9205,8 @@ const server = createServer(async (req, res) => {
                 return p;
               });
               if (mergedAny) {
-                normalizedIncomingState.mlm_pins = JSON.stringify(mergedPins);
+                // Keep the same format (Object or String) as the incoming data
+                normalizedIncomingState.mlm_pins = typeof rawIncomingPins === 'string' ? JSON.stringify(mergedPins) : mergedPins;
               }
             }
           }
@@ -9210,11 +9217,14 @@ const server = createServer(async (req, res) => {
 
       const replaceMissing = isChunked ? false : hasFullStateSnapshot(normalizedIncomingState);
       const saved = await writeStateToDB(normalizedIncomingState, replaceMissing);
+      // Aggressively invalidate cache so registrations and other admins see the truth immediately
+      invalidateStateSnapshotCache();
 
       // Synchronize PIN status changes (like 'suspended') to V2 database
       if (normalizedIncomingState.mlm_pins) {
         try {
-          const pinsSync = JSON.parse(normalizedIncomingState.mlm_pins);
+          const rawPinsForSync = normalizedIncomingState.mlm_pins;
+          const pinsSync = typeof rawPinsForSync === 'string' ? JSON.parse(rawPinsForSync) : rawPinsForSync;
           if (Array.isArray(pinsSync)) {
             for (const p of pinsSync) {
               const pStatus = String(p.status).toLowerCase();
