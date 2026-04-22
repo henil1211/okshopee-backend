@@ -9101,6 +9101,28 @@ const server = createServer(async (req, res) => {
 
       const replaceMissing = isChunked ? false : hasFullStateSnapshot(normalizedIncomingState);
       const saved = await writeStateToDB(normalizedIncomingState, replaceMissing);
+
+      // Synchronize PIN status changes (like 'suspended') to V2 database
+      if (normalizedIncomingState.mlm_pins) {
+        try {
+          const pinsSync = JSON.parse(normalizedIncomingState.mlm_pins);
+          if (Array.isArray(pinsSync)) {
+            for (const p of pinsSync) {
+              const pStatus = String(p.status).toLowerCase();
+              if (['unused', 'suspended', 'generated'].includes(pStatus)) {
+                const targetStatus = pStatus === 'suspended' ? 'suspended' : 'generated';
+                await pool.execute(
+                  "UPDATE v2_pins SET status = ?, updated_at = NOW(3) WHERE pin_code = ? AND status NOT IN ('used', 'expired')",
+                  [targetStatus, p.pinCode]
+                ).catch(() => {});
+              }
+            }
+          }
+        } catch (syncError) {
+          console.warn('Silent failure in PIN status sync:', syncError.message);
+        }
+      }
+
       sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt });
     } catch (error) {
       const message = getErrorMessage(error, 'Failed to persist state');
