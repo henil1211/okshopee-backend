@@ -267,6 +267,14 @@ const QUALIFICATION_LOCKED_USER_FIELDS = Object.freeze([
   'sponsorId',
   'parentId',
   'directCount',
+  'isActive',
+  'accountStatus',
+  'deactivationReason',
+  'activatedAt',
+  'reactivatedAt',
+  'blockedAt',
+  'blockedUntil',
+  'blockedReason',
   'isAdmin'
 ]);
 
@@ -7999,7 +8007,7 @@ const server = createServer(async (req, res) => {
         });
         return;
       }
-      if (requestedUserCode !== authContext.actorUserCode && !authContext.authSubjectIsAdmin) {
+      if (requestedUserCode !== authContext.actorUserCode) {
         sendJson(res, 403, {
           ok: false,
           error: 'Actor is only allowed to read their effective userCode wallet snapshot',
