@@ -7874,6 +7874,16 @@ const server = createServer(async (req, res) => {
       await upsertStateKey('mlm_transactions', transactions);
       await upsertStateKey('mlm_notifications', notifications);
       await upsertStateKey('mlm_safety_pool', safetyPool);
+      
+      // Synchronize PIN usage to V2 database
+      await connection.execute(
+        `UPDATE v2_pins 
+         SET status = 'used', 
+             used_by_user_id = (SELECT id FROM v2_users WHERE user_code = ?),
+             used_at = ?
+         WHERE pin_code = ?`,
+        [createdUser.userId, nowDb, pinCode]
+      );
 
       await connection.commit();
       transactionOpen = false;
