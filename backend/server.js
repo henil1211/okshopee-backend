@@ -7475,11 +7475,16 @@ const server = createServer(async (req, res) => {
 
       const selectedPin = pins[pinIndex];
       const selectedPinStatus = String(selectedPin?.status || '').toLowerCase();
+
+      // BLOCK SUSPENDED PINS (Primary Security Check)
       if (selectedPinStatus === 'suspended') {
         throw createApiError(409, 'PIN is suspended by admin', 'PIN_SUSPENDED');
       }
 
-      if (selectedPinStatus !== 'unused') {
+      // A PIN is available for NEW registration if it is 'unused' (Legacy) or 'generated' (V2)
+      const isAvailablePin = selectedPinStatus === 'unused' || selectedPinStatus === 'generated';
+
+      if (!isAvailablePin) {
         const replayUserRef = String(selectedPin?.registrationUserId || selectedPin?.usedById || '').trim();
         const replayUser = usersByInternalId.get(replayUserRef) || usersByUserId.get(replayUserRef);
         if (replayUser?.userId) {
