@@ -9055,8 +9055,6 @@ const server = createServer(async (req, res) => {
           [targetV2Status, pinCode]
         );
 
-      const result = await executeV2TransactionWithRetry(async (connection) => {
-        // ... (transaction logic) ...
         return {
           status: 200,
           payload: { ok: true, pinCode, oldStatus, newStatus }
