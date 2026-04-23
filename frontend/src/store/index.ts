@@ -285,6 +285,7 @@ function mapV2ReadTypeToTransactionType(
   }
   if (normalizedTxType === 'withdrawal_debit') return 'withdrawal';
   if (normalizedTxType === 'pin_purchase') return 'pin_purchase';
+  if (normalizedTxType === 'help_settlement' && signedAmountCents >= 0) return 'receive_help';
   if (normalizedTxType === 'referral_credit') {
     if (normalizedWalletType === 'locked_income' && signedAmountCents >= 0) return 'receive_help';
     if (normalizedDescription.includes('help') && signedAmountCents >= 0) return 'receive_help';

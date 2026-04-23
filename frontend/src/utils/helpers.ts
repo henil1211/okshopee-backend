@@ -287,7 +287,7 @@ export async function uploadDataUrlToBackend(params: {
   sizeBytes: number;
 }> {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 25000);
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
   try {
     const response = await fetch(`${BACKEND_UPLOAD_BASE_URL}/api/upload-file`, {
       method: 'POST',
@@ -318,7 +318,7 @@ export async function uploadDataUrlToBackend(params: {
   } catch (error: any) {
     clearTimeout(timeoutId);
     if (error?.name === 'AbortError') {
-      throw new Error('Upload server reached 25s limit. Please try a smaller file or check your connection.');
+      throw new Error('Upload server reached 60s limit. Please try a smaller file or check your connection.');
     }
     throw error;
   }

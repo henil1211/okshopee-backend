@@ -2633,9 +2633,11 @@ function resolveEffectiveLockedIncomeCents({
   const v2Locked = Math.max(0, Number(v2LockedIncomeCents || 0));
   const legacyLocked = Math.max(0, Number(legacyLockedIncomeCents || 0));
 
-  // If V2 lock state exists, trust V2 as source-of-truth and avoid stale legacy overhang.
+  // For locked help, V2 state (help-cascade rules) and Legacy state (historical) 
+  // represents different eras of help received. We must sum them to show the 
+  // correct lifetime locked total.
   if (hasV2LockSignals) {
-    return v2Locked;
+    return v2Locked + legacyLocked;
   }
 
   // Legacy fallback remains only for users not fully represented in V2 lock state yet.
@@ -4490,7 +4492,7 @@ async function createV2HelpLedgerTransaction(connection, {
       (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
        reference_type, reference_id, description, total_debit_cents, total_credit_cents)
      VALUES
-      (?, 'v2', 'referral_credit', 'posted', ?, ?,
+      (?, 'v2', 'help_settlement', 'posted', ?, ?,
        'help_event', ?, ?, ?, ?)`,
     [
       txUuid,
