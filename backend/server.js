@@ -349,7 +349,7 @@ async function connectMySQL() {
     password: MYSQL_PASSWORD,
     database: MYSQL_DATABASE,
     waitForConnections: true,
-    connectionLimit: 100,
+    connectionLimit: 50,
     queueLimit: 0,
     charset: 'utf8mb4',
     connectTimeout: 30000,
@@ -7611,6 +7611,7 @@ const server = createServer(async (req, res) => {
         throw createApiError(403, 'PIN does not belong to the authenticated actor', 'PIN_OWNER_MISMATCH');
       }
 
+      console.log(`[Registration] Starting new registration request for ${fullName} (${email})...`);
       const existingUserIds = new Set(users.map((user) => String(user?.userId || '').trim()));
       let generatedUserId = '';
       for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -7624,7 +7625,11 @@ const server = createServer(async (req, res) => {
         throw createApiError(500, 'Unable to allocate unique User ID', 'USER_ID_GENERATION_FAILED');
       }
 
-      const matrixByUserId = new Map(matrix.map((node) => [String(node?.userId || ''), node]));
+      const matrixByUserId = new Map();
+      for (let i = 0; i < matrix.length; i++) {
+        const node = matrix[i];
+        if (node?.userId) matrixByUserId.set(String(node.userId), node);
+      }
       const ensureMatrixNodeForUser = (userCode, visiting = new Set()) => {
         const normalized = String(userCode || '').trim();
         if (!normalized) return null;

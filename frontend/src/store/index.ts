@@ -19,7 +19,7 @@ function getBackendApiBase(): string {
   return resolveBackendBaseUrl(configured);
 }
 
-async function v2FetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 25000): Promise<Response> {
+async function v2FetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 60000): Promise<Response> {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -32,7 +32,7 @@ async function v2FetchWithTimeout(url: string, options: RequestInit = {}, timeou
   } catch (error: any) {
     clearTimeout(id);
     if (error?.name === 'AbortError') {
-      throw new Error('Server limit reached (25s). Your request might still be processing. Please wait 1 minute and refresh.');
+      throw new Error('Server limit reached (60s). Your request might still be processing. Please wait 1 minute and refresh.');
     }
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes('ECONNRESET')) {
