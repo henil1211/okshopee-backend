@@ -7894,79 +7894,64 @@ const server = createServer(async (req, res) => {
       transactionOpen = false;
       invalidateStateSnapshotCache();
 
-      const sideEffectWarnings = [];
-      let referralResult = null;
-      let helpEventResult = null;
-      let welcomeEmailDispatched = false;
-
-      const welcomeEmailResult = await sendRegistrationWelcomeEmailBestEffort({
-        to: createdUser.email,
-        fullName: createdUser.fullName,
-        userId: createdUser.userId,
-        email: createdUser.email,
-        phone: createdUser.phone,
-        loginPassword: createdUser.password,
-        transactionPassword: createdUser.transactionPassword
-      });
-      if (welcomeEmailResult.sent) {
-        welcomeEmailDispatched = true;
-      } else {
-        sideEffectWarnings.push(`Welcome email pending: ${welcomeEmailResult.error}`);
-      }
-
-      const referralSourceRef = `reg_pin_${createdUser.userId}_${sponsorUser.userId}`;
-      const referralIdempotencyKey = `reg_ref_${createdUser.userId}_${sponsorUser.userId}_${pinCode}`.slice(0, 128);
-      try {
-        const referralOutcome = await processV2ReferralCredit({
-          idempotencyKey: referralIdempotencyKey,
-          actorUserCode: createdUser.userId,
-          sourceUserCode: createdUser.userId,
-          beneficiaryUserCode: sponsorUser.userId,
-          allowInactiveActor: false,
-          sourceRef: referralSourceRef,
-          eventType: 'direct_referral',
-          levelNo: 1,
-          amountCents: 500,
-          description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`
-        });
-        referralResult = referralOutcome?.payload || null;
-      } catch (sideEffectError) {
-        const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle referral income');
-        sideEffectWarnings.push(`Referral settlement pending: ${warningMessage}`);
-      }
-
-      const helpSourceRef = `reg_help_${createdUser.userId}_${createdUser.userId}`;
-      const helpIdempotencyKey = `reg_help_${createdUser.userId}_${pinCode}`.slice(0, 128);
-      try {
-        const helpOutcome = await processV2HelpEvent({
-          idempotencyKey: helpIdempotencyKey,
-          actorUserCode: createdUser.userId,
-          sourceUserCode: createdUser.userId,
-          newMemberUserCode: createdUser.userId,
-          sourceRef: helpSourceRef,
-          eventType: 'activation_join',
-          allowInactiveActor: false,
-          description: `Activation help event for ${createdUser.fullName} (${createdUser.userId})`
-        });
-        helpEventResult = helpOutcome?.payload || null;
-      } catch (sideEffectError) {
-        const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle help event');
-        sideEffectWarnings.push(`Help settlement pending: ${warningMessage}`);
-      }
-
+      // Send Response Immediately
       sendJson(res, 200, {
         ok: true,
         idempotentReplay: false,
         userId: createdUser.userId,
         sponsorUserId: sponsorUser.userId,
         pinCode,
-        welcomeEmailDispatched,
-        referralSettled: !!referralResult,
-        helpSettled: !!helpEventResult,
-        sideEffectWarnings,
-        referralResult,
-        helpEventResult
+        sideEffects: 'backgrounded'
       });
+
+      // Side Effects (Backgrounded to prevent timeout)
+      (async () => {
+        try {
+          // 1. Welcome Email
+          await sendRegistrationWelcomeEmailBestEffort({
+            to: createdUser.email,
+            fullName: createdUser.fullName,
+            userId: createdUser.userId,
+            email: createdUser.email,
+            phone: createdUser.phone,
+            loginPassword: createdUser.password,
+            transactionPassword: createdUser.transactionPassword
+          });
+
+          // 2. Referral Settlement
+          const referralSourceRef = `reg_pin_${createdUser.userId}_${sponsorUser.userId}`;
+          const referralIdempotencyKey = `reg_ref_${createdUser.userId}_${sponsorUser.userId}_${pinCode}`.slice(0, 128);
+          await processV2ReferralCredit({
+            idempotencyKey: referralIdempotencyKey,
+            actorUserCode: createdUser.userId,
+            sourceUserCode: createdUser.userId,
+            beneficiaryUserCode: sponsorUser.userId,
+            allowInactiveActor: false,
+            sourceRef: referralSourceRef,
+            eventType: 'direct_referral',
+            levelNo: 1,
+            amountCents: 500,
+            description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`
+          }).catch(e => console.error(`[Background] Referral settlement failed for ${createdUser.userId}:`, e.message));
+
+          // 3. Help Settlement
+          const helpSourceRef = `reg_help_${createdUser.userId}_${createdUser.userId}`;
+          const helpIdempotencyKey = `reg_help_${createdUser.userId}_${pinCode}`.slice(0, 128);
+          await processV2HelpEvent({
+            idempotencyKey: helpIdempotencyKey,
+            actorUserCode: createdUser.userId,
+            sourceUserCode: createdUser.userId,
+            newMemberUserCode: createdUser.userId,
+            sourceRef: helpSourceRef,
+            eventType: 'activation_join',
+            allowInactiveActor: false,
+            description: `Activation help event for ${createdUser.fullName} (${createdUser.userId})`
+          }).catch(e => console.error(`[Background] Help settlement failed for ${createdUser.userId}:`, e.message));
+
+        } catch (sideEffectError) {
+          console.error(`[Background] Side effects failed for user ${createdUser.userId}:`, sideEffectError.message);
+        }
+      })();
     } catch (error) {
       if (transactionOpen && connection) {
         try {
