@@ -286,32 +286,42 @@ export async function uploadDataUrlToBackend(params: {
   mimeType: string;
   sizeBytes: number;
 }> {
-  const response = await fetch(`${BACKEND_UPLOAD_BASE_URL}/api/upload-file`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      scope: params.scope,
-      fileName: params.fileName,
-      mimeType: params.mimeType,
-      dataUrl: params.dataUrl
-    })
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
+  try {
+    const response = await fetch(`${BACKEND_UPLOAD_BASE_URL}/api/upload-file`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        scope: params.scope,
+        fileName: params.fileName,
+        mimeType: params.mimeType,
+        dataUrl: params.dataUrl
+      })
+    });
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    if (!response.ok || payload?.ok === false || typeof payload?.fileUrl !== 'string') {
+      const message =
+        typeof payload?.error === 'string'
+          ? payload.error
+          : `Failed to upload file (HTTP ${response.status})`;
+      throw new Error(message);
+    }
 
-  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-  if (!response.ok || payload?.ok === false || typeof payload?.fileUrl !== 'string') {
-    const message =
-      typeof payload?.error === 'string'
-        ? payload.error
-        : `Failed to upload file (HTTP ${response.status})`;
-    throw new Error(message);
+    return {
+      fileUrl: payload.fileUrl,
+      fileName: typeof payload?.fileName === 'string' ? payload.fileName : params.fileName,
+      mimeType: typeof payload?.mimeType === 'string' ? payload.mimeType : (params.mimeType || ''),
+      sizeBytes: Number(payload?.sizeBytes || 0) || 0
+    };
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error?.name === 'AbortError') {
+      throw new Error('Upload server reached 25s limit. Please try a smaller file or check your connection.');
+    }
+    throw error;
   }
-
-  return {
-    fileUrl: payload.fileUrl,
-    fileName: typeof payload?.fileName === 'string' ? payload.fileName : params.fileName,
-    mimeType: typeof payload?.mimeType === 'string' ? payload.mimeType : (params.mimeType || ''),
-    sizeBytes: Number(payload?.sizeBytes || 0) || 0
-  };
 }
 
 export async function uploadOptimizedFileToBackend(

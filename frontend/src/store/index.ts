@@ -19,6 +19,25 @@ function getBackendApiBase(): string {
   return resolveBackendBaseUrl(configured);
 }
 
+async function v2FetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 25000): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(id);
+    return response;
+  } catch (error: any) {
+    clearTimeout(id);
+    if (error?.name === 'AbortError') {
+      throw new Error('Server limit reached (25s). Your request might still be processing. Please wait 1 minute and refresh.');
+    }
+    throw error;
+  }
+}
+
 function normalizeRemoteRebuildError(payload: Record<string, unknown>, fallback: string): string {
   return typeof payload?.error === 'string'
     ? payload.error
@@ -452,7 +471,7 @@ async function fetchV2PinsForUser(user: User): Promise<Pin[]> {
 
   try {
     const pinsUrl = `${getBackendApiBase()}/api/v2/pins?userCode=${encodeURIComponent(userCode)}&limit=500`;
-    const response = await fetch(pinsUrl, { method: 'GET', headers: resolvedHeaders.headers });
+    const response = await v2FetchWithTimeout(pinsUrl, { method: 'GET', headers: resolvedHeaders.headers });
     if (!response.ok) return [];
 
     const payload = await response.json().catch(() => ({} as Record<string, unknown>));
@@ -841,7 +860,7 @@ async function submitV2ReferralCreditBySourceRef(params: {
   const idempotencyKey = `refsrc_${sourceUserCode}_${beneficiaryUserCode}_${sourceRefToken}`.slice(0, 120);
   const requestId = generateClientRequestId('referral_credit');
 
-  const response = await fetch(`${getBackendApiBase()}/api/v2/referrals/credit`, {
+  const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/referrals/credit`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -899,7 +918,7 @@ async function submitV2HelpEventBySourceRef(params: {
   const idempotencyKey = `help_${sourceUserCode}_${newMemberUserCode}_${sourceRefToken}`.slice(0, 120);
   const requestId = generateClientRequestId('help_event');
 
-  const response = await fetch(`${getBackendApiBase()}/api/v2/help-events`, {
+  const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/help-events`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -952,7 +971,7 @@ async function submitV2PinTransfer(params: {
 
   let response: Response;
   try {
-    response = await fetch(`${getBackendApiBase()}/api/v2/pin-transfers`, {
+    response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/pin-transfers`, {
       method: 'POST',
       headers: resolvedHeaders.headers,
       body: JSON.stringify({
@@ -1007,7 +1026,7 @@ async function submitV2AdminAdjustment(params: {
 
   let response: Response;
   try {
-    response = await fetch(`${getBackendApiBase()}/api/v2/admin/adjustments`, {
+    response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/admin/adjustments`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1071,7 +1090,7 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
 
   let response: Response;
   try {
-    response = await fetch(`${getBackendApiBase()}/api/v2/registrations`, {
+    response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/registrations`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -1675,7 +1694,7 @@ async function createServerStateBackup(params?: {
   reason?: string;
 }): Promise<{ fileName: string; filePath: string; createdAt: string; updatedAt: string | null; keys: string[] }> {
   const apiBase = getBackendApiBase();
-  const response = await fetch(`${apiBase}/api/backups/create`, {
+  const response = await v2FetchWithTimeout(`${apiBase}/api/backups/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1692,7 +1711,7 @@ async function createServerStateBackup(params?: {
   const deadline = Date.now() + (30 * 60 * 1000);
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 2500));
-    const statusResponse = await fetch(`${apiBase}/api/backups/status?t=${Date.now()}`, {
+    const statusResponse = await v2FetchWithTimeout(`${apiBase}/api/backups/status?t=${Date.now()}`, {
       method: 'GET'
     });
     const statusPayload = await statusResponse.json().catch(() => ({} as Record<string, unknown>));
@@ -1792,7 +1811,7 @@ async function dispatchSystemEmail(params: {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timeout = setTimeout(() => controller?.abort(), requestTimeoutMs);
     try {
-      const response = await fetch(apiUrl, {
+      const response = await v2FetchWithTimeout(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller?.signal,
@@ -3220,7 +3239,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
     const headers = resolvedHeaders.headers;
 
-    const response = await fetch(`${getBackendApiBase()}/api/v2/fund-transfers`, {
+    const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/fund-transfers`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -3343,7 +3362,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         return { success: false, message: 'Invalid withdrawal amount' };
       }
 
-      const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals`, {
+      const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/withdrawals`, {
         method: 'POST',
         headers: resolvedHeaders.headers,
         body: JSON.stringify({
@@ -3831,7 +3850,7 @@ export const usePinStore = create<PinState>((set, get) => ({
         return { success: false, message: 'Invalid PIN price configuration' };
       }
 
-      const response = await fetch(`${getBackendApiBase()}/api/v2/pins/purchase`, {
+      const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/pins/purchase`, {
         method: 'POST',
         headers: resolvedHeaders.headers,
         body: JSON.stringify({
@@ -5165,7 +5184,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const apiBase = getBackendApiBase();
 
     try {
-      const response = await fetch(`${apiBase}/api/audit/missing-matrix-users?limit=${clampedLimit}`, {
+      const response = await v2FetchWithTimeout(`${apiBase}/api/audit/missing-matrix-users?limit=${clampedLimit}`, {
         method: 'GET'
       });
       const payload = await response.json().catch(() => ({} as Record<string, unknown>));
