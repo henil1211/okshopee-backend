@@ -34,6 +34,10 @@ async function v2FetchWithTimeout(url: string, options: RequestInit = {}, timeou
     if (error?.name === 'AbortError') {
       throw new Error('Server limit reached (25s). Your request might still be processing. Please wait 1 minute and refresh.');
     }
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('ECONNRESET')) {
+      throw new Error('Connection interrupted by server. Your request might have succeeded or be pending. Please wait 1 minute, then refresh the page to check your ID.');
+    }
     throw error;
   }
 }

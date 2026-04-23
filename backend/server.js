@@ -349,7 +349,7 @@ async function connectMySQL() {
     password: MYSQL_PASSWORD,
     database: MYSQL_DATABASE,
     waitForConnections: true,
-    connectionLimit: 10,
+    connectionLimit: 100,
     queueLimit: 0,
     charset: 'utf8mb4',
     connectTimeout: 30000,
@@ -7302,10 +7302,15 @@ const server = createServer(async (req, res) => {
         return Math.max(0, Math.trunc(Math.round(normalized * 100)));
       };
 
+      const provisionedV2Users = new Set();
       const ensureV2UserAndWallets = async (legacyUser, legacyWallet) => {
         const userCode = normalizeV2UserCode(legacyUser?.userId);
         if (!isValidV2UserCode(userCode)) {
           throw createApiError(400, 'Invalid legacy user mapping for v2 provisioning', 'V2_PROVISION_USER_CODE_INVALID');
+        }
+
+        if (provisionedV2Users.has(userCode)) {
+          return { userCode };
         }
 
         const legacyUserId = String(legacyUser?.id || '').trim() || null;
@@ -7395,6 +7400,7 @@ const server = createServer(async (req, res) => {
           );
         }
 
+                provisionedV2Users.add(userCode);
         return { userId: Number(v2User.id), userCode };
       };
 
@@ -7904,53 +7910,57 @@ const server = createServer(async (req, res) => {
       });
 
       // Side Effects (Backgrounded to prevent timeout)
-      (async () => {
-        try {
-          // 1. Welcome Email
-          await sendRegistrationWelcomeEmailBestEffort({
-            to: createdUser.email,
-            fullName: createdUser.fullName,
-            userId: createdUser.userId,
-            email: createdUser.email,
-            phone: createdUser.phone,
-            loginPassword: createdUser.password,
-            transactionPassword: createdUser.transactionPassword
-          });
+      // Background tasks (Staggered to ensure main connection is released first)
+      setTimeout(() => {
+        (async () => {
+          try {
+            // 1. Welcome Email
+            await sendRegistrationWelcomeEmailBestEffort({
+              to: createdUser.email,
+              fullName: createdUser.fullName,
+              userId: createdUser.userId,
+              email: createdUser.email,
+              phone: createdUser.phone,
+              loginPassword: createdUser.password,
+              transactionPassword: createdUser.transactionPassword
+            });
 
-          // 2. Referral Settlement
-          const referralSourceRef = `reg_pin_${createdUser.userId}_${sponsorUser.userId}`;
-          const referralIdempotencyKey = `reg_ref_${createdUser.userId}_${sponsorUser.userId}_${pinCode}`.slice(0, 128);
-          await processV2ReferralCredit({
-            idempotencyKey: referralIdempotencyKey,
-            actorUserCode: createdUser.userId,
-            sourceUserCode: createdUser.userId,
-            beneficiaryUserCode: sponsorUser.userId,
-            allowInactiveActor: false,
-            sourceRef: referralSourceRef,
-            eventType: 'direct_referral',
-            levelNo: 1,
-            amountCents: 500,
-            description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`
-          }).catch(e => console.error(`[Background] Referral settlement failed for ${createdUser.userId}:`, e.message));
+            // 2. Referral Settlement for Sponsor
+            if (sponsorUser?.userId) {
+              const referralSourceRef = `reg_pin_${createdUser.userId}_${sponsorUser.userId}`;
+              const referralIdempotencyKey = `reg_ref_${createdUser.userId}_${sponsorUser.userId}_${pinCode}`.slice(0, 128);
+              await processV2ReferralCredit({
+                idempotencyKey: referralIdempotencyKey,
+                actorUserCode: createdUser.userId,
+                sourceUserCode: createdUser.userId,
+                beneficiaryUserCode: sponsorUser.userId,
+                allowInactiveActor: false,
+                sourceRef: referralSourceRef,
+                eventType: 'direct_referral',
+                levelNo: 1,
+                amountCents: 500,
+                description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`
+              }).catch((e) => console.error(`[Background] Referral settlement failed for ${createdUser.userId}:`, e.message));
+            }
 
-          // 3. Help Settlement
-          const helpSourceRef = `reg_help_${createdUser.userId}_${createdUser.userId}`;
-          const helpIdempotencyKey = `reg_help_${createdUser.userId}_${pinCode}`.slice(0, 128);
-          await processV2HelpEvent({
-            idempotencyKey: helpIdempotencyKey,
-            actorUserCode: createdUser.userId,
-            sourceUserCode: createdUser.userId,
-            newMemberUserCode: createdUser.userId,
-            sourceRef: helpSourceRef,
-            eventType: 'activation_join',
-            allowInactiveActor: false,
-            description: `Activation help event for ${createdUser.fullName} (${createdUser.userId})`
-          }).catch(e => console.error(`[Background] Help settlement failed for ${createdUser.userId}:`, e.message));
-
-        } catch (sideEffectError) {
-          console.error(`[Background] Side effects failed for user ${createdUser.userId}:`, sideEffectError.message);
-        }
-      })();
+            // 3. Help Settlement
+            const helpSourceRef = `reg_help_${createdUser.userId}_${createdUser.userId}`;
+            const helpIdempotencyKey = `reg_help_${createdUser.userId}_${pinCode}`.slice(0, 128);
+            await processV2HelpEvent({
+              idempotencyKey: helpIdempotencyKey,
+              actorUserCode: createdUser.userId,
+              sourceUserCode: createdUser.userId,
+              newMemberUserCode: createdUser.userId,
+              sourceRef: helpSourceRef,
+              eventType: 'activation_join',
+              allowInactiveActor: false,
+              description: `Activation help event for ${createdUser.fullName} (${createdUser.userId})`
+            }).catch((e) => console.error(`[Background] Help settlement failed for ${createdUser.userId}:`, e.message));
+          } catch (bgError) {
+            console.error('[Background Execution Error]', bgError);
+          }
+        })();
+      }, 100);
     } catch (error) {
       if (transactionOpen && connection) {
         try {
