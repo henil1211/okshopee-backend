@@ -2277,7 +2277,7 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
       lockedFirstTwoLifetime: Math.max(0, lockedFirstTwoLifetimeCents)
     },
     lifetimeTotalsCents: {
-      totalReceived: Math.max(0, Math.max(totalReceivedFromLedgerCents + syntheticEarningReceiveCents, legacyTotalReceivedCents)),
+      totalReceived: Math.max(0, Math.max(totalReceivedFromLedgerCents + syntheticEarningReceiveCents + syntheticLockedReceiveCents, legacyTotalReceivedCents)),
       totalGiven: Math.max(0, Math.max(totalGivenFromLedgerCents, legacyTotalGivenCents))
     }
   };
@@ -7913,6 +7913,7 @@ const server = createServer(async (req, res) => {
       // Background tasks (Staggered to ensure main connection is released first)
       setTimeout(() => {
         (async () => {
+          console.log(`[Background] Starting side effects for newly registered user ${createdUser.userId}...`);
           try {
             // 1. Welcome Email
             await sendRegistrationWelcomeEmailBestEffort({
@@ -7923,7 +7924,8 @@ const server = createServer(async (req, res) => {
               phone: createdUser.phone,
               loginPassword: createdUser.password,
               transactionPassword: createdUser.transactionPassword
-            });
+            }).then(() => console.log(`[Background] Welcome email sent to ${createdUser.email} for ${createdUser.userId}`))
+              .catch((e) => console.error(`[Background] Welcome email failed for ${createdUser.userId}:`, e.message));
 
             // 2. Referral Settlement for Sponsor
             if (sponsorUser?.userId) {
@@ -7940,7 +7942,8 @@ const server = createServer(async (req, res) => {
                 levelNo: 1,
                 amountCents: 500,
                 description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`
-              }).catch((e) => console.error(`[Background] Referral settlement failed for ${createdUser.userId}:`, e.message));
+              }).then(() => console.log(`[Background] Referral settlement success for ${createdUser.userId} -> Sponsor ${sponsorUser.userId}`))
+                .catch((e) => console.error(`[Background] Referral settlement failed for ${createdUser.userId}:`, e.message));
             }
 
             // 3. Help Settlement
@@ -7955,12 +7958,15 @@ const server = createServer(async (req, res) => {
               eventType: 'activation_join',
               allowInactiveActor: false,
               description: `Activation help event for ${createdUser.fullName} (${createdUser.userId})`
-            }).catch((e) => console.error(`[Background] Help settlement failed for ${createdUser.userId}:`, e.message));
+            }).then(() => console.log(`[Background] Help settlement triggered for ${createdUser.userId}`))
+              .catch((e) => console.error(`[Background] Help settlement failed for ${createdUser.userId}:`, e.message));
+
+            console.log(`[Background] All basic side effects initiated for ${createdUser.userId}`);
           } catch (bgError) {
-            console.error('[Background Execution Error]', bgError);
+            console.error(`[Background Execution Critical Error] for ${createdUser.userId}:`, bgError);
           }
         })();
-      }, 100);
+      }, 200);
     } catch (error) {
       if (transactionOpen && connection) {
         try {
