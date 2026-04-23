@@ -110,6 +110,12 @@ const LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES = Number.isFinite(LEDGER_MISMATCH_A
   && LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW >= 1
   ? Math.floor(LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW)
   : 60;
+
+// GLOBAL CACHE FOR STATE_STORE (Stops Login Timeouts)
+const STATE_MEM_CACHE = new Map();
+const STATE_MEM_CACHE_TTL = 300000; // 5 minutes
+  ? Math.floor(LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW)
+  : 60;
 const STATE_BACKUP_DIR = path.join(__dirname, 'data', 'backups');
 const UPLOADS_BASE_DIR = path.join(__dirname, 'data', 'uploads');
 const ALLOWED_UPLOAD_SCOPES = new Set([
@@ -4358,55 +4364,110 @@ async function buildLegacyActivationContributionPlanFromMatrixState(connection, 
   return plan;
 }
 
-async function resolveV2ImmediateUplineForAutoGive(connection, sourceUserCode) {
+async function resolveV2BeneficiaryForAutoGive(connection, sourceUserCode, targetLevel) {
   const normalizedSourceUserCode = normalizeV2UserCode(sourceUserCode);
   if (!isValidV2UserCode(normalizedSourceUserCode)) return null;
 
-  const [matrixRows] = await connection.execute(
-    `SELECT parent_user_code, position
-     FROM v2_matrix_nodes
-     WHERE user_code = ?
-     LIMIT 1
-     FOR UPDATE`,
-    [normalizedSourceUserCode]
-  );
+  let currentChildCode = normalizedSourceUserCode;
+  let targetNode = null;
+  let finalSide = 'unknown';
 
-  const matrixNode = Array.isArray(matrixRows) ? matrixRows[0] : null;
-  const parentUserCode = normalizeV2UserCode(matrixNode?.parent_user_code);
-  if (!isValidV2UserCode(parentUserCode)) return null;
+  // Climb the matrix N times to find the Nth-level upline
+  for (let depth = 1; depth <= targetLevel; depth++) {
+    const [matrixRows] = await connection.execute(
+      `SELECT parent_user_code, position
+       FROM v2_matrix_nodes
+       WHERE user_code = ?
+       LIMIT 1`,
+      [currentChildCode]
+    );
 
-  const [parentRows] = await connection.execute(
+    const node = Array.isArray(matrixRows) ? matrixRows[0] : null;
+    if (!node || !isValidV2UserCode(node.parent_user_code)) {
+      // If we hit the root before reaching the target level, 
+      // the system will typically hold the fund or route to admin.
+      return null;
+    }
+
+    // Capture the side relative to the IMMEDIATE parent for help logic context
+    if (depth === 1) {
+      const position = Number(node?.position);
+      finalSide = position === 0 ? 'left' : position === 1 ? 'right' : 'unknown';
+    }
+
+    currentChildCode = node.parent_user_code;
+    targetNode = node;
+  }
+
+  // Now verify and fetch the user at this level
+  const [userRows] = await connection.execute(
     `SELECT id, user_code, status
      FROM v2_users
      WHERE user_code = ?
      LIMIT 1
      FOR UPDATE`,
-    [parentUserCode]
+    [currentChildCode]
   );
 
-  const parentUser = Array.isArray(parentRows) ? parentRows[0] : null;
-  if (!parentUser || String(parentUser.status) !== 'active') return null;
-
-  const position = Number(matrixNode?.position);
-  const side = position === 0 ? 'left' : position === 1 ? 'right' : 'unknown';
+  const targetUser = Array.isArray(userRows) ? userRows[0] : null;
+  if (!targetUser) return null;
 
   return {
-    beneficiaryUserId: Number(parentUser.id),
-    beneficiaryUserCode: String(parentUser.user_code || parentUserCode),
-    side: normalizeV2HelpContributionSide(side)
+    beneficiaryUserId: Number(targetUser.id),
+    beneficiaryUserCode: String(targetUser.user_code),
+    side: normalizeV2HelpContributionSide(finalSide),
+    status: targetUser.status
   };
 }
 
 async function ensureV2HelpLevelStateRow(connection, userId, levelNo) {
+  // Check if we already have it
+  const [existing] = await connection.execute(
+    `SELECT id FROM v2_help_level_state WHERE user_id = ? AND level_no = ? LIMIT 1`,
+    [userId, levelNo]
+  );
+  if (existing.length > 0) return;
+
+  // New row: Check for legacy progress inheritance
+  let seedReceiveCount = 0;
+  let seedReceiveAmount = 0;
+
+  try {
+    const snapshot = await readStateFromDB(['mlm_users', 'mlm_wallets']);
+    const legacyUsers = Array.isArray(safeParseJSON(snapshot.state.mlm_users)) ? safeParseJSON(snapshot.state.mlm_users) : [];
+    const legacyWallets = Array.isArray(safeParseJSON(snapshot.state.mlm_wallets)) ? safeParseJSON(snapshot.state.mlm_wallets) : [];
+    
+    // Find the user's legacy ID
+    // We fetch user_code from v2_users
+    const [uRows] = await connection.execute('SELECT user_code FROM v2_users WHERE id = ? LIMIT 1', [userId]);
+    const userCode = uRows[0]?.user_code;
+
+    if (userCode) {
+      const legacyUser = legacyUsers.find(u => String(u.userId) === String(userCode));
+      if (legacyUser) {
+        const wallet = legacyWallets.find(w => w.userId === legacyUser.id);
+        if (wallet && levelNo === 1) {
+          // Rule: If legacy user has $5 locked, they are "1 help in"
+          if (Number(wallet.lockedIncomeWallet || 0) >= 5) {
+            seedReceiveCount = 1;
+            seedReceiveAmount = 500;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Legacy Inheritance] Error during seeding:', err);
+  }
+
   await connection.execute(
     `INSERT INTO v2_help_level_state
       (user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
        locked_qualification_cents, safety_deducted_cents,
        pending_give_cents, given_cents, income_credited_cents, last_event_seq)
      VALUES
-      (?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+      (?, ?, ?, ?, ?, 0, 0, ?, 0, 0, 0)
      ON DUPLICATE KEY UPDATE id = id`,
-    [userId, levelNo]
+    [userId, levelNo, seedReceiveCount, seedReceiveAmount, seedReceiveAmount, seedReceiveAmount]
   );
 }
 
@@ -4770,7 +4831,8 @@ async function applyV2HelpContributionSettlement(connection, {
   // Aggregate Give Logic: wait for the 2nd receive before sending the total to the upline.
   // This satisfies the user's requirement of 1 aggregated transaction rather than 2 split ones.
   if (settlementMode === 'locked_for_give' && nextReceiveCount === 2 && levelNo < 10) {
-    const autoGiveTarget = await resolveV2ImmediateUplineForAutoGive(connection, beneficiaryUser.user_code);
+    // SYSTEMATIC FIX: Climb the matrix to the correct target level (levelNo + 1)
+    const autoGiveTarget = await resolveV2BeneficiaryForAutoGive(connection, beneficiaryUser.user_code, levelNo + 1);
     if (autoGiveTarget?.beneficiaryUserId) {
       const autoGiveEventKey = `AUTO_GIVE:${beneficiaryUser.id}:${levelNo}:AGGREGATE`.slice(0, 180);
       
@@ -6152,6 +6214,13 @@ async function readStateFromDB(requestedKeys = []) {
     return readStateFromFile(requestedKeys);
   }
 
+  // CHECK CACHE
+  const cacheKey = (requestedKeys.length > 0 ? requestedKeys : ['ALL']).sort().join('|');
+  const cached = STATE_MEM_CACHE.get(cacheKey);
+  if (cached && (Date.now() - cached.timestamp < STATE_MEM_CACHE_TTL)) {
+    return cached.data;
+  }
+
   const keysToRead = requestedKeys.length > 0 ? requestedKeys : DB_KEYS;
   const placeholders = keysToRead.map(() => '?').join(',');
   const [rows] = await pool.execute(
@@ -6172,7 +6241,12 @@ async function readStateFromDB(requestedKeys = []) {
     }
   }
 
-  return { state, updatedAt: latestUpdatedAt };
+  const result = { state, updatedAt: latestUpdatedAt };
+  
+  // POPULATE CACHE
+  STATE_MEM_CACHE.set(cacheKey, { data: result, timestamp: Date.now() });
+  
+  return result;
 }
 
 async function writeStateToDB(nextState, replaceMissing = true) {
