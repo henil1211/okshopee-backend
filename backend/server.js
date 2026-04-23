@@ -114,8 +114,6 @@ const LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES = Number.isFinite(LEDGER_MISMATCH_A
 // GLOBAL CACHE FOR STATE_STORE (Stops Login Timeouts)
 const STATE_MEM_CACHE = new Map();
 const STATE_MEM_CACHE_TTL = 300000; // 5 minutes
-  ? Math.floor(LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW)
-  : 60;
 const STATE_BACKUP_DIR = path.join(__dirname, 'data', 'backups');
 const UPLOADS_BASE_DIR = path.join(__dirname, 'data', 'uploads');
 const ALLOWED_UPLOAD_SCOPES = new Set([
