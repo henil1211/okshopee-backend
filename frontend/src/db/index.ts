@@ -499,7 +499,7 @@ class Database {
   private static remoteStateUpdatedAt: string | null = null;
   private static hydratedRemoteKeys = new Set<string>();
   private static readonly REMOTE_SYNC_RETRY_INTERVAL_MS = 45_000;
-  private static readonly REMOTE_SYNC_REQUEST_TIMEOUT_MS = 10_000;
+  private static readonly REMOTE_SYNC_REQUEST_TIMEOUT_MS = 60000;
   private static readonly SENSITIVE_ACTION_BLOCK_AFTER_PENDING_MS = 2 * 60 * 1000;
   // Large, bursty datasets can exceed browser quota and block the main thread.
   // Keep these keys in-memory and sync to backend in batches.
@@ -1074,7 +1074,7 @@ class Database {
           this.remoteSyncQueued = false;
           this.remoteSyncDirtyKeys.clear();
           this.markSyncing('Refreshing from server');
-          void this.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 15000, retryDelayMs: 500 });
+          void this.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 60000, retryDelayMs: 500 });
         }
 
         if (response.status === 403) {
@@ -10627,7 +10627,7 @@ class Database {
     }
 
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeoutMs = 30000;
+    const timeoutMs = 60000;
     const timeout = setTimeout(() => controller?.abort(), timeoutMs);
 
     try {

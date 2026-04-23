@@ -350,11 +350,11 @@ async function connectMySQL() {
     database: MYSQL_DATABASE,
     waitForConnections: true,
     connectionLimit: 50,
+    maxIdle: 10,
+    idleTimeout: 10000,
     queueLimit: 0,
     charset: 'utf8mb4',
-    connectTimeout: 30000,
-    enableKeepAlive: true,
-    keepAliveInitialDelay: 0
+    connectTimeout: 30000
   });
 
   // Create the state_store table if it doesn't exist

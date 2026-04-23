@@ -810,7 +810,7 @@ export default function Admin() {
       await Database.commitCriticalAction(() => {
         work();
         return true;
-      }, { timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 });
+      }, { timeoutMs: 60000, maxAttempts: 3, retryDelayMs: 1500 });
       await Database.hydrateFromServerBatches(
         [[
           'mlm_marketplace_categories',
@@ -818,7 +818,7 @@ export default function Admin() {
           'mlm_marketplace_banners',
           'mlm_marketplace_deals',
         ]],
-        { strict: false, maxAttempts: 1, timeoutMs: 15000, retryDelayMs: 500, continueOnError: true, requireAnySuccess: false }
+        { strict: false, maxAttempts: 1, timeoutMs: 60000, retryDelayMs: 500, continueOnError: true, requireAnySuccess: false }
       );
       loadMarketplaceData();
       toast.success(successMessage);
@@ -1365,7 +1365,7 @@ export default function Admin() {
     await Database.hydrateFromServerBatches(Database.getAdminDeferredRemoteSyncBatches(), {
       strict: true,
       maxAttempts: 1,
-      timeoutMs: 30000,
+      timeoutMs: 60000,
       retryDelayMs: 1000,
       continueOnError: true,
       requireAnySuccess: false,
@@ -1589,7 +1589,7 @@ export default function Admin() {
         await Database.hydrateFromServer({
           strict: true,
           maxAttempts: 2,
-          timeoutMs: 15000,
+          timeoutMs: 60000,
           retryDelayMs: 1500,
           keys: [DB_KEYS.ANNOUNCEMENTS, DB_KEYS.NOTIFICATIONS]
         });
@@ -1642,7 +1642,7 @@ export default function Admin() {
         await Database.hydrateFromServer({
           strict: true,
           maxAttempts: 2,
-          timeoutMs: 15000,
+          timeoutMs: 60000,
           retryDelayMs: 1200,
           keys: [DB_KEYS.SUPPORT_TICKETS]
         });
@@ -3364,7 +3364,7 @@ export default function Admin() {
     if (isPinRefreshing) return;
     setIsPinRefreshing(true);
     try {
-      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 60000, maxAttempts: 2, retryDelayMs: 1200 });
       await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
     } catch {
       // best-effort sync
@@ -4920,7 +4920,7 @@ export default function Admin() {
     try {
       const result = await Database.commitCriticalAction(
         () => Database.startFundRecoveryForUnsupportedPinBuys(targetUserId),
-        { timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 }
+        { timeoutMs: 60000, maxAttempts: 3, retryDelayMs: 1500 }
       );
       if (result.success) {
         toast.success(result.message);
@@ -4947,7 +4947,7 @@ export default function Admin() {
     try {
       const result = await Database.commitCriticalAction(
         () => Database.startFundRecoveryForReferralIncomeMismatch(targetUserId, likelyCorrectUserId),
-        { timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 }
+        { timeoutMs: 60000, maxAttempts: 3, retryDelayMs: 1500 }
       );
       if (result.success) {
         toast.success(result.message);
@@ -4974,7 +4974,7 @@ export default function Admin() {
     try {
       const result = await Database.commitCriticalAction(
         () => Database.startFundRecoveryForDuplicateLockedGiveHelpMismatch(mismatchKey),
-        { timeoutMs: 30000, maxAttempts: 3, retryDelayMs: 1500 }
+        { timeoutMs: 60000, maxAttempts: 3, retryDelayMs: 1500 }
       );
       if (result.success) {
         toast.success(result.message);

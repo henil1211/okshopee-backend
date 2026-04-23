@@ -1610,7 +1610,7 @@ function getPostRegistrationRetryQueueStatusSnapshot(): PostRegistrationRetryQue
   };
 }
 
-export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 15000): PostRegistrationRetryQueueStatus {
+export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 60000): PostRegistrationRetryQueueStatus {
   const [status, setStatus] = useState<PostRegistrationRetryQueueStatus>(() => getPostRegistrationRetryQueueStatusSnapshot());
 
   useEffect(() => {
@@ -1621,7 +1621,7 @@ export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 15000): Pos
     updateStatus();
     const intervalMs = Number.isFinite(pollIntervalMs)
       ? Math.max(5000, Math.min(60000, Math.trunc(pollIntervalMs)))
-      : 15000;
+      : 60000;
     const intervalId = setInterval(updateStatus, intervalMs);
 
     const handleVisibilityChange = () => {
@@ -2147,7 +2147,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await Database.ensureFreshData({
       keys: Database.getStartupRemoteSyncBatches().flat(),
-      timeoutMs: 10000,
+      timeoutMs: 60000,
       maxAttempts: 2,
       retryDelayMs: 700
     });
@@ -2193,7 +2193,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       await Database.forceRemoteSyncKeysNow([DB_KEYS.IMPERSONATION], {
         force: true,
-        timeoutMs: 15000,
+        timeoutMs: 60000,
         maxAttempts: 2,
         retryDelayMs: 600
       });
@@ -2212,7 +2212,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Persist end-session quickly so background hydration does not re-introduce stale active sessions.
       void Database.forceRemoteSyncKeysNow([DB_KEYS.IMPERSONATION], {
         force: true,
-        timeoutMs: 15000,
+        timeoutMs: 60000,
         maxAttempts: 2,
         retryDelayMs: 600
       }).catch(() => {
@@ -2230,7 +2230,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await Database.ensureFreshData({
       keys: Database.getRegistrationFreshDataKeys(),
-      timeoutMs: 10000,
+      timeoutMs: 60000,
       maxAttempts: 2,
       retryDelayMs: 700
     });
@@ -2624,7 +2624,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           keys: Database.getRegistrationFreshDataKeys(),
           strict: false,
           maxAttempts: 2,
-          timeoutMs: 30000,
+          timeoutMs: 60000,
           retryDelayMs: 1000
         });
       } catch {
@@ -2748,7 +2748,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         void Database.forceRemoteSyncNowWithOptions({
           full: false,
           force: true,
-          timeoutMs: 30000,
+          timeoutMs: 60000,
           maxAttempts: 2,
           retryDelayMs: 1000
         }).catch(() => {
@@ -2780,7 +2780,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             await Database.forceRemoteSyncNowWithOptions({
               full: false,
               force: true,
-              timeoutMs: 30000,
+              timeoutMs: 60000,
               maxAttempts: 2,
               retryDelayMs: 1000
             });
@@ -2788,7 +2788,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               keys: [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
               strict: true,
               maxAttempts: 2,
-              timeoutMs: 15000,
+              timeoutMs: 60000,
               retryDelayMs: 800
             });
             referralResult = await submitV2ReferralCreditBySourceRef({
@@ -2835,7 +2835,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             await Database.forceRemoteSyncNowWithOptions({
               full: false,
               force: true,
-              timeoutMs: 30000,
+              timeoutMs: 60000,
               maxAttempts: 2,
               retryDelayMs: 1000
             });
@@ -2843,7 +2843,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               keys: [DB_KEYS.USERS, DB_KEYS.MATRIX],
               strict: true,
               maxAttempts: 2,
-              timeoutMs: 15000,
+              timeoutMs: 60000,
               retryDelayMs: 800
             });
             helpEventResult = await submitV2HelpEventBySourceRef({
@@ -2933,7 +2933,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           keys: ['mlm_users', 'mlm_settings'],
           strict: false,
           maxAttempts: 1,
-          timeoutMs: 10000,
+          timeoutMs: 60000,
           retryDelayMs: 600
         });
       } catch {
@@ -3610,7 +3610,7 @@ export const usePinStore = create<PinState>((set, get) => ({
       get().loadPins(fromUserId);
 
       try {
-        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 60000, maxAttempts: 2, retryDelayMs: 1200 });
         await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
         get().loadPins(fromUserId);
       } catch {
@@ -3784,7 +3784,7 @@ export const usePinStore = create<PinState>((set, get) => ({
 
       const synced = await Database.forceRemoteSyncKeysNow(syncKeys, {
         force: true,
-        timeoutMs: 25000,
+        timeoutMs: 60000,
         maxAttempts: 3,
         retryDelayMs: 1200
       });
@@ -3920,7 +3920,7 @@ export const usePinStore = create<PinState>((set, get) => ({
           try {
             await Database.forceRemoteSyncKeysNow([DB_KEYS.PINS], {
               force: true,
-              timeoutMs: 15000,
+              timeoutMs: 60000,
               maxAttempts: 2,
               retryDelayMs: 1000
             });
@@ -4212,7 +4212,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     get().loadAllPins();
 
     try {
-      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 60000, maxAttempts: 2, retryDelayMs: 1200 });
       await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
       get().loadPendingPinRequests();
       get().loadAllPinRequests();
@@ -4407,7 +4407,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     const synced = await Database.forceRemoteSyncKeysNow([DB_KEYS.USERS], {
       force: true,
-      timeoutMs: 15000,
+      timeoutMs: 60000,
       maxAttempts: 3,
       retryDelayMs: 500
     });
@@ -4487,7 +4487,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     Database.deductFromSafetyPool(normalizedAmount, adminUser.id, poolReason);
     await Database.forceRemoteSyncKeysNow([DB_KEYS.SAFETY_POOL], {
       force: true,
-      timeoutMs: 30000,
+      timeoutMs: 60000,
       maxAttempts: 3,
       retryDelayMs: 1500
     }).catch(() => false);
@@ -4571,7 +4571,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     await Database.forceRemoteSyncKeysNow([DB_KEYS.SAFETY_POOL], {
       force: true,
-      timeoutMs: 30000,
+      timeoutMs: 60000,
       maxAttempts: 3,
       retryDelayMs: 1500
     }).catch(() => false);
@@ -4660,7 +4660,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       syncOptions: {
         full: false,
         force: true,
-        timeoutMs: 30000,
+        timeoutMs: 60000,
         maxAttempts: 3,
         retryDelayMs: 1500
       }
@@ -5052,7 +5052,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       });
       if (!synced) {
         try {
-          await Database.hydrateFromServer({ strict: true, maxAttempts: 3, timeoutMs: 15000, retryDelayMs: 1200 });
+          await Database.hydrateFromServer({ strict: true, maxAttempts: 3, timeoutMs: 60000, retryDelayMs: 1200 });
           const missingAfterHydrate = createdUserIds.filter((uid) => !Database.getUserByUserId(uid));
           if (missingAfterHydrate.length === 0) {
             const baseFailedCount = failed.length;
