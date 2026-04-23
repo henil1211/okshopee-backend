@@ -827,7 +827,7 @@ function parseStateJsonObject(raw, fallback = null) {
   return parsed;
 }
 
-function normalizeQualificationDerivedStateForWrite(incomingState, currentState) {
+function normalizeQualificationDerivedStateForWrite(incomingState, currentState, isAdmin = false) {
   if (!incomingState || typeof incomingState !== 'object') {
     return incomingState;
   }
@@ -872,7 +872,12 @@ function normalizeQualificationDerivedStateForWrite(incomingState, currentState)
         }
 
         const nextUser = { ...incomingUser };
+        // Structure constant fields (Sponsor etc) are ALWAYS locked
+        const alwaysLocked = ['sponsorId', 'parentId', 'id', 'userId'];
         for (const field of QUALIFICATION_LOCKED_USER_FIELDS) {
+          if (isAdmin && !alwaysLocked.includes(field)) {
+             continue; // Allow admin to change isActive, reactivatedAt, etc.
+          }
           nextUser[field] = existingUser[field];
         }
         return nextUser;
@@ -9180,7 +9185,8 @@ const server = createServer(async (req, res) => {
       if (FINANCE_ENGINE_MODE === 'v2') {
         normalizedIncomingState = normalizeQualificationDerivedStateForWrite(
           incomingState,
-          currentSnapshot?.state || {}
+          currentSnapshot?.state || {},
+          !!stateActorContext?.authSubjectIsAdmin
         );
       }
 
