@@ -670,7 +670,8 @@ export function getTransactionTypeLabel(type: string, description?: string): str
     withdrawal: 'Withdrawal',
     reentry: 'Reentry',
     safety_pool: 'Safety Pool',
-    admin_credit: 'Admin Credit',
+    admin_credit: 'System Credit',
+    help_settlement: 'Help Received',
     admin_debit: 'Admin Debit',
     fund_recovery: 'Fund Recovery',
     system_fee: 'System Fee'
