@@ -1,0 +1,298 @@
+=== EXTREMELY DETAILED SYSTEM AUDIT REPORT ===
+Generated At: 25/4/2026, 12:29:37 am
+
+--- [PART 1] USERS STUCK AT LEVEL 1 (MISSING AUTO-GIVE) ---
+
+USER: Vikas Jain (1000001) [ID: 1]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: SYSTEM / COMPANY (No Parent found)
+  --------------------------------------------------
+
+USER: Amit Kumar (2901889) [ID: 46]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: SYSTEM / COMPANY (No Grandparent above parent)
+  --------------------------------------------------
+
+USER: G SANTOSH KUMAR  (1273963) [ID: 19]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Sunil patel  (2259357) [Grandparent]
+  --------------------------------------------------
+
+USER: Reshma (7497863) [ID: 114]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Rohit (1534363) [Grandparent]
+  --------------------------------------------------
+
+USER: Manoj (8462229) [ID: 127]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Vaibhav (4980892) [Grandparent]
+  --------------------------------------------------
+
+USER: Raju 1 (7096845) [ID: 110]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Kiran 7 (6709222) [Grandparent]
+  --------------------------------------------------
+
+USER: Raju 3 (9592992) [ID: 277]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Rajubhai (7958187) [Grandparent]
+  --------------------------------------------------
+
+USER: Raju 4 (1869853) [ID: 279]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Rajubhai (7958187) [Grandparent]
+  --------------------------------------------------
+
+USER: Raju 2 (4669865) [ID: 71]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Kiran 7 (6709222) [Grandparent]
+  --------------------------------------------------
+
+USER: Raju 5 (6669336) [ID: 283]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Rajubhai (7958187) [Grandparent]
+  --------------------------------------------------
+
+USER: Raju 6 (2033428) [ID: 285]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Rajubhai (7958187) [Grandparent]
+  --------------------------------------------------
+
+USER: JYOTHI BANDARU (8390154) [ID: 125]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+    - Help #1: $5 | Locked first-two help level 1 for 6669336 | 19/4/2026, 3:26:46 pm
+  Auto-Give Target: Sun Official  (8426673) [Grandparent]
+  --------------------------------------------------
+
+USER: Lalit Pagi (2867469) [ID: 44]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Lalit Pagi (7477342) [Grandparent]
+  --------------------------------------------------
+
+USER: Paresh Patel (8574396) [ID: 130]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Tejas Patel (1508634) [Grandparent]
+  --------------------------------------------------
+
+USER: Aman (6335240) [ID: 100]
+  Status: Received $10 total (2 Helps). Missing Auto-Give to Grandparent.
+  Help History:
+  Auto-Give Target: Manoj (8462229) [Grandparent]
+  --------------------------------------------------
+
+
+--- [PART 2] GHOST TRANSACTIONS (FUNDS WITHOUT RECIPIENT) ---
+
+TRANSACTION ID: 186
+  Amount: $22
+  Reason: Direct PIN buy from fund wallet (2 PINs) (Type: pin_purchase)
+  Sender: Tejas Patel (1271427)
+  Intended Recipient: Target 2000002 (2000002)
+  Created At: 20/4/2026, 6:26:15 am
+  --------------------------------------------------
+
+TRANSACTION ID: 187
+  Amount: $10
+  Reason: Withdrawal to wallet submitted by 8564252 (Type: withdrawal_debit)
+  Sender: Glenn Rod (8564252)
+  Intended Recipient: COULD NOT CALCULATE FROM REFERENCE
+  Created At: 20/4/2026, 10:59:11 am
+  --------------------------------------------------
+
+TRANSACTION ID: 193
+  Amount: $5
+  Reason: Locked first-two help level 1 for 2139053 (Type: referral_credit)
+  Sender: Rathva sunilbhai (4302819)
+  Intended Recipient: LEGACY USER ID: 155
+  Created At: 21/4/2026, 3:59:19 am
+  --------------------------------------------------
+
+TRANSACTION ID: 194
+  Amount: $10
+  Reason: Locked first-two help level 2 for 6709222 (Type: referral_credit)
+  Sender: Raju 2 (4669865)
+  Intended Recipient: LEGACY USER ID: 165
+  Created At: 21/4/2026, 8:23:56 am
+  --------------------------------------------------
+
+TRANSACTION ID: 195
+  Amount: $10
+  Reason: Locked first-two help level 2 for 6709222 (Type: referral_credit)
+  Sender: Raju 1 (7096845)
+  Intended Recipient: LEGACY USER ID: 166
+  Created At: 21/4/2026, 8:24:18 am
+  --------------------------------------------------
+
+TRANSACTION ID: 196
+  Amount: $10
+  Reason: Locked first-two help level 2 for 7958187 (Type: referral_credit)
+  Sender: Raju 4 (1869853)
+  Intended Recipient: Paresh (3507984)
+  Created At: 21/4/2026, 2:54:19 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 199
+  Amount: $11
+  Reason: Direct PIN buy from fund wallet (1 PINs) (Type: pin_purchase)
+  Sender: KIRAN KUMAR P (9080298)
+  Intended Recipient: Vikas Jain (1000001)
+  Created At: 21/4/2026, 5:28:39 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 203
+  Amount: $5
+  Reason: Locked first-two help level 1 from Raju 12 (5945967) (Type: referral_credit)
+  Sender: Raju 12 (5945967)
+  Intended Recipient: LEGACY USER ID: 188
+  Created At: 21/4/2026, 5:53:13 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 204
+  Amount: $10
+  Reason: 5th help diversion level 2 from Raju 3 (9592992) (Type: referral_credit)
+  Sender: Raju 3 (9592992)
+  Intended Recipient: LEGACY USER ID: 198
+  Created At: 21/4/2026, 5:53:34 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 206
+  Amount: $20
+  Reason: Locked first-two help level 3 from Rajubhai (7958187) (Type: referral_credit)
+  Sender: Rajubhai (7958187)
+  Intended Recipient: LEGACY USER ID: 200
+  Created At: 21/4/2026, 6:06:57 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 210
+  Amount: $5
+  Reason: Locked first-two help level 1 from 6675451 (6675451) (Type: referral_credit)
+  Sender: SHANTHA (6675451)
+  Intended Recipient: LEGACY USER ID: 201
+  Created At: 22/4/2026, 3:50:58 am
+  --------------------------------------------------
+
+TRANSACTION ID: 213
+  Amount: $5
+  Reason: Locked first-two help level 1 from 1401934 (1401934) (Type: referral_credit)
+  Sender: Girish Parmar (1401934)
+  Intended Recipient: LEGACY USER ID: 211
+  Created At: 22/4/2026, 8:58:32 am
+  --------------------------------------------------
+
+TRANSACTION ID: 216
+  Amount: $5
+  Reason: Locked first-two help level 1 from 2218934 (2218934) (Type: referral_credit)
+  Sender: Sumitraben Girishkumar Parmar (2218934)
+  Intended Recipient: LEGACY USER ID: 221
+  Created At: 22/4/2026, 10:33:08 am
+  --------------------------------------------------
+
+TRANSACTION ID: 221
+  Amount: $5
+  Reason: Locked first-two help level 1 from 7995348 (7995348) (Type: referral_credit)
+  Sender: Amit S (7995348)
+  Intended Recipient: LEGACY USER ID: 231
+  Created At: 22/4/2026, 1:45:36 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 222
+  Amount: $11
+  Reason: Direct PIN buy from fund wallet (1 PINs) (Type: pin_purchase)
+  Sender: MADHAVI (7071049)
+  Intended Recipient: Vikas Jain (1000001)
+  Created At: 22/4/2026, 2:05:48 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 224
+  Amount: $33
+  Reason: Direct PIN buy from fund wallet (3 PINs) (Type: pin_purchase)
+  Sender: Rajubhai (7958187)
+  Intended Recipient: Approver 3000003 (3000003)
+  Created At: 22/4/2026, 2:20:56 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 226
+  Amount: $5
+  Reason: Locked first-two help level 1 from 1377386 (1377386) (Type: referral_credit)
+  Sender: Raju 14 (1377386)
+  Intended Recipient: LEGACY USER ID: 241
+  Created At: 22/4/2026, 3:33:06 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 229
+  Amount: $5
+  Reason: Locked first-two help level 1 from 6254379 (6254379) (Type: referral_credit)
+  Sender: Raju 15 (6254379)
+  Intended Recipient: LEGACY USER ID: 251
+  Created At: 22/4/2026, 4:15:53 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 232
+  Amount: $5
+  Reason: Locked first-two help level 1 from 6250971 (6250971) (Type: referral_credit)
+  Sender: Raju 16 (6250971)
+  Intended Recipient: LEGACY USER ID: 261
+  Created At: 22/4/2026, 4:57:10 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 235
+  Amount: $5
+  Reason: Locked first-two help level 1 from 9000403 (9000403) (Type: referral_credit)
+  Sender: Kusuma Kranthi KUMAR (9000403)
+  Intended Recipient: Shlokk Patel (2108603)
+  Created At: 23/4/2026, 3:42:31 am
+  --------------------------------------------------
+
+TRANSACTION ID: 237
+  Amount: $5
+  Reason: Locked first-two help level 1 from 2299322 (2299322) (Type: referral_credit)
+  Sender: FIROZ MANSURI (2299322)
+  Intended Recipient: LEGACY USER ID: 282
+  Created At: 23/4/2026, 3:53:15 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 239
+  Amount: $5
+  Reason: Locked first-two help level 1 from 8648992 (8648992) (Type: referral_credit)
+  Sender: Paresh (8648992)
+  Intended Recipient: LEGACY USER ID: 292
+  Created At: 23/4/2026, 4:31:07 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 242
+  Amount: $5
+  Reason: Locked first-two help level 1 from Henil01 (3599329) (Type: Unknown)
+  Sender: Henil01 (3599329)
+  Intended Recipient: LEGACY USER ID: 302
+  Created At: 23/4/2026, 6:16:12 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 244
+  Amount: $5
+  Reason: Manual repair: Locking legacy help for 6335240 (Type: Unknown)
+  Sender: SYSTEM / EVENT
+  Intended Recipient: COULD NOT CALCULATE FROM REFERENCE
+  Created At: 23/4/2026, 6:51:28 pm
+  --------------------------------------------------
+
+TRANSACTION ID: 247
+  Amount: $5
+  Reason: Locked first-two help level 1 from 9788833 (9788833) (Type: Unknown)
+  Sender: Paresh (9788833)
+  Intended Recipient: Amit S (7995348)
+  Created At: 24/4/2026, 6:10:14 am
+  --------------------------------------------------

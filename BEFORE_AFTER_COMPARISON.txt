@@ -1,0 +1,31 @@
+=== GLOBAL MASTER REPAIR: BEFORE vs AFTER ===
+Executed At: 25/4/2026, 12:32:19 am
+
+--- [PHASE 1] GHOST TRANSACTION LINKING ---
+GHOST ID 186: Linking to User ID 2 (2000002). Setting type to referral_credit.
+GHOST ID 196: Linking to User ID 56 (3507984). Setting type to referral_credit.
+GHOST ID 199: Linking to User ID 1 (1000001). Setting type to referral_credit.
+GHOST ID 222: Linking to User ID 1 (1000001). Setting type to referral_credit.
+GHOST ID 224: Linking to User ID 3 (3000003). Setting type to referral_credit.
+GHOST ID 235: Linking to User ID 272 (2108603). Setting type to referral_credit.
+GHOST ID 247: Linking to User ID 313 (7995348). Setting type to referral_credit.
+
+--- [PHASE 2] LEVEL 2 AUTO-GIVE UPGRADES ---
+
+--- [PHASE 3] GLOBAL DASHBOARD SYNC ---
+SYNC: User 3317979 Dashboard Card: $10 -> $0
+
+=== SUPPLEMENTAL RESURRECTION REPAIR (V2) ===
+User 1273963: Already Level 2. Skipping.
+User 7497863: Already Level 2. Skipping.
+User 8462229: Successfully upgraded to Level 2. Sent $10 to 4980892.
+User 7096845: Already Level 2. Skipping.
+User 9592992: Already Level 2. Skipping.
+User 1869853: Already Level 2. Skipping.
+User 4669865: Successfully upgraded to Level 2. Sent $10 to 6709222.
+User 6669336: Already Level 2. Skipping.
+User 2033428: Already Level 2. Skipping.
+User 8390154: Successfully upgraded to Level 2. Sent $10 to 8426673.
+User 2867469: Successfully upgraded to Level 2. Sent $10 to 7477342.
+User 8574396: Successfully upgraded to Level 2. Sent $10 to 1508634.
+User 6335240: Successfully upgraded to Level 2. Sent $10 to 8462229.

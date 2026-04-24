@@ -4551,7 +4551,7 @@ async function createV2HelpLedgerTransaction(connection, {
       (tx_uuid, system_version, tx_type, status, idempotency_key, initiator_user_id,
        reference_type, reference_id, description, total_debit_cents, total_credit_cents)
      VALUES
-      (?, 'v2', 'help_settlement', 'posted', ?, ?,
+      (?, 'v2', 'referral_credit', 'posted', ?, ?,
        'help_event', ?, ?, ?, ?)`,
     [
       txUuid,
@@ -4873,6 +4873,12 @@ async function applyV2HelpContributionSettlement(connection, {
     amountCents
   });
 
+  // SYSTEMATIC SYNC: Push the new ledger totals to the legacy mlm_wallets for Dashboard cards
+  await syncV2StateToLegacyWallets(connection, beneficiaryUser.id);
+
+  // SYSTEMATIC SYNC: Push the new ledger totals to the legacy mlm_wallets for Dashboard cards
+  await syncV2StateToLegacyWallets(connection, beneficiaryUser.id);
+
   return {
     status: 'processed',
     reason: settlementMode,
@@ -4945,6 +4951,9 @@ async function releaseV2QualifiedLockedReceiveBalances(connection, {
       const levelNo = Number(state.level_no || 0);
       const lockedAmountCents = Number(state.locked_qualification_cents || 0);
       if (levelNo <= 0 || lockedAmountCents <= 0) continue;
+
+      // Sync after any release
+      await syncV2StateToLegacyWallets(connection, userId);
 
       const isQualified = isV2HelpQualifiedForLevel(qualificationContext, user.user_code, levelNo);
       if (!isQualified) {

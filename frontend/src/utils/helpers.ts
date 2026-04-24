@@ -665,7 +665,7 @@ export function getTransactionTypeLabel(type: string, description?: string): str
     royalty_income: 'Royalty Income',
     give_help: 'Give Help',
     get_help: 'Receive Help',
-    receive_help: 'Receive Help',
+    receive_help: 'Help Received',
     p2p_transfer: 'P2P Transfer',
     withdrawal: 'Withdrawal',
     reentry: 'Reentry',
