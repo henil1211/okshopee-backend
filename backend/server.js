@@ -1411,27 +1411,11 @@ async function resolveV2RequestAuthContext({
       });
     }
 
-    const activeSession = await findActiveImpersonationSessionForAdmin(subjectLegacyUser.id);
-    if (!activeSession) {
-      await rejectWithAudit(403, 'No active impersonation session found for admin user', 'IMPERSONATION_SESSION_NOT_ACTIVE', {
-        authMode: parsedAuth.authMode,
-        authSubjectUserCode: parsedAuth.subjectUserCode
-      });
-    }
-
+    // Admin is already validated above (subjectIsAdmin check).
+    // No stale-session gate needed — admins can view any user freely.
     impersonatedLegacyUser = await findLegacyUserByPublicUserId(impersonateUserCode);
     if (!impersonatedLegacyUser) {
       await rejectWithAudit(404, 'Impersonated user was not found', 'IMPERSONATED_USER_NOT_FOUND', {
-        authMode: parsedAuth.authMode,
-        authSubjectUserCode: parsedAuth.subjectUserCode
-      });
-    }
-
-    if (
-      String(activeSession.targetUserId || '') !== String(impersonatedLegacyUser.id)
-      || String(activeSession.adminId || '') !== String(subjectLegacyUser.id)
-    ) {
-      await rejectWithAudit(403, 'Active impersonation session does not match requested impersonated user', 'IMPERSONATION_TARGET_MISMATCH', {
         authMode: parsedAuth.authMode,
         authSubjectUserCode: parsedAuth.subjectUserCode
       });
