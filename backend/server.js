@@ -81,8 +81,8 @@ const V2_AUTH_AUDIT_ENABLED = process.env.V2_AUTH_AUDIT_ENABLED !== 'false';
 
 const SMTP_HOST = process.env.SMTP_HOST || '';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_TIMEOUT_MS_RAW = Number(process.env.SMTP_TIMEOUT_MS || 15000);
-const SMTP_TIMEOUT_MS = Number.isFinite(SMTP_TIMEOUT_MS_RAW) && SMTP_TIMEOUT_MS_RAW > 0 ? SMTP_TIMEOUT_MS_RAW : 15000;
+const SMTP_TIMEOUT_MS_RAW = Number(process.env.SMTP_TIMEOUT_MS || 8000);
+const SMTP_TIMEOUT_MS = Number.isFinite(SMTP_TIMEOUT_MS_RAW) && SMTP_TIMEOUT_MS_RAW > 0 ? SMTP_TIMEOUT_MS_RAW : 8000;
 const STATE_PAYLOAD_LIMIT_MB_RAW = Number(process.env.STATE_PAYLOAD_LIMIT_MB || 250);
 const STATE_PAYLOAD_LIMIT_MB = Number.isFinite(STATE_PAYLOAD_LIMIT_MB_RAW) && STATE_PAYLOAD_LIMIT_MB_RAW > 0
   ? STATE_PAYLOAD_LIMIT_MB_RAW
@@ -110,10 +110,6 @@ const LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES = Number.isFinite(LEDGER_MISMATCH_A
   && LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW >= 1
   ? Math.floor(LEDGER_MISMATCH_ALERT_COOLDOWN_MINUTES_RAW)
   : 60;
-
-// GLOBAL CACHE FOR STATE_STORE (Stops Login Timeouts)
-const STATE_MEM_CACHE = new Map();
-const STATE_MEM_CACHE_TTL = 300000; // 5 minutes
 const STATE_BACKUP_DIR = path.join(__dirname, 'data', 'backups');
 const UPLOADS_BASE_DIR = path.join(__dirname, 'data', 'uploads');
 const ALLOWED_UPLOAD_SCOPES = new Set([
@@ -199,11 +195,12 @@ const V2_ADMIN_ADJUSTMENT_FOUR_EYES_THRESHOLD_CENTS = Number.isFinite(V2_ADMIN_A
   : 500000;
 const V2_ADMIN_ADJUSTMENT_MAX_NOTE_LENGTH = 500;
 const V2_ADMIN_ADJUSTMENT_MAX_TICKET_ID_LENGTH = 80;
-const V2_TX_RETRY_MAX_ATTEMPTS_RAW = Number(process.env.V2_TX_RETRY_MAX_ATTEMPTS || 5);
+const V2_TX_RETRY_MAX_ATTEMPTS_RAW = Number(process.env.V2_TX_RETRY_MAX_ATTEMPTS || 3);
 const V2_TX_RETRY_MAX_ATTEMPTS = Number.isFinite(V2_TX_RETRY_MAX_ATTEMPTS_RAW)
   && V2_TX_RETRY_MAX_ATTEMPTS_RAW >= 1
-  && V2_TX_RETRY_MAX_ATTEMPTS_RAW <= 10
-  ? Math.trunc(V2_TX_RETRY_MAX_ATTEMPTS_RAW) : 5;
+  && V2_TX_RETRY_MAX_ATTEMPTS_RAW <= 5
+  ? Math.trunc(V2_TX_RETRY_MAX_ATTEMPTS_RAW)
+  : 3;
 const V2_TX_RETRY_BASE_DELAY_MS_RAW = Number(process.env.V2_TX_RETRY_BASE_DELAY_MS || 40);
 const V2_TX_RETRY_BASE_DELAY_MS = Number.isFinite(V2_TX_RETRY_BASE_DELAY_MS_RAW)
   && V2_TX_RETRY_BASE_DELAY_MS_RAW >= 0
@@ -230,6 +227,7 @@ const V2_REQUEST_ID_MAX_LENGTH = 100;
 const V2_IMPERSONATION_REASON_MAX_LENGTH = 255;
 const V2_STATE_WRITE_ALLOWLIST_USER = new Set([
   'mlm_notifications',
+  'mlm_pin_purchase_requests',
   'mlm_support_tickets',
   'mlm_otp_records',
   'mlm_email_logs',
@@ -353,12 +351,12 @@ async function connectMySQL() {
     password: MYSQL_PASSWORD,
     database: MYSQL_DATABASE,
     waitForConnections: true,
-    connectionLimit: 50,
-    maxIdle: 10,
-    idleTimeout: 10000,
+    connectionLimit: 10,
     queueLimit: 0,
     charset: 'utf8mb4',
-    connectTimeout: 30000
+    connectTimeout: 30000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0
   });
 
   // Create the state_store table if it doesn't exist
@@ -786,6 +784,68 @@ async function sendRegistrationWelcomeEmailBestEffort(params) {
   return { sent: false, error: lastError };
 }
 
+async function sendOtpEmailBestEffort(params) {
+  const to = normalizeEmailRecipients(params?.to);
+  const otp = normalizeOtpCode(params?.otp);
+  const purpose = String(params?.purpose || '').trim();
+  const fullName = String(params?.fullName || '').trim();
+  const userId = String(params?.userId || '').trim();
+
+  if (!to || otp.length !== 6) {
+    return { sent: false, error: 'Missing required recipient data for OTP email' };
+  }
+
+  const smtpErrors = getSmtpConfigErrors();
+  if (smtpErrors.length > 0) {
+    return {
+      sent: false,
+      error: `SMTP is not configured. Missing/invalid env values: ${smtpErrors.join(', ')}`
+    };
+  }
+
+  const purposeLabel = purpose === 'withdrawal'
+    ? 'withdrawal'
+    : purpose === 'transaction'
+      ? 'transaction'
+      : purpose === 'profile_update'
+        ? 'profile update'
+        : 'registration';
+  const userIdLine = userId
+    ? `User ID: ${userId}`
+    : purpose === 'registration'
+      ? 'User ID: Pending (assigned after registration)'
+      : 'User ID: N/A';
+  const nameLine = fullName ? `Name: ${fullName}` : 'Name: N/A';
+  const subject = 'Your ReferNex OTP Code';
+  const body = [
+    `Your OTP for ${purposeLabel} is ${otp}.`,
+    'This OTP will expire in 10 minutes.',
+    '',
+    'This OTP is for your ReferNex account:',
+    userIdLine,
+    nameLine,
+    `Email: ${to}`
+  ].join('\n');
+
+  const maxAttempts = 2;
+  let lastError = 'Unknown SMTP error';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await getSmtpTransporter().sendMail({
+        from: SMTP_FROM,
+        to,
+        subject,
+        text: body
+      });
+      return { sent: true, error: null };
+    } catch (error) {
+      lastError = getErrorMessage(error, 'Failed to send OTP email');
+    }
+  }
+
+  return { sent: false, error: lastError };
+}
+
 function sanitizeIncomingState(input) {
   if (!input || typeof input !== 'object') return {};
   const out = {};
@@ -831,7 +891,7 @@ function parseStateJsonObject(raw, fallback = null) {
   return parsed;
 }
 
-function normalizeQualificationDerivedStateForWrite(incomingState, currentState, isAdmin = false) {
+function normalizeQualificationDerivedStateForWrite(incomingState, currentState) {
   if (!incomingState || typeof incomingState !== 'object') {
     return incomingState;
   }
@@ -876,12 +936,7 @@ function normalizeQualificationDerivedStateForWrite(incomingState, currentState,
         }
 
         const nextUser = { ...incomingUser };
-        // Structure constant fields (Sponsor etc) are ALWAYS locked
-        const alwaysLocked = ['sponsorId', 'parentId', 'id', 'userId'];
         for (const field of QUALIFICATION_LOCKED_USER_FIELDS) {
-          if (isAdmin && !alwaysLocked.includes(field)) {
-             continue; // Allow admin to change isActive, reactivatedAt, etc.
-          }
           nextUser[field] = existingUser[field];
         }
         return nextUser;
@@ -1009,6 +1064,137 @@ function isValidV2AdminAdjustmentDirection(value) {
 function isValidV2AdminAdjustmentReasonCode(value) {
   const normalized = String(value || '').trim().toUpperCase();
   return /^[A-Z0-9_]{3,40}$/.test(normalized);
+}
+
+function normalizeOtpCode(value) {
+  return String(value || '').trim().replace(/\D/g, '');
+}
+
+function findLatestValidOtpRecord(records, params) {
+  if (!Array.isArray(records)) return { record: null, index: -1 };
+
+  const normalizedOtp = normalizeOtpCode(params?.otp);
+  if (normalizedOtp.length !== 6) {
+    return { record: null, index: -1 };
+  }
+
+  const normalizedPurpose = String(params?.purpose || '').trim();
+  const normalizedEmail = String(params?.email || '').trim().toLowerCase();
+  const identityKeys = new Set(
+    Array.from(params?.identityKeys || [])
+      .map((value) => String(value || '').trim())
+      .filter((value) => value.length > 0)
+  );
+  const nowMs = Date.now();
+
+  const candidates = records
+    .map((record, index) => ({ record, index }))
+    .filter(({ record }) => {
+      const recordUserKey = String(record?.userId || '').trim();
+      const recordEmail = String(record?.email || '').trim().toLowerCase();
+      const expiresAtMs = new Date(record?.expiresAt).getTime();
+      const matchesIdentity = identityKeys.has(recordUserKey)
+        || (!!normalizedEmail && recordEmail === normalizedEmail);
+      return matchesIdentity
+        && String(record?.otp || '').trim() === normalizedOtp
+        && String(record?.purpose || '').trim() === normalizedPurpose
+        && !record?.isUsed
+        && Number.isFinite(expiresAtMs)
+        && expiresAtMs > nowMs;
+    })
+    .sort((a, b) => {
+      const aCreated = new Date(a.record?.createdAt).getTime();
+      const bCreated = new Date(b.record?.createdAt).getTime();
+      return (Number.isFinite(bCreated) ? bCreated : 0) - (Number.isFinite(aCreated) ? aCreated : 0);
+    });
+
+  const selected = candidates[0] || null;
+  return {
+    record: selected?.record || null,
+    index: selected ? selected.index : -1
+  };
+}
+
+function markOtpRecordUsed(records, indexToConsume) {
+  if (!Array.isArray(records) || indexToConsume < 0) return records;
+  return records.map((record, index) => {
+    if (index !== indexToConsume) return record;
+    return { ...record, isUsed: true };
+  });
+}
+
+async function loadLockedSensitiveActionState(connection) {
+  const [stateRows] = await connection.execute(
+    `SELECT state_key, state_value
+     FROM state_store
+     WHERE state_key IN ('mlm_users', 'mlm_otp_records')
+     FOR UPDATE`
+  );
+
+  const stateByKey = new Map();
+  for (const row of Array.isArray(stateRows) ? stateRows : []) {
+    stateByKey.set(String(row?.state_key || ''), String(row?.state_value || ''));
+  }
+
+  const usersParsed = safeParseJSON(stateByKey.get('mlm_users'));
+  const otpParsed = safeParseJSON(stateByKey.get('mlm_otp_records'));
+  return {
+    users: Array.isArray(usersParsed) ? usersParsed : [],
+    otpRecords: Array.isArray(otpParsed) ? otpParsed : []
+  };
+}
+
+async function validateAndConsumeSensitiveActionCredentials(connection, params) {
+  const actorUserCode = String(params?.actorUserCode || '').trim();
+  const transactionPassword = String(params?.transactionPassword || '');
+  const otp = normalizeOtpCode(params?.otp);
+  const otpPurpose = String(params?.otpPurpose || 'transaction').trim();
+  const skipValidation = !!params?.skipValidation;
+
+  if (skipValidation) {
+    return { validated: true };
+  }
+
+  if (!actorUserCode) {
+    throw createApiError(400, 'Actor user code is required for credential validation', 'ACTOR_USER_CODE_REQUIRED');
+  }
+  if (!transactionPassword) {
+    throw createApiError(400, 'Transaction password is required', 'TRANSACTION_PASSWORD_REQUIRED');
+  }
+  if (otp.length !== 6) {
+    throw createApiError(400, 'OTP must be a valid 6-digit code', 'INVALID_OTP');
+  }
+
+  const { users, otpRecords } = await loadLockedSensitiveActionState(connection);
+  const actorUser = Array.isArray(users)
+    ? users.find((candidate) => String(candidate?.userId || '').trim() === actorUserCode)
+    : null;
+  if (!actorUser) {
+    throw createApiError(404, 'Actor user not found in legacy state', 'ACTOR_NOT_FOUND_IN_STATE');
+  }
+  if (String(actorUser?.transactionPassword || '') !== transactionPassword) {
+    throw createApiError(403, 'Invalid transaction password', 'INVALID_TRANSACTION_PASSWORD');
+  }
+
+  const otpMatch = findLatestValidOtpRecord(otpRecords, {
+    identityKeys: [actorUserCode, actorUser?.id, actorUser?.userId],
+    email: actorUser?.email,
+    otp,
+    purpose: otpPurpose
+  });
+  if (!otpMatch.record || otpMatch.index < 0) {
+    throw createApiError(400, 'Invalid or expired OTP', 'INVALID_OTP');
+  }
+
+  const updatedOtpRecords = markOtpRecordUsed(otpRecords, otpMatch.index);
+  const nowDb = toMySQLDatetime(new Date().toISOString());
+  await connection.execute(
+    `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+    ['mlm_otp_records', JSON.stringify(updatedOtpRecords), nowDb]
+  );
+
+  return { validated: true, actorUser };
 }
 
 function buildV2ReferralEventKey({ sourceTxnId, beneficiaryUserCode, levelNo, eventType }) {
@@ -1411,11 +1597,27 @@ async function resolveV2RequestAuthContext({
       });
     }
 
-    // Admin is already validated above (subjectIsAdmin check).
-    // No stale-session gate needed — admins can view any user freely.
+    const activeSession = await findActiveImpersonationSessionForAdmin(subjectLegacyUser.id);
+    if (!activeSession) {
+      await rejectWithAudit(403, 'No active impersonation session found for admin user', 'IMPERSONATION_SESSION_NOT_ACTIVE', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+
     impersonatedLegacyUser = await findLegacyUserByPublicUserId(impersonateUserCode);
     if (!impersonatedLegacyUser) {
       await rejectWithAudit(404, 'Impersonated user was not found', 'IMPERSONATED_USER_NOT_FOUND', {
+        authMode: parsedAuth.authMode,
+        authSubjectUserCode: parsedAuth.subjectUserCode
+      });
+    }
+
+    if (
+      String(activeSession.targetUserId || '') !== String(impersonatedLegacyUser.id)
+      || String(activeSession.adminId || '') !== String(subjectLegacyUser.id)
+    ) {
+      await rejectWithAudit(403, 'Active impersonation session does not match requested impersonated user', 'IMPERSONATION_TARGET_MISMATCH', {
         authMode: parsedAuth.authMode,
         authSubjectUserCode: parsedAuth.subjectUserCode
       });
@@ -1787,6 +1989,71 @@ async function executeV2TransactionWithRetry(executor, operationName) {
   }
 
   throw lastError || createApiError(500, `Unexpected retry wrapper exit for ${operationName}`, 'TX_RETRY_WRAPPER_ERROR');
+}
+
+async function settleRegistrationSideEffects(params) {
+  const createdUser = params?.createdUser || null;
+  const sponsorUser = params?.sponsorUser || null;
+  const pinCode = String(params?.pinCode || '').trim().toUpperCase();
+  const sideEffectWarnings = [];
+  let referralResult = null;
+  let helpEventResult = null;
+
+  if (createdUser?.userId && sponsorUser?.userId) {
+    const referralSourceRef = `reg_pin_${createdUser.userId}_${sponsorUser.userId}`;
+    const referralIdempotencyKey = `reg_ref_${createdUser.userId}_${sponsorUser.userId}_${pinCode}`.slice(0, 128);
+    try {
+      const referralOutcome = await executeV2TransactionWithRetry(
+        () => processV2ReferralCredit({
+          idempotencyKey: referralIdempotencyKey,
+          actorUserCode: createdUser.userId,
+          sourceUserCode: createdUser.userId,
+          beneficiaryUserCode: sponsorUser.userId,
+          allowInactiveActor: false,
+          sourceRef: referralSourceRef,
+          eventType: 'direct_referral',
+          levelNo: 1,
+          amountCents: 500,
+          description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`
+        }),
+        V2_REFERRAL_CREDIT_ENDPOINT_NAME
+      );
+      referralResult = referralOutcome?.payload || null;
+    } catch (sideEffectError) {
+      const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle referral income');
+      sideEffectWarnings.push(`Referral settlement pending: ${warningMessage}`);
+    }
+  }
+
+  if (createdUser?.userId) {
+    const helpSourceRef = `reg_help_${createdUser.userId}_${createdUser.userId}`;
+    const helpIdempotencyKey = `reg_help_${createdUser.userId}_${pinCode}`.slice(0, 128);
+    try {
+      const helpOutcome = await executeV2TransactionWithRetry(
+        () => processV2HelpEvent({
+          idempotencyKey: helpIdempotencyKey,
+          actorUserCode: createdUser.userId,
+          sourceUserCode: createdUser.userId,
+          newMemberUserCode: createdUser.userId,
+          sourceRef: helpSourceRef,
+          eventType: 'activation_join',
+          allowInactiveActor: false,
+          description: `Activation help event for ${createdUser.fullName} (${createdUser.userId})`
+        }),
+        V2_HELP_EVENT_ENDPOINT_NAME
+      );
+      helpEventResult = helpOutcome?.payload || null;
+    } catch (sideEffectError) {
+      const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle help event');
+      sideEffectWarnings.push(`Help settlement pending: ${warningMessage}`);
+    }
+  }
+
+  return {
+    referralResult,
+    helpEventResult,
+    sideEffectWarnings
+  };
 }
 
 function normalizeV2FundTransferProgressUpdates(rawProgressUpdates, senderUserCode, receiverUserCode) {
@@ -2270,7 +2537,7 @@ async function readV2WalletSnapshotByUserId(userId, userCode = null) {
       lockedFirstTwoLifetime: Math.max(0, lockedFirstTwoLifetimeCents)
     },
     lifetimeTotalsCents: {
-      totalReceived: Math.max(0, Math.max(totalReceivedFromLedgerCents + syntheticEarningReceiveCents + syntheticLockedReceiveCents, legacyTotalReceivedCents)),
+      totalReceived: Math.max(0, Math.max(totalReceivedFromLedgerCents + syntheticEarningReceiveCents, legacyTotalReceivedCents)),
       totalGiven: Math.max(0, Math.max(totalGivenFromLedgerCents, legacyTotalGivenCents))
     }
   };
@@ -2621,11 +2888,9 @@ function resolveEffectiveLockedIncomeCents({
   const v2Locked = Math.max(0, Number(v2LockedIncomeCents || 0));
   const legacyLocked = Math.max(0, Number(legacyLockedIncomeCents || 0));
 
-  // For locked help, V2 state (help-cascade rules) and Legacy state (historical) 
-  // represents different eras of help received. We must sum them to show the 
-  // correct lifetime locked total.
+  // If V2 lock state exists, trust V2 as source-of-truth and avoid stale legacy overhang.
   if (hasV2LockSignals) {
-    return Math.max(v2Locked, legacyLocked);
+    return v2Locked;
   }
 
   // Legacy fallback remains only for users not fully represented in V2 lock state yet.
@@ -2759,6 +3024,8 @@ async function processV2FundTransfer({
   sourceWallet = 'fund',
   destinationWallet = 'fund',
   allowInactiveActor = false,
+  transactionPassword,
+  otp,
   helpProgressUpdates,
   referenceId,
   description
@@ -2857,6 +3124,14 @@ async function processV2FundTransfer({
         [idempotencyKey, V2_FUND_TRANSFER_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
       );
     }
+
+    await validateAndConsumeSensitiveActionCredentials(connection, {
+      actorUserCode,
+      transactionPassword,
+      otp,
+      otpPurpose: 'transaction',
+      skipValidation: allowInactiveActor
+    });
 
     const [walletRows] = await connection.execute(
       `SELECT
@@ -3006,6 +3281,7 @@ async function processV2FundTransfer({
 
     await connection.commit();
     transactionOpen = false;
+    invalidateStateSnapshotCache();
     return { status: 200, payload: responsePayload };
   } catch (error) {
     if (transactionOpen) {
@@ -3042,6 +3318,8 @@ async function processV2WithdrawalDebit({
   actorUserCode,
   allowInactiveActor = false,
   amountCents,
+  transactionPassword,
+  otp,
   destinationType,
   destinationRef,
   referenceId,
@@ -3138,6 +3416,14 @@ async function processV2WithdrawalDebit({
         [idempotencyKey, V2_WITHDRAWAL_ENDPOINT_NAME, actor.id, requestHash, V2_IDEMPOTENCY_LOCK_SECONDS]
       );
     }
+
+    await validateAndConsumeSensitiveActionCredentials(connection, {
+      actorUserCode,
+      transactionPassword,
+      otp,
+      otpPurpose: 'withdrawal',
+      skipValidation: allowInactiveActor
+    });
 
     const [walletRows] = await connection.execute(
       `SELECT
@@ -3256,6 +3542,7 @@ async function processV2WithdrawalDebit({
 
     await connection.commit();
     transactionOpen = false;
+    invalidateStateSnapshotCache();
     return { status: 200, payload: responsePayload };
   } catch (error) {
     if (transactionOpen) {
@@ -4346,110 +4633,55 @@ async function buildLegacyActivationContributionPlanFromMatrixState(connection, 
   return plan;
 }
 
-async function resolveV2BeneficiaryForAutoGive(connection, sourceUserCode, targetLevel) {
+async function resolveV2ImmediateUplineForAutoGive(connection, sourceUserCode) {
   const normalizedSourceUserCode = normalizeV2UserCode(sourceUserCode);
   if (!isValidV2UserCode(normalizedSourceUserCode)) return null;
 
-  let currentChildCode = normalizedSourceUserCode;
-  let targetNode = null;
-  let finalSide = 'unknown';
+  const [matrixRows] = await connection.execute(
+    `SELECT parent_user_code, position
+     FROM v2_matrix_nodes
+     WHERE user_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [normalizedSourceUserCode]
+  );
 
-  // Climb the matrix N times to find the Nth-level upline
-  for (let depth = 1; depth <= targetLevel; depth++) {
-    const [matrixRows] = await connection.execute(
-      `SELECT parent_user_code, position
-       FROM v2_matrix_nodes
-       WHERE user_code = ?
-       LIMIT 1`,
-      [currentChildCode]
-    );
+  const matrixNode = Array.isArray(matrixRows) ? matrixRows[0] : null;
+  const parentUserCode = normalizeV2UserCode(matrixNode?.parent_user_code);
+  if (!isValidV2UserCode(parentUserCode)) return null;
 
-    const node = Array.isArray(matrixRows) ? matrixRows[0] : null;
-    if (!node || !isValidV2UserCode(node.parent_user_code)) {
-      // If we hit the root before reaching the target level, 
-      // the system will typically hold the fund or route to admin.
-      return null;
-    }
-
-    // Capture the side relative to the IMMEDIATE parent for help logic context
-    if (depth === 1) {
-      const position = Number(node?.position);
-      finalSide = position === 0 ? 'left' : position === 1 ? 'right' : 'unknown';
-    }
-
-    currentChildCode = node.parent_user_code;
-    targetNode = node;
-  }
-
-  // Now verify and fetch the user at this level
-  const [userRows] = await connection.execute(
+  const [parentRows] = await connection.execute(
     `SELECT id, user_code, status
      FROM v2_users
      WHERE user_code = ?
      LIMIT 1
      FOR UPDATE`,
-    [currentChildCode]
+    [parentUserCode]
   );
 
-  const targetUser = Array.isArray(userRows) ? userRows[0] : null;
-  if (!targetUser) return null;
+  const parentUser = Array.isArray(parentRows) ? parentRows[0] : null;
+  if (!parentUser || String(parentUser.status) !== 'active') return null;
+
+  const position = Number(matrixNode?.position);
+  const side = position === 0 ? 'left' : position === 1 ? 'right' : 'unknown';
 
   return {
-    beneficiaryUserId: Number(targetUser.id),
-    beneficiaryUserCode: String(targetUser.user_code),
-    side: normalizeV2HelpContributionSide(finalSide),
-    status: targetUser.status
+    beneficiaryUserId: Number(parentUser.id),
+    beneficiaryUserCode: String(parentUser.user_code || parentUserCode),
+    side: normalizeV2HelpContributionSide(side)
   };
 }
 
 async function ensureV2HelpLevelStateRow(connection, userId, levelNo) {
-  // Check if we already have it
-  const [existing] = await connection.execute(
-    `SELECT id FROM v2_help_level_state WHERE user_id = ? AND level_no = ? LIMIT 1`,
-    [userId, levelNo]
-  );
-  if (existing.length > 0) return;
-
-  // New row: Check for legacy progress inheritance
-  let seedReceiveCount = 0;
-  let seedReceiveAmount = 0;
-
-  try {
-    const snapshot = await readStateFromDB(['mlm_users', 'mlm_wallets']);
-    const legacyUsers = Array.isArray(safeParseJSON(snapshot.state.mlm_users)) ? safeParseJSON(snapshot.state.mlm_users) : [];
-    const legacyWallets = Array.isArray(safeParseJSON(snapshot.state.mlm_wallets)) ? safeParseJSON(snapshot.state.mlm_wallets) : [];
-    
-    // Find the user's legacy ID
-    // We fetch user_code from v2_users
-    const [uRows] = await connection.execute('SELECT user_code FROM v2_users WHERE id = ? LIMIT 1', [userId]);
-    const userCode = uRows[0]?.user_code;
-
-    if (userCode) {
-      const legacyUser = legacyUsers.find(u => String(u.userId) === String(userCode));
-      if (legacyUser) {
-        const wallet = legacyWallets.find(w => w.userId === legacyUser.id);
-        if (wallet && levelNo === 1) {
-          // Rule: If legacy user has $5 locked, they are "1 help in"
-          if (Number(wallet.lockedIncomeWallet || 0) >= 5) {
-            seedReceiveCount = 1;
-            seedReceiveAmount = 500;
-          }
-        }
-      }
-    }
-  } catch (err) {
-    console.error('[Legacy Inheritance] Error during seeding:', err);
-  }
-
   await connection.execute(
     `INSERT INTO v2_help_level_state
       (user_id, level_no, receive_count, receive_total_cents, locked_first_two_cents,
        locked_qualification_cents, safety_deducted_cents,
        pending_give_cents, given_cents, income_credited_cents, last_event_seq)
      VALUES
-      (?, ?, ?, ?, ?, 0, 0, ?, 0, 0, 0)
+      (?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0)
      ON DUPLICATE KEY UPDATE id = id`,
-    [userId, levelNo, seedReceiveCount, seedReceiveAmount, seedReceiveAmount, seedReceiveAmount]
+    [userId, levelNo]
   );
 }
 
@@ -4470,84 +4702,6 @@ async function lockV2HelpLevelState(connection, userId, levelNo) {
     throw createApiError(500, 'Failed to lock help level state', 'HELP_LEVEL_STATE_LOCK_FAILED');
   }
   return state;
-}
-
-async function syncV2StateToLegacyWallets(connection, userId) {
-  try {
-    // 1. Resolve User Source
-    const [userRows] = await connection.execute(
-      'SELECT id, user_code FROM v2_users WHERE id = ? LIMIT 1 FOR UPDATE',
-      [userId]
-    );
-    const user = Array.isArray(userRows) ? userRows[0] : null;
-    if (!user) return;
-
-    const publicUserId = String(user.user_code).trim();
-
-    // 2. Aggregate V2 Balances
-    const [walletRows] = await connection.execute(
-      'SELECT wallet_type, current_amount_cents FROM v2_wallet_accounts WHERE user_id = ?',
-      [userId]
-    );
-    const wallets = Array.isArray(walletRows) ? walletRows : [];
-    
-    let incomeCents = 0;
-    let royaltyCents = 0;
-    let matrixCents = 0;
-
-    for (const w of wallets) {
-      if (w.wallet_type === 'income') incomeCents = Number(w.current_amount_cents || 0);
-      if (w.wallet_type === 'royalty') royaltyCents = Number(w.current_amount_cents || 0);
-      if (w.wallet_type === 'fund') matrixCents = Number(w.current_amount_cents || 0);
-    }
-
-    // 3. Aggregate V2 Locks
-    const [stateRows] = await connection.execute(
-      'SELECT SUM(locked_qualification_cents) as locked_total, SUM(pending_give_cents) as pending_give FROM v2_help_level_state WHERE user_id = ?',
-      [userId]
-    );
-    const state = Array.isArray(stateRows) ? stateRows[0] : null;
-    const lockedIncomeCents = Number(state?.locked_total || 0);
-    const giveHelpLockedCents = Number(state?.pending_give || 0);
-
-    // 4. Update state_store atomically
-    const [storeRows] = await connection.execute(
-      'SELECT state_key, state_value FROM state_store WHERE state_key IN ("mlm_wallets", "mlm_users") FOR UPDATE'
-    );
-    if (storeRows.length < 2) return;
-
-    const mlmWalletsRaw = storeRows.find(r => r.state_key === 'mlm_wallets')?.state_value;
-    const mlmUsersRaw = storeRows.find(r => r.state_key === 'mlm_users')?.state_value;
-    if (!mlmWalletsRaw || !mlmUsersRaw) return;
-
-    const mlmWallets = JSON.parse(mlmWalletsRaw);
-    const mlmUsers = JSON.parse(mlmUsersRaw);
-
-    // Find legacy user by: 1. user_code match, 2. email match
-    const legacyUser = mlmUsers.find(u => 
-      String(u.userId).trim() === publicUserId || 
-      (user.email && String(u.email).toLowerCase().trim() === String(user.email).toLowerCase().trim())
-    );
-
-    if (!legacyUser) return;
-
-    const walletIdx = mlmWallets.findIndex(w => String(w.userId).trim() === legacyUser.id);
-    
-    if (walletIdx !== -1) {
-      mlmWallets[walletIdx].incomeWallet = incomeCents / 100;
-      mlmWallets[walletIdx].royaltyWallet = royaltyCents / 100;
-      mlmWallets[walletIdx].matrixWallet = matrixCents / 100;
-      mlmWallets[walletIdx].lockedIncomeWallet = lockedIncomeCents / 100;
-      mlmWallets[walletIdx].giveHelpLocked = giveHelpLockedCents / 100;
-
-      await connection.execute(
-        'UPDATE state_store SET state_value = ?, updated_at = NOW(3) WHERE state_key = "mlm_wallets"',
-        [JSON.stringify(mlmWallets)]
-      );
-    }
-  } catch (err) {
-    console.warn(`[syncV2StateToLegacyWallets] Failed for user ${userId}:`, err.message);
-  }
 }
 
 async function consumeV2HelpPendingGiveForContribution(connection, {
@@ -4770,14 +4924,13 @@ async function applyV2HelpContributionSettlement(connection, {
         (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
        VALUES
         (?, 1, ?, NULL, NULL, 'debit', ?),
-        (?, 2, ?, ?, 'income', 'credit', ?)`,
+        (?, 2, ?, NULL, NULL, 'credit', ?)`,
       [
         ledgerTxnId,
         helpExpenseAccount.id,
         amountCents,
         ledgerTxnId,
         settlementAccount.id,
-        beneficiaryUser.id,
         amountCents
       ]
     );
@@ -4787,14 +4940,13 @@ async function applyV2HelpContributionSettlement(connection, {
         (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
        VALUES
         (?, 1, ?, NULL, NULL, 'debit', ?),
-        (?, 2, ?, ?, 'income', 'credit', ?)`,
+        (?, 2, ?, NULL, NULL, 'credit', ?)`,
       [
         ledgerTxnId,
         helpExpenseAccount.id,
         amountCents,
         ledgerTxnId,
         safetyPoolAccount.id,
-        beneficiaryUser.id,
         amountCents
       ]
     );
@@ -4803,19 +4955,18 @@ async function applyV2HelpContributionSettlement(connection, {
 
     if (qualificationReleaseCents > 0) {
       await connection.execute(
-          `INSERT INTO v2_ledger_entries
-            (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
-           VALUES
-            (?, 1, ?, NULL, NULL, 'debit', ?),
-            (?, 2, ?, ?, 'income', 'credit', ?),
-            (?, 3, ?, ?, 'income', 'credit', ?)`,
+        `INSERT INTO v2_ledger_entries
+          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+         VALUES
+          (?, 1, ?, NULL, NULL, 'debit', ?),
+          (?, 2, ?, NULL, NULL, 'debit', ?),
+          (?, 3, ?, ?, 'income', 'credit', ?)`,
         [
           ledgerTxnId,
           helpExpenseAccount.id,
           amountCents,
           ledgerTxnId,
           settlementAccount.id,
-          beneficiaryUser.id,
           qualificationReleaseCents,
           ledgerTxnId,
           beneficiaryWallet.gl_account_id,
@@ -4894,8 +5045,7 @@ async function applyV2HelpContributionSettlement(connection, {
   // Aggregate Give Logic: wait for the 2nd receive before sending the total to the upline.
   // This satisfies the user's requirement of 1 aggregated transaction rather than 2 split ones.
   if (settlementMode === 'locked_for_give' && nextReceiveCount === 2 && levelNo < 10) {
-    // SYSTEMATIC FIX: Climb the matrix to the correct target level (levelNo + 1)
-    const autoGiveTarget = await resolveV2BeneficiaryForAutoGive(connection, beneficiaryUser.user_code, levelNo + 1);
+    const autoGiveTarget = await resolveV2ImmediateUplineForAutoGive(connection, beneficiaryUser.user_code);
     if (autoGiveTarget?.beneficiaryUserId) {
       const autoGiveEventKey = `AUTO_GIVE:${beneficiaryUser.id}:${levelNo}:AGGREGATE`.slice(0, 180);
       
@@ -4937,12 +5087,6 @@ async function applyV2HelpContributionSettlement(connection, {
     levelNo,
     amountCents
   });
-
-  // SYSTEMATIC SYNC: Push the new ledger totals to the legacy mlm_wallets for Dashboard cards
-  await syncV2StateToLegacyWallets(connection, beneficiaryUser.id);
-
-  // SYSTEMATIC SYNC: Push the new ledger totals to the legacy mlm_wallets for Dashboard cards
-  await syncV2StateToLegacyWallets(connection, beneficiaryUser.id);
 
   return {
     status: 'processed',
@@ -5016,9 +5160,6 @@ async function releaseV2QualifiedLockedReceiveBalances(connection, {
       const levelNo = Number(state.level_no || 0);
       const lockedAmountCents = Number(state.locked_qualification_cents || 0);
       if (levelNo <= 0 || lockedAmountCents <= 0) continue;
-
-      // Sync after any release
-      await syncV2StateToLegacyWallets(connection, userId);
 
       const isQualified = isV2HelpQualifiedForLevel(qualificationContext, user.user_code, levelNo);
       if (!isQualified) {
@@ -6286,13 +6427,6 @@ async function readStateFromDB(requestedKeys = []) {
     return readStateFromFile(requestedKeys);
   }
 
-  // CHECK CACHE
-  const cacheKey = (requestedKeys.length > 0 ? requestedKeys : ['ALL']).sort().join('|');
-  const cached = STATE_MEM_CACHE.get(cacheKey);
-  if (cached && (Date.now() - cached.timestamp < STATE_MEM_CACHE_TTL)) {
-    return cached.data;
-  }
-
   const keysToRead = requestedKeys.length > 0 ? requestedKeys : DB_KEYS;
   const placeholders = keysToRead.map(() => '?').join(',');
   const [rows] = await pool.execute(
@@ -6313,12 +6447,7 @@ async function readStateFromDB(requestedKeys = []) {
     }
   }
 
-  const result = { state, updatedAt: latestUpdatedAt };
-  
-  // POPULATE CACHE
-  STATE_MEM_CACHE.set(cacheKey, { data: result, timestamp: Date.now() });
-  
-  return result;
+  return { state, updatedAt: latestUpdatedAt };
 }
 
 async function writeStateToDB(nextState, replaceMissing = true) {
@@ -7370,6 +7499,339 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/auth/password-reset') {
+    let connection;
+    let transactionOpen = false;
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const userId = String(parsed?.userId || '').replace(/\D/g, '').slice(0, 7);
+      const email = String(parsed?.email || '').trim().toLowerCase();
+      const otp = normalizeOtpCode(parsed?.otp);
+      const newPassword = String(parsed?.newPassword || '');
+
+      if (!/^\d{7}$/.test(userId)) {
+        sendJson(res, 400, { ok: false, error: 'User ID must be exactly 7 digits', code: 'INVALID_USER_ID' });
+        return;
+      }
+      if (!email) {
+        sendJson(res, 400, { ok: false, error: 'Email is required', code: 'EMAIL_REQUIRED' });
+        return;
+      }
+      if (otp.length !== 6) {
+        sendJson(res, 400, { ok: false, error: 'OTP must be a valid 6-digit code', code: 'INVALID_OTP' });
+        return;
+      }
+      if (newPassword.length < 6) {
+        sendJson(res, 400, { ok: false, error: 'Password must be at least 6 characters', code: 'INVALID_PASSWORD' });
+        return;
+      }
+
+      const updatePasswordFromState = async (users, otpRecords) => {
+        const userIndex = Array.isArray(users)
+          ? users.findIndex((candidate) => String(candidate?.userId || '').trim() === userId)
+          : -1;
+        if (userIndex < 0) {
+          throw createApiError(404, 'User ID not found', 'USER_NOT_FOUND');
+        }
+
+        const user = users[userIndex];
+        if (String(user?.email || '').trim().toLowerCase() !== email) {
+          throw createApiError(400, 'Email does not match this User ID', 'EMAIL_MISMATCH');
+        }
+
+        const otpMatch = findLatestValidOtpRecord(otpRecords, {
+          identityKeys: [userId, user?.id, user?.userId],
+          email,
+          otp,
+          purpose: 'profile_update'
+        });
+        if (!otpMatch.record || otpMatch.index < 0) {
+          throw createApiError(400, 'Invalid or expired OTP', 'INVALID_OTP');
+        }
+
+        const updatedUsers = [...users];
+        updatedUsers[userIndex] = {
+          ...user,
+          password: newPassword
+        };
+        return {
+          updatedUsers,
+          updatedOtpRecords: markOtpRecordUsed(otpRecords, otpMatch.index)
+        };
+      };
+
+      if (STORAGE_MODE === 'file') {
+        const users = safeParseJSON(await readStateKeyValue('mlm_users')) || [];
+        const otpRecords = safeParseJSON(await readStateKeyValue('mlm_otp_records')) || [];
+        const { updatedUsers, updatedOtpRecords } = await updatePasswordFromState(users, otpRecords);
+        await writeStateToDB({
+          mlm_users: JSON.stringify(updatedUsers),
+          mlm_otp_records: JSON.stringify(updatedOtpRecords)
+        }, false);
+        sendJson(res, 200, { ok: true, message: 'Password updated successfully' });
+        return;
+      }
+
+      if (!pool) {
+        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+        return;
+      }
+
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+      transactionOpen = true;
+
+      const [rows] = await connection.execute(
+        `SELECT state_key, state_value
+         FROM state_store
+         WHERE state_key IN ('mlm_users', 'mlm_otp_records')
+         FOR UPDATE`
+      );
+      const stateByKey = new Map();
+      for (const row of Array.isArray(rows) ? rows : []) {
+        stateByKey.set(String(row.state_key || ''), String(row.state_value || ''));
+      }
+
+      const users = safeParseJSON(stateByKey.get('mlm_users'));
+      const otpRecords = safeParseJSON(stateByKey.get('mlm_otp_records'));
+      const { updatedUsers, updatedOtpRecords } = await updatePasswordFromState(
+        Array.isArray(users) ? users : [],
+        Array.isArray(otpRecords) ? otpRecords : []
+      );
+
+      const nowDb = toMySQLDatetime(new Date().toISOString());
+      await connection.execute(
+        `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+        ['mlm_users', JSON.stringify(updatedUsers), nowDb]
+      );
+      await connection.execute(
+        `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+        ['mlm_otp_records', JSON.stringify(updatedOtpRecords), nowDb]
+      );
+
+      await connection.commit();
+      transactionOpen = false;
+      invalidateStateSnapshotCache();
+
+      sendJson(res, 200, { ok: true, message: 'Password updated successfully' });
+    } catch (error) {
+      if (transactionOpen && connection) {
+        try {
+          await connection.rollback();
+        } catch {
+          // ignore rollback secondary error
+        }
+      }
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to reset password');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'PASSWORD_RESET_FAILED'
+      });
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/otp/send') {
+    let connection;
+    let transactionOpen = false;
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const identityKey = String(parsed?.identityKey || parsed?.userId || '').trim();
+      const email = String(parsed?.email || '').trim().toLowerCase();
+      const purpose = String(parsed?.purpose || '').trim();
+      const userName = String(parsed?.userName || '').trim();
+      const resolvedUserId = String(parsed?.resolvedUserId || '').trim();
+
+      if (!identityKey) {
+        sendJson(res, 400, { ok: false, error: 'identityKey is required', code: 'IDENTITY_KEY_REQUIRED' });
+        return;
+      }
+      if (!email) {
+        sendJson(res, 400, { ok: false, error: 'Email is required', code: 'EMAIL_REQUIRED' });
+        return;
+      }
+      if (!['registration', 'profile_update', 'transaction', 'withdrawal'].includes(purpose)) {
+        sendJson(res, 400, { ok: false, error: 'Invalid OTP purpose', code: 'INVALID_OTP_PURPOSE' });
+        return;
+      }
+
+      if (purpose === 'profile_update') {
+        const users = safeParseJSON(await readStateKeyValue('mlm_users')) || [];
+        const matchedUser = Array.isArray(users)
+          ? users.find((candidate) => String(candidate?.userId || '').trim() === identityKey)
+          : null;
+        if (!matchedUser) {
+          sendJson(res, 404, { ok: false, error: 'User ID not found', code: 'USER_NOT_FOUND' });
+          return;
+        }
+        if (String(matchedUser?.email || '').trim().toLowerCase() !== email) {
+          sendJson(res, 400, { ok: false, error: 'Email does not match this User ID', code: 'EMAIL_MISMATCH' });
+          return;
+        }
+      }
+
+      const buildOtpRecords = (records) => {
+        const nowIso = new Date().toISOString();
+        const updatedRecords = Array.isArray(records)
+          ? records.map((record) => {
+            const recordUserKey = String(record?.userId || '').trim();
+            const recordEmail = String(record?.email || '').trim().toLowerCase();
+            const sameIdentity = recordUserKey === identityKey || recordEmail === email;
+            if (sameIdentity && String(record?.purpose || '').trim() === purpose && !record?.isUsed) {
+              return { ...record, isUsed: true };
+            }
+            return record;
+          })
+          : [];
+        const otpRecord = {
+          id: `otp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          userId: identityKey,
+          email,
+          otp: `${Math.floor(100000 + Math.random() * 900000)}`,
+          purpose,
+          createdAt: nowIso,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+          isUsed: false
+        };
+        updatedRecords.push(otpRecord);
+        return { updatedRecords, otpRecord };
+      };
+
+      let otpRecord;
+      if (STORAGE_MODE === 'file') {
+        const otpRecords = safeParseJSON(await readStateKeyValue('mlm_otp_records')) || [];
+        const nextState = buildOtpRecords(Array.isArray(otpRecords) ? otpRecords : []);
+        otpRecord = nextState.otpRecord;
+        await writeStateToDB({
+          mlm_otp_records: JSON.stringify(nextState.updatedRecords)
+        }, false);
+      } else {
+        if (!pool) {
+          sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+          return;
+        }
+        connection = await pool.getConnection();
+        await connection.beginTransaction();
+        transactionOpen = true;
+
+        const [rows] = await connection.execute(
+          `SELECT state_value
+           FROM state_store
+           WHERE state_key = 'mlm_otp_records'
+           FOR UPDATE`
+        );
+        const otpRecordsRaw = Array.isArray(rows) && rows.length > 0 ? rows[0]?.state_value : '[]';
+        const otpRecords = safeParseJSON(otpRecordsRaw);
+        const nextState = buildOtpRecords(Array.isArray(otpRecords) ? otpRecords : []);
+        otpRecord = nextState.otpRecord;
+
+        await connection.execute(
+          `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+          ['mlm_otp_records', JSON.stringify(nextState.updatedRecords), toMySQLDatetime(new Date().toISOString())]
+        );
+
+        await connection.commit();
+        transactionOpen = false;
+        invalidateStateSnapshotCache();
+      }
+
+      const emailResult = await sendOtpEmailBestEffort({
+        to: email,
+        otp: otpRecord?.otp,
+        purpose,
+        fullName: userName,
+        userId: resolvedUserId
+      });
+      if (!emailResult.sent) {
+        sendJson(res, 500, { ok: false, error: emailResult.error || 'Failed to send OTP email', code: 'OTP_EMAIL_SEND_FAILED' });
+        return;
+      }
+
+      sendJson(res, 200, {
+        ok: true,
+        message: 'OTP sent to your email'
+      });
+    } catch (error) {
+      if (transactionOpen && connection) {
+        try {
+          await connection.rollback();
+        } catch {
+          // ignore rollback secondary error
+        }
+      }
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to send OTP');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'OTP_SEND_FAILED'
+      });
+    } finally {
+      if (connection) {
+        connection.release();
+      }
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auth/otp/verify') {
+    try {
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const identityKey = String(parsed?.identityKey || parsed?.userId || '').trim();
+      const email = String(parsed?.email || '').trim().toLowerCase();
+      const purpose = String(parsed?.purpose || '').trim();
+      const otp = normalizeOtpCode(parsed?.otp);
+
+      if (!identityKey) {
+        sendJson(res, 400, { ok: false, error: 'identityKey is required', code: 'IDENTITY_KEY_REQUIRED' });
+        return;
+      }
+      if (!email) {
+        sendJson(res, 400, { ok: false, error: 'Email is required', code: 'EMAIL_REQUIRED' });
+        return;
+      }
+      if (otp.length !== 6) {
+        sendJson(res, 400, { ok: false, error: 'OTP must be a valid 6-digit code', code: 'INVALID_OTP' });
+        return;
+      }
+
+      const otpRecords = safeParseJSON(await readStateKeyValue('mlm_otp_records')) || [];
+      const otpMatch = findLatestValidOtpRecord(Array.isArray(otpRecords) ? otpRecords : [], {
+        identityKeys: [identityKey],
+        email,
+        otp,
+        purpose
+      });
+      if (!otpMatch.record) {
+        sendJson(res, 400, { ok: false, error: 'Invalid or expired OTP', code: 'INVALID_OTP' });
+        return;
+      }
+
+      sendJson(res, 200, { ok: true, message: 'OTP verified' });
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to verify OTP');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'OTP_VERIFY_FAILED'
+      });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/v2/registrations') {
     let connection;
     let transactionOpen = false;
@@ -7408,6 +7870,10 @@ const server = createServer(async (req, res) => {
       const country = String(parsed?.country || '').trim();
       const sponsorId = String(parsed?.sponsorId || '').replace(/\D/g, '').slice(0, 7);
       const pinCode = String(parsed?.pinCode || '').trim().toUpperCase();
+      const registrationOtp = normalizeOtpCode(parsed?.registrationOtp);
+      const registrationOtpKey = String(
+        parsed?.registrationOtpKey || `register_${email.trim().toLowerCase()}`
+      ).trim();
 
       if (!fullName || !email || !password || !transactionPassword || !phone || !country) {
         sendJson(res, 400, { ok: false, error: 'Missing required registration fields', code: 'INVALID_REGISTRATION_PAYLOAD' });
@@ -7419,6 +7885,14 @@ const server = createServer(async (req, res) => {
       }
       if (!/^[A-Z0-9]{6,12}$/.test(pinCode)) {
         sendJson(res, 400, { ok: false, error: 'PIN code format is invalid', code: 'INVALID_PIN_FORMAT' });
+        return;
+      }
+      if (registrationOtp.length !== 6) {
+        sendJson(res, 400, { ok: false, error: 'Registration OTP must be a valid 6-digit code', code: 'INVALID_REGISTRATION_OTP' });
+        return;
+      }
+      if (!registrationOtpKey) {
+        sendJson(res, 400, { ok: false, error: 'Registration OTP key is required', code: 'REGISTRATION_OTP_KEY_REQUIRED' });
         return;
       }
 
@@ -7455,15 +7929,10 @@ const server = createServer(async (req, res) => {
         return Math.max(0, Math.trunc(Math.round(normalized * 100)));
       };
 
-      const provisionedV2Users = new Set();
       const ensureV2UserAndWallets = async (legacyUser, legacyWallet) => {
         const userCode = normalizeV2UserCode(legacyUser?.userId);
         if (!isValidV2UserCode(userCode)) {
           throw createApiError(400, 'Invalid legacy user mapping for v2 provisioning', 'V2_PROVISION_USER_CODE_INVALID');
-        }
-
-        if (provisionedV2Users.has(userCode)) {
-          return { userCode };
         }
 
         const legacyUserId = String(legacyUser?.id || '').trim() || null;
@@ -7553,7 +8022,6 @@ const server = createServer(async (req, res) => {
           );
         }
 
-                provisionedV2Users.add(userCode);
         return { userId: Number(v2User.id), userCode };
       };
 
@@ -7566,6 +8034,7 @@ const server = createServer(async (req, res) => {
         'mlm_wallets',
         'mlm_matrix',
         'mlm_pins',
+        'mlm_otp_records',
         'mlm_transactions',
         'mlm_notifications',
         'mlm_safety_pool'
@@ -7599,6 +8068,7 @@ const server = createServer(async (req, res) => {
       const wallets = parseStateArray('mlm_wallets');
       const matrix = parseStateArray('mlm_matrix');
       const pins = parseStateArray('mlm_pins');
+      const otpRecords = parseStateArray('mlm_otp_records');
       const transactions = parseStateArray('mlm_transactions');
       const notifications = parseStateArray('mlm_notifications');
       const safetyPool = parseStateObject('mlm_safety_pool', { totalAmount: 0, transactions: [] });
@@ -7633,17 +8103,12 @@ const server = createServer(async (req, res) => {
 
       const selectedPin = pins[pinIndex];
       const selectedPinStatus = String(selectedPin?.status || '').toLowerCase();
-
-      // BLOCK SUSPENDED PINS (Primary Security Check)
       if (selectedPinStatus === 'suspended') {
         throw createApiError(409, 'PIN is suspended by admin', 'PIN_SUSPENDED');
       }
 
-      // A PIN is available for NEW registration if it is 'unused' (Legacy) or 'generated' (V2)
-      const isAvailablePin = selectedPinStatus === 'unused' || selectedPinStatus === 'generated';
-
-      if (!isAvailablePin) {
-        const replayUserRef = String(selectedPin?.registrationUserId || selectedPin?.usedById || '').trim();
+      if (selectedPinStatus !== 'unused') {
+      const replayUserRef = String(selectedPin?.registrationUserId || selectedPin?.usedById || '').trim();
         const replayUser = usersByInternalId.get(replayUserRef) || usersByUserId.get(replayUserRef);
         if (replayUser?.userId) {
           const replaySponsorUserCode = normalizeV2UserCode(replayUser.sponsorId);
@@ -7690,51 +8155,15 @@ const server = createServer(async (req, res) => {
           transactionOpen = false;
           invalidateStateSnapshotCache();
 
-          const sideEffectWarnings = [];
-          let referralResult = null;
-          let helpEventResult = null;
-
-          if (replaySponsorUser?.userId) {
-            const replayReferralSourceRef = `reg_pin_${replayUser.userId}_${replaySponsorUser.userId}`;
-            const replayReferralIdempotencyKey = `reg_ref_${replayUser.userId}_${replaySponsorUser.userId}_${pinCode}`.slice(0, 128);
-            try {
-              const replayReferralOutcome = await processV2ReferralCredit({
-                idempotencyKey: replayReferralIdempotencyKey,
-                actorUserCode: replayUser.userId,
-                sourceUserCode: replayUser.userId,
-                beneficiaryUserCode: replaySponsorUser.userId,
-                allowInactiveActor: false,
-                sourceRef: replayReferralSourceRef,
-                eventType: 'direct_referral',
-                levelNo: 1,
-                amountCents: 500,
-                description: `Referral income from ${replayUser.fullName} (${replayUser.userId})`
-              });
-              referralResult = replayReferralOutcome?.payload || null;
-            } catch (sideEffectError) {
-              const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle referral income');
-              sideEffectWarnings.push(`Referral settlement pending: ${warningMessage}`);
-            }
-          }
-
-          const replayHelpSourceRef = `reg_help_${replayUser.userId}_${replayUser.userId}`;
-          const replayHelpIdempotencyKey = `reg_help_${replayUser.userId}_${pinCode}`.slice(0, 128);
-          try {
-            const replayHelpOutcome = await processV2HelpEvent({
-              idempotencyKey: replayHelpIdempotencyKey,
-              actorUserCode: replayUser.userId,
-              sourceUserCode: replayUser.userId,
-              newMemberUserCode: replayUser.userId,
-              sourceRef: replayHelpSourceRef,
-              eventType: 'activation_join',
-              allowInactiveActor: false,
-              description: `Activation help event for ${replayUser.fullName} (${replayUser.userId})`
-            });
-            helpEventResult = replayHelpOutcome?.payload || null;
-          } catch (sideEffectError) {
-            const warningMessage = getErrorMessage(sideEffectError, 'Failed to settle help event');
-            sideEffectWarnings.push(`Help settlement pending: ${warningMessage}`);
-          }
+          const {
+            referralResult,
+            helpEventResult,
+            sideEffectWarnings
+          } = await settleRegistrationSideEffects({
+            createdUser: replayUser,
+            sponsorUser: replaySponsorUser,
+            pinCode
+          });
 
           sendJson(res, 200, {
             ok: true,
@@ -7755,6 +8184,16 @@ const server = createServer(async (req, res) => {
         throw createApiError(409, 'PIN has already been used', 'PIN_ALREADY_USED');
       }
 
+      const registrationOtpMatch = findLatestValidOtpRecord(otpRecords, {
+        identityKeys: [registrationOtpKey],
+        email,
+        otp: registrationOtp,
+        purpose: 'registration'
+      });
+      if (!registrationOtpMatch.record || registrationOtpMatch.index < 0) {
+        throw createApiError(400, 'Registration OTP is invalid or expired', 'INVALID_REGISTRATION_OTP');
+      }
+
       const pinOwnerRef = String(selectedPin?.ownerId || '').trim();
       const pinOwnerUser = usersByInternalId.get(pinOwnerRef) || usersByUserId.get(pinOwnerRef);
       if (!pinOwnerUser?.userId) {
@@ -7764,7 +8203,6 @@ const server = createServer(async (req, res) => {
         throw createApiError(403, 'PIN does not belong to the authenticated actor', 'PIN_OWNER_MISMATCH');
       }
 
-      console.log(`[Registration] Starting new registration request for ${fullName} (${email})...`);
       const existingUserIds = new Set(users.map((user) => String(user?.userId || '').trim()));
       let generatedUserId = '';
       for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -7778,11 +8216,7 @@ const server = createServer(async (req, res) => {
         throw createApiError(500, 'Unable to allocate unique User ID', 'USER_ID_GENERATION_FAILED');
       }
 
-      const matrixByUserId = new Map();
-      for (let i = 0; i < matrix.length; i++) {
-        const node = matrix[i];
-        if (node?.userId) matrixByUserId.set(String(node.userId), node);
-      }
+      const matrixByUserId = new Map(matrix.map((node) => [String(node?.userId || ''), node]));
       const ensureMatrixNodeForUser = (userCode, visiting = new Set()) => {
         const normalized = String(userCode || '').trim();
         if (!normalized) return null;
@@ -7881,6 +8315,7 @@ const server = createServer(async (req, res) => {
       }
 
       const nowIso = new Date().toISOString();
+      const updatedOtpRecords = markOtpRecordUsed(otpRecords, registrationOtpMatch.index);
       const createdUser = {
         id: `user_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         userId: generatedUserId,
@@ -8039,92 +8474,57 @@ const server = createServer(async (req, res) => {
       await upsertStateKey('mlm_wallets', wallets);
       await upsertStateKey('mlm_matrix', matrix);
       await upsertStateKey('mlm_pins', pins);
+      await upsertStateKey('mlm_otp_records', updatedOtpRecords);
       await upsertStateKey('mlm_transactions', transactions);
       await upsertStateKey('mlm_notifications', notifications);
       await upsertStateKey('mlm_safety_pool', safetyPool);
-      
-      // Synchronize PIN usage to V2 database
-      await connection.execute(
-        `UPDATE v2_pins 
-         SET status = 'used', 
-             used_by_user_id = (SELECT id FROM v2_users WHERE user_code = ?),
-             used_at = ?
-         WHERE pin_code = ?`,
-        [createdUser.userId, nowDb, pinCode]
-      );
 
       await connection.commit();
       transactionOpen = false;
       invalidateStateSnapshotCache();
 
-      // Send Response Immediately
+      let sideEffectWarnings = [];
+      let referralResult = null;
+      let helpEventResult = null;
+      let welcomeEmailDispatched = false;
+
+      const welcomeEmailResult = await sendRegistrationWelcomeEmailBestEffort({
+        to: createdUser.email,
+        fullName: createdUser.fullName,
+        userId: createdUser.userId,
+        email: createdUser.email,
+        phone: createdUser.phone,
+        loginPassword: createdUser.password,
+        transactionPassword: createdUser.transactionPassword
+      });
+      if (welcomeEmailResult.sent) {
+        welcomeEmailDispatched = true;
+      } else {
+        sideEffectWarnings.push(`Welcome email pending: ${welcomeEmailResult.error}`);
+      }
+
+      const registrationSettlement = await settleRegistrationSideEffects({
+        createdUser,
+        sponsorUser,
+        pinCode
+      });
+      referralResult = registrationSettlement.referralResult;
+      helpEventResult = registrationSettlement.helpEventResult;
+      sideEffectWarnings = sideEffectWarnings.concat(registrationSettlement.sideEffectWarnings || []);
+
       sendJson(res, 200, {
         ok: true,
         idempotentReplay: false,
         userId: createdUser.userId,
         sponsorUserId: sponsorUser.userId,
         pinCode,
-        sideEffects: 'backgrounded'
+        welcomeEmailDispatched,
+        referralSettled: !!referralResult,
+        helpSettled: !!helpEventResult,
+        sideEffectWarnings,
+        referralResult,
+        helpEventResult
       });
-
-      // Side Effects (Backgrounded to prevent timeout)
-      // Background tasks (Staggered to ensure main connection is released first)
-      setTimeout(() => {
-        (async () => {
-          console.log(`[Background] Starting side effects for newly registered user ${createdUser.userId}...`);
-          try {
-            // 1. Welcome Email
-            await sendRegistrationWelcomeEmailBestEffort({
-              to: createdUser.email,
-              fullName: createdUser.fullName,
-              userId: createdUser.userId,
-              email: createdUser.email,
-              phone: createdUser.phone,
-              loginPassword: createdUser.password,
-              transactionPassword: createdUser.transactionPassword
-            }).then(() => console.log(`[Background] Welcome email sent to ${createdUser.email} for ${createdUser.userId}`))
-              .catch((e) => console.error(`[Background] Welcome email failed for ${createdUser.userId}:`, e.message));
-
-            // 2. Referral Settlement for Sponsor
-            if (sponsorUser?.userId) {
-              const referralSourceRef = `reg_pin_${createdUser.userId}_${sponsorUser.userId}`;
-              const referralIdempotencyKey = `reg_ref_${createdUser.userId}_${sponsorUser.userId}_${pinCode}`.slice(0, 128);
-              await processV2ReferralCredit({
-                idempotencyKey: referralIdempotencyKey,
-                actorUserCode: createdUser.userId,
-                sourceUserCode: createdUser.userId,
-                beneficiaryUserCode: sponsorUser.userId,
-                allowInactiveActor: false,
-                sourceRef: referralSourceRef,
-                eventType: 'direct_referral',
-                levelNo: 1,
-                amountCents: 500,
-                description: `Referral income from ${createdUser.fullName} (${createdUser.userId})`
-              }).then(() => console.log(`[Background] Referral settlement success for ${createdUser.userId} -> Sponsor ${sponsorUser.userId}`))
-                .catch((e) => console.error(`[Background] Referral settlement failed for ${createdUser.userId}:`, e.message));
-            }
-
-            // 3. Help Settlement
-            const helpSourceRef = `reg_help_${createdUser.userId}_${createdUser.userId}`;
-            const helpIdempotencyKey = `reg_help_${createdUser.userId}_${pinCode}`.slice(0, 128);
-            await processV2HelpEvent({
-              idempotencyKey: helpIdempotencyKey,
-              actorUserCode: createdUser.userId,
-              sourceUserCode: createdUser.userId,
-              newMemberUserCode: createdUser.userId,
-              sourceRef: helpSourceRef,
-              eventType: 'activation_join',
-              allowInactiveActor: false,
-              description: `Activation help event for ${createdUser.fullName} (${createdUser.userId})`
-            }).then(() => console.log(`[Background] Help settlement triggered for ${createdUser.userId}`))
-              .catch((e) => console.error(`[Background] Help settlement failed for ${createdUser.userId}:`, e.message));
-
-            console.log(`[Background] All basic side effects initiated for ${createdUser.userId}`);
-          } catch (bgError) {
-            console.error(`[Background Execution Critical Error] for ${createdUser.userId}:`, bgError);
-          }
-        })();
-      }, 200);
     } catch (error) {
       if (transactionOpen && connection) {
         try {
@@ -8375,6 +8775,8 @@ const server = createServer(async (req, res) => {
       const toUserCode = normalizeV2UserCode(parsed?.toUserCode);
       const pinId = typeof parsed?.pinId === 'string' ? parsed.pinId.trim() : '';
       const pinCode = typeof parsed?.pinCode === 'string' ? parsed.pinCode.trim().toUpperCase() : '';
+      const transactionPassword = String(parsed?.transactionPassword || '');
+      const otp = normalizeOtpCode(parsed?.otp);
 
       if (!isValidV2UserCode(fromUserCode) || !isValidV2UserCode(toUserCode)) {
         sendJson(res, 400, {
@@ -8460,6 +8862,14 @@ const server = createServer(async (req, res) => {
       if (!isLegacyUserEligibleForV2Access(fromUser) || !isLegacyUserEligibleForV2Access(toUser)) {
         throw createApiError(403, 'Sender or recipient account is inactive or blocked', 'USER_NOT_ACTIVE');
       }
+
+      await validateAndConsumeSensitiveActionCredentials(connection, {
+        actorUserCode: fromUserCode,
+        transactionPassword,
+        otp,
+        otpPurpose: 'transaction',
+        skipValidation: authContext.authSubjectIsAdmin && authContext.isImpersonated
+      });
 
       const normalizedPinCode = String(pinCode || '').trim().toUpperCase();
       const pinIndex = pinId
@@ -8586,6 +8996,8 @@ const server = createServer(async (req, res) => {
       const destinationWallet = String(parsed?.destinationWallet || 'fund').trim().toLowerCase();
       const amountCentsRaw = Number(parsed?.amountCents);
       const amountCents = Number.isFinite(amountCentsRaw) ? Math.trunc(amountCentsRaw) : NaN;
+      const transactionPassword = String(parsed?.transactionPassword || '');
+      const otp = normalizeOtpCode(parsed?.otp);
       const normalizedProgress = normalizeV2FundTransferProgressUpdates(
         parsed?.progressUpdates,
         senderUserCode,
@@ -8684,6 +9096,8 @@ const server = createServer(async (req, res) => {
           sourceWallet,
           destinationWallet,
           allowInactiveActor,
+          transactionPassword,
+          otp,
           helpProgressUpdates: normalizedProgress.updates,
           referenceId,
           description
@@ -8718,6 +9132,8 @@ const server = createServer(async (req, res) => {
       const actorUserCode = authContext.actorUserCode;
       const amountCentsRaw = Number(parsed?.amountCents);
       const amountCents = Number.isFinite(amountCentsRaw) ? Math.trunc(amountCentsRaw) : NaN;
+      const transactionPassword = String(parsed?.transactionPassword || '');
+      const otp = normalizeOtpCode(parsed?.otp);
       const destinationType = String(parsed?.destinationType || '').trim().toLowerCase();
       const destinationRef = String(parsed?.destinationRef || '').trim();
       const idempotencyKey = getSingleHeaderValue(req, 'idempotency-key');
@@ -8747,6 +9163,8 @@ const server = createServer(async (req, res) => {
           actorUserCode,
           allowInactiveActor,
           amountCents,
+          transactionPassword,
+          otp,
           destinationType,
           destinationRef,
           referenceId,
@@ -9162,83 +9580,8 @@ const server = createServer(async (req, res) => {
     }
     return;
   }
-  // Atomic PIN Status Update (Admin Only)
-  if (req.method === 'POST' && url.pathname === '/api/v2/admin/pins/status-update') {
-    try {
-      const body = await getRequestBody(req);
-      const parsed = body ? JSON.parse(body) : {};
-      const authContext = await resolveV2RequestAuthContext({
-        req,
-        endpointName: 'v2AdminPinStatusUpdate',
-        requiredRole: 'admin',
-        allowImpersonation: false
-      });
 
-      const pinCode = String(parsed?.pinCode || '').trim().toUpperCase();
-      const newStatus = String(parsed?.status || '').trim().toLowerCase();
-
-      if (!pinCode || !['unused', 'suspended', 'generated'].includes(newStatus)) {
-        sendJson(res, 400, {
-          ok: false,
-          error: 'pinCode and valid status (unused|suspended|generated) are required',
-          code: 'PIN_STATUS_UPDATE_INVALID_INPUT'
-        });
-        return;
-      }
-
-      const result = await executeV2TransactionWithRetry(async (connection) => {
-        // Lock the state store row to prevent concurrent race conditions
-        const [rows] = await connection.execute(
-          'SELECT state_value FROM state_store WHERE state_key = "mlm_pins" FOR UPDATE'
-        );
-        if (!rows.length) {
-          throw createApiError(404, 'PIN state store not found', 'STATE_NOT_FOUND');
-        }
-
-        const pins = JSON.parse(rows[0].state_value);
-        const pinIndex = pins.findIndex((p) => String(p.pinCode || '').trim().toUpperCase() === pinCode);
-        if (pinIndex === -1) {
-          throw createApiError(404, `PIN ${pinCode} not found in state store`, 'PIN_NOT_FOUND');
-        }
-
-        const oldStatus = pins[pinIndex].status;
-        pins[pinIndex].status = newStatus;
-        pins[pinIndex].updatedAt = new Date().toISOString();
-
-        // Update Legacy State
-        await connection.execute(
-          'UPDATE state_store SET state_value = ?, updated_at = NOW(3) WHERE state_key = "mlm_pins"',
-          [JSON.stringify(pins)]
-        );
-
-        // Update V2 Ledger Sync
-        const targetV2Status = newStatus === 'suspended' ? 'suspended' : 'generated';
-        await connection.execute(
-          "UPDATE v2_pins SET status = ?, updated_at = NOW(3) WHERE pin_code = ? AND status NOT IN ('used', 'expired')",
-          [targetV2Status, pinCode]
-        );
-
-        return {
-          status: 200,
-          payload: { ok: true, pinCode, oldStatus, newStatus }
-        };
-      }, 'v2AdminPinStatusUpdate');
-
-      invalidateStateSnapshotCache();
-      sendJson(res, result.status, result.payload);
-      return;
-    } catch (error) {
-      const status = Number(error?.status) || 500;
-      const message = getErrorMessage(error, 'Failed to update PIN status');
-      sendJson(res, status, {
-        ok: false,
-        error: message,
-        code: error?.code || 'PIN_STATUS_UPDATE_FAILED'
-      });
-      return;
-    }
-  }
-
+  // POST state
   if (req.method === 'POST' && url.pathname === '/api/state') {
     try {
       const body = await getRequestBody(req);
@@ -9333,77 +9676,12 @@ const server = createServer(async (req, res) => {
       if (FINANCE_ENGINE_MODE === 'v2') {
         normalizedIncomingState = normalizeQualificationDerivedStateForWrite(
           incomingState,
-          currentSnapshot?.state || {},
-          !!stateActorContext?.authSubjectIsAdmin
+          currentSnapshot?.state || {}
         );
-      }
-
-      // Consensus Merge Interceptor for mlm_pins (Fixes stale UI rollbacks)
-      // This prevents a stale Admin UI from accidentally "unsuspending" or "re-enabling" used/suspended PINs.
-      if (normalizedIncomingState.mlm_pins && !forceWrite) {
-        try {
-          const currentPinsRaw = await readStateKeyValue('mlm_pins');
-          if (currentPinsRaw) {
-            const currentPins = safeParseJSON(currentPinsRaw);
-            // Handle both stringified and already-parsed incoming pins
-            const rawIncomingPins = normalizedIncomingState.mlm_pins;
-            const incomingPins = typeof rawIncomingPins === 'string' ? safeParseJSON(rawIncomingPins) : rawIncomingPins;
-
-            if (Array.isArray(currentPins) && Array.isArray(incomingPins)) {
-              const currentByCode = new Map(currentPins.map((p) => [String(p.pinCode || '').trim().toUpperCase(), p]));
-              let mergedAny = false;
-              const mergedPins = incomingPins.map((p) => {
-                const pinCode = String(p.pinCode || '').trim().toUpperCase();
-                const serverPin = currentByCode.get(pinCode);
-                if (serverPin) {
-                  const sStatus = String(serverPin.status || '').toLowerCase();
-                  const iStatus = String(p.status || '').toLowerCase();
-                  // Rule: Cannot downgrade from 'suspended' or 'used' back to 'unused' via bulk state update.
-                  if ((iStatus === 'unused' || iStatus === 'generated') && (sStatus === 'suspended' || sStatus === 'used')) {
-                    mergedAny = true;
-                    return { ...p, status: serverPin.status };
-                  }
-                }
-                return p;
-              });
-              if (mergedAny) {
-                // Keep the same format (Object or String) as the incoming data
-                normalizedIncomingState.mlm_pins = typeof rawIncomingPins === 'string' ? JSON.stringify(mergedPins) : mergedPins;
-              }
-            }
-          }
-        } catch (mergeError) {
-          console.warn('Consensus merge failed (skipped):', mergeError.message);
-        }
       }
 
       const replaceMissing = isChunked ? false : hasFullStateSnapshot(normalizedIncomingState);
       const saved = await writeStateToDB(normalizedIncomingState, replaceMissing);
-      // Aggressively invalidate cache so registrations and other admins see the truth immediately
-      invalidateStateSnapshotCache();
-
-      // Synchronize PIN status changes (like 'suspended') to V2 database
-      if (normalizedIncomingState.mlm_pins) {
-        try {
-          const rawPinsForSync = normalizedIncomingState.mlm_pins;
-          const pinsSync = typeof rawPinsForSync === 'string' ? JSON.parse(rawPinsForSync) : rawPinsForSync;
-          if (Array.isArray(pinsSync)) {
-            for (const p of pinsSync) {
-              const pStatus = String(p.status).toLowerCase();
-              if (['unused', 'suspended', 'generated'].includes(pStatus)) {
-                const targetStatus = pStatus === 'suspended' ? 'suspended' : 'generated';
-                await pool.execute(
-                  "UPDATE v2_pins SET status = ?, updated_at = NOW(3) WHERE pin_code = ? AND status NOT IN ('used', 'expired')",
-                  [targetStatus, p.pinCode]
-                ).catch(() => {});
-              }
-            }
-          }
-        } catch (syncError) {
-          console.warn('Silent failure in PIN status sync:', syncError.message);
-        }
-      }
-
       sendJson(res, 200, { ok: true, updatedAt: saved.updatedAt });
     } catch (error) {
       const message = getErrorMessage(error, 'Failed to persist state');

@@ -233,7 +233,29 @@ export default function CreateId() {
     setIsSponsorEditing(true);
   };
 
-  const handleSponsorSave = () => {
+  const resolveSponsorById = async (candidateSponsorId: string) => {
+    const cleanSponsorId = (candidateSponsorId || '').replace(/\D/g, '').slice(0, 7);
+    if (cleanSponsorId.length !== 7) return null;
+
+    const localSponsor = Database.getUserByUserId(cleanSponsorId);
+    if (localSponsor) return localSponsor;
+
+    try {
+      await Database.hydrateFromServer({
+        keys: ['mlm_users'],
+        strict: true,
+        maxAttempts: 2,
+        timeoutMs: 12000,
+        retryDelayMs: 800
+      });
+    } catch {
+      // best-effort refresh
+    }
+
+    return Database.getUserByUserId(cleanSponsorId) || null;
+  };
+
+  const handleSponsorSave = async () => {
     const cleanSponsorId = formData.sponsorId.replace(/\D/g, '').slice(0, 7);
     if (cleanSponsorId.length !== 7) {
       setSponsorStatusMessage('Enter a valid 7-digit Sponsor ID');
@@ -241,7 +263,7 @@ export default function CreateId() {
       return;
     }
 
-    const sponsor = Database.getUserByUserId(cleanSponsorId);
+    const sponsor = await resolveSponsorById(cleanSponsorId);
     if (!sponsor) {
       setSponsorStatusMessage('User does not exist with this Sponsor ID');
       setError('Sponsor ID not found');
@@ -328,7 +350,7 @@ export default function CreateId() {
     }
 
     setIsVerifyingOtp(true);
-    const valid = await verifyOtp(getCreateIdOtpKey(), otpCode.trim(), 'registration');
+    const valid = await verifyOtp(getCreateIdOtpKey(), otpCode.trim(), 'registration', false);
     setIsVerifyingOtp(false);
 
     if (!valid) {
@@ -347,7 +369,6 @@ export default function CreateId() {
     if (!formData.country.trim()) return 'Country is required';
     if (isSponsorEditing) return 'Save Sponsor ID before creating ID';
     if (!formData.sponsorId || formData.sponsorId.length !== 7) return 'Valid sponsor ID is required';
-    if (!sponsorName) return 'Sponsor ID not found';
     if (!formData.pinCode) return 'Please select a PIN';
     if (!isPinCurrentlyUnused(formData.pinCode)) return 'Selected PIN is not available';
     if (!isStrongPassword(formData.password)) return getPasswordRequirementsText();
@@ -377,6 +398,16 @@ export default function CreateId() {
     setIsLoading(true);
 
     try {
+      const sponsor = await resolveSponsorById(formData.sponsorId);
+      if (!sponsor) {
+        setSponsorStatusMessage('User does not exist with this Sponsor ID');
+        setSponsorName('');
+        setError('Sponsor ID not found');
+        return;
+      }
+      setSponsorName(sponsor.fullName || '');
+      setSponsorStatusMessage('');
+
       if (formData.pinCode) {
         setIsPinChecking(true);
         await refreshPins();
@@ -396,7 +427,9 @@ export default function CreateId() {
         phone: normalizePhoneNumber(formData.phone),
         country: formData.country,
         sponsorId: formData.sponsorId,
-        pinCode: formData.pinCode
+        pinCode: formData.pinCode,
+        registrationOtp: otpCode.trim(),
+        registrationOtpKey: getCreateIdOtpKey()
       });
 
       if (!result.success) {

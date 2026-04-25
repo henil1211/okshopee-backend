@@ -11,10 +11,17 @@ import Database from '@/db';
 import { useOtpStore } from '@/store';
 import PublicFooter from '@/components/PublicFooter';
 import { useOtpResend } from '@/hooks/use-otp-resend';
+import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
+
+const getBackendApiBase = () => {
+  const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
+  const configured = typeof env.VITE_BACKEND_URL === 'string' ? env.VITE_BACKEND_URL.trim() : '';
+  return resolveBackendBaseUrl(configured);
+};
 
 export default function ForgotPassword() {
   const navigate = useNavigate();
-  const { sendOtp, verifyOtp } = useOtpStore();
+  const { sendOtp } = useOtpStore();
 
   const [userId, setUserId] = useState('');
   const [email, setEmail] = useState('');
@@ -29,6 +36,18 @@ export default function ForgotPassword() {
 
   const handleSendOtp = async () => {
     setError('');
+    try {
+      await Database.hydrateFromServer({
+        keys: ['mlm_users'],
+        strict: true,
+        maxAttempts: 2,
+        timeoutMs: 12000,
+        retryDelayMs: 800
+      });
+    } catch {
+      // best-effort refresh
+    }
+
     const user = Database.getUserByUserId(userId);
     if (!user) {
       setError('User ID not found');
@@ -78,15 +97,34 @@ export default function ForgotPassword() {
     }
 
     setIsResetting(true);
-    const validOtp = await verifyOtp(user.userId, otp, 'profile_update');
-    if (!validOtp) {
-      setIsResetting(false);
-      setError('Invalid or expired OTP');
-      return;
-    }
-
     try {
-      await Database.commitCriticalAction(() => Database.updateUser(user.id, { password: newPassword }));
+      const response = await fetch(`${getBackendApiBase()}/api/auth/password-reset`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.userId,
+          email: email.trim(),
+          otp: otp.trim(),
+          newPassword
+        })
+      });
+      const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(typeof payload?.error === 'string' ? payload.error : 'Failed to update password');
+      }
+
+      try {
+        await Database.hydrateFromServer({
+          keys: ['mlm_users', 'mlm_otp_records'],
+          strict: true,
+          maxAttempts: 2,
+          timeoutMs: 12000,
+          retryDelayMs: 800
+        });
+      } catch {
+        // best-effort refresh
+      }
+
       setIsResetting(false);
       toast.success('Password updated successfully');
       navigate('/login');

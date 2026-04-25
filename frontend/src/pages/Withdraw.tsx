@@ -145,7 +145,7 @@ export default function Withdraw() {
         toast.error('Please enter OTP');
         return;
       }
-      const isValidOtp = await verifyOtp(displayUser.userId, otp, 'withdrawal');
+      const isValidOtp = await verifyOtp(displayUser.userId, otp, 'withdrawal', false);
       if (!isValidOtp) {
         toast.error('Invalid or expired OTP');
         return;
@@ -153,7 +153,16 @@ export default function Withdraw() {
     }
 
     setIsSubmitting(true);
-    const result = await withdraw(displayUser.id, numericAmount, payoutAddress, payoutQr || undefined);
+    const result = await withdraw(
+      displayUser.id,
+      numericAmount,
+      payoutAddress,
+      payoutQr || undefined,
+      {
+        transactionPassword,
+        otp
+      }
+    );
     setIsSubmitting(false);
 
     if (!result.success) {

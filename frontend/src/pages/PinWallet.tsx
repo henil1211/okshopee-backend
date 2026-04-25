@@ -236,8 +236,14 @@ export default function PinWallet() {
     }
 
     const result = selectedPins.length === 1
-      ? await transferPin(selectedPins[0], displayUser.id, targetUser.id)
-      : await transferPinsBulk(selectedPins, displayUser.id, targetUser.id);
+      ? await transferPin(selectedPins[0], displayUser.id, targetUser.id, {
+        transactionPassword,
+        otp: transferOtp
+      })
+      : await transferPinsBulk(selectedPins, displayUser.id, targetUser.id, {
+        transactionPassword,
+        otp: transferOtp
+      });
     
     if (result.success) {
       void Database.verifyOtp(displayUser.userId, transferOtp, 'transaction', true);

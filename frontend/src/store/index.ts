@@ -19,29 +19,6 @@ function getBackendApiBase(): string {
   return resolveBackendBaseUrl(configured);
 }
 
-async function v2FetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 60000): Promise<Response> {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal
-    });
-    clearTimeout(id);
-    return response;
-  } catch (error: any) {
-    clearTimeout(id);
-    if (error?.name === 'AbortError') {
-      throw new Error('Server limit reached (60s). Your request might still be processing. Please wait 1 minute and refresh.');
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('ECONNRESET')) {
-      throw new Error('Connection interrupted by server. Your request might have succeeded or be pending. Please wait 1 minute, then refresh the page to check your ID.');
-    }
-    throw error;
-  }
-}
-
 function normalizeRemoteRebuildError(payload: Record<string, unknown>, fallback: string): string {
   return typeof payload?.error === 'string'
     ? payload.error
@@ -285,8 +262,6 @@ function mapV2ReadTypeToTransactionType(
   }
   if (normalizedTxType === 'withdrawal_debit') return 'withdrawal';
   if (normalizedTxType === 'pin_purchase') return 'pin_purchase';
-  if (normalizedTxType === 'help_settlement' && signedAmountCents >= 0) return 'receive_help';
-  if (normalizedTxType === 'admin_credit' && normalizedDescription.includes('help')) return 'receive_help';
   if (normalizedTxType === 'referral_credit') {
     if (normalizedWalletType === 'locked_income' && signedAmountCents >= 0) return 'receive_help';
     if (normalizedDescription.includes('help') && signedAmountCents >= 0) return 'receive_help';
@@ -305,12 +280,6 @@ function mapV2ReadTypeToTransactionType(
   if (normalizedTxType === 'admin_adjustment') {
     if (signedAmountCents >= 0 && normalizedWalletType === 'royalty') return 'royalty_income';
     return signedAmountCents >= 0 ? 'admin_credit' : 'admin_debit';
-  }
-  if (normalizedTxType === 'give_help') {
-    return signedAmountCents >= 0 ? 'receive_help' : 'give_help';
-  }
-  if (normalizedTxType === 'receive_help') {
-    return signedAmountCents >= 0 ? 'receive_help' : 'give_help';
   }
 
   return signedAmountCents >= 0 ? 'admin_credit' : 'admin_debit';
@@ -483,7 +452,7 @@ async function fetchV2PinsForUser(user: User): Promise<Pin[]> {
 
   try {
     const pinsUrl = `${getBackendApiBase()}/api/v2/pins?userCode=${encodeURIComponent(userCode)}&limit=500`;
-    const response = await v2FetchWithTimeout(pinsUrl, { method: 'GET', headers: resolvedHeaders.headers });
+    const response = await fetch(pinsUrl, { method: 'GET', headers: resolvedHeaders.headers });
     if (!response.ok) return [];
 
     const payload = await response.json().catch(() => ({} as Record<string, unknown>));
@@ -871,16 +840,24 @@ async function submitV2ReferralCreditBySourceRef(params: {
     .slice(0, 64);
   const idempotencyKey = `refsrc_${sourceUserCode}_${beneficiaryUserCode}_${sourceRefToken}`.slice(0, 120);
   const requestId = generateClientRequestId('referral_credit');
-
-  const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/referrals/credit`, {
-    method: 'POST',
-    headers: {
+  const resolvedHeaders = resolveV2RequestHeaders({
+    idempotencyKey,
+    requestId,
+    impersonationReason: 'referral_credit'
+  });
+  const headers = 'headers' in resolvedHeaders
+    ? resolvedHeaders.headers
+    : {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${sourceUserCode}`,
       'Idempotency-Key': idempotencyKey,
       'X-System-Version': 'v2',
       'X-Request-Id': requestId
-    },
+    };
+
+  const response = await fetch(`${getBackendApiBase()}/api/v2/referrals/credit`, {
+    method: 'POST',
+    headers,
     body: JSON.stringify({
       sourceUserCode,
       beneficiaryUserCode,
@@ -929,16 +906,24 @@ async function submitV2HelpEventBySourceRef(params: {
     .slice(0, 64);
   const idempotencyKey = `help_${sourceUserCode}_${newMemberUserCode}_${sourceRefToken}`.slice(0, 120);
   const requestId = generateClientRequestId('help_event');
-
-  const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/help-events`, {
-    method: 'POST',
-    headers: {
+  const resolvedHeaders = resolveV2RequestHeaders({
+    idempotencyKey,
+    requestId,
+    impersonationReason: 'help_event'
+  });
+  const headers = 'headers' in resolvedHeaders
+    ? resolvedHeaders.headers
+    : {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${sourceUserCode}`,
       'Idempotency-Key': idempotencyKey,
       'X-System-Version': 'v2',
       'X-Request-Id': requestId
-    },
+    };
+
+  const response = await fetch(`${getBackendApiBase()}/api/v2/help-events`, {
+    method: 'POST',
+    headers,
     body: JSON.stringify({
       sourceUserCode,
       newMemberUserCode,
@@ -969,6 +954,8 @@ async function submitV2PinTransfer(params: {
   toUserCode: string;
   pinId?: string;
   pinCode?: string;
+  transactionPassword?: string;
+  otp?: string;
 }): Promise<{ success: boolean; message: string; status?: number; code?: string }> {
   const idempotencyKey = generateClientIdempotencyKey();
   const requestId = generateClientRequestId('pin_transfer');
@@ -983,14 +970,16 @@ async function submitV2PinTransfer(params: {
 
   let response: Response;
   try {
-    response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/pin-transfers`, {
+    response = await fetch(`${getBackendApiBase()}/api/v2/pin-transfers`, {
       method: 'POST',
       headers: resolvedHeaders.headers,
       body: JSON.stringify({
         fromUserCode: params.fromUserCode,
         toUserCode: params.toUserCode,
         pinId: String(params.pinId || '').trim() || undefined,
-        pinCode: String(params.pinCode || '').trim().toUpperCase() || undefined
+        pinCode: String(params.pinCode || '').trim().toUpperCase() || undefined,
+        transactionPassword: String(params.transactionPassword || ''),
+        otp: String(params.otp || '').trim()
       })
     });
   } catch (error) {
@@ -1038,7 +1027,7 @@ async function submitV2AdminAdjustment(params: {
 
   let response: Response;
   try {
-    response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/admin/adjustments`, {
+    response = await fetch(`${getBackendApiBase()}/api/v2/admin/adjustments`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1102,7 +1091,7 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
 
   let response: Response;
   try {
-    response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/registrations`, {
+    response = await fetch(`${getBackendApiBase()}/api/v2/registrations`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -1113,7 +1102,9 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
         phone: params.phone,
         country: params.country,
         sponsorId: params.sponsorId,
-        pinCode: params.pinCode
+        pinCode: params.pinCode,
+        registrationOtp: params.registrationOtp,
+        registrationOtpKey: params.registrationOtpKey
       })
     });
   } catch (error) {
@@ -1155,7 +1146,12 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
   };
 }
 
-async function reconcileCommittedRegistrationFromPin(pinCode: string): Promise<{
+async function reconcileCommittedRegistrationFromPin(
+  pinCode: string,
+  options?: {
+    suspectedInFlight?: boolean;
+  }
+): Promise<{
   recovered: boolean;
   userId?: string;
   warning?: string;
@@ -1166,50 +1162,77 @@ async function reconcileCommittedRegistrationFromPin(pinCode: string): Promise<{
     return { recovered: false };
   }
 
-  try {
-    await Database.forceRemoteSyncKeysNow(Database.getRegistrationFreshDataKeys(), {
-      force: true,
-      timeoutMs: 45000,
-      maxAttempts: 2,
-      retryDelayMs: 1000
-    });
-  } catch {
-    // Best-effort sync only. Continue reconciliation with locally available state.
+  const maxAttempts = options?.suspectedInFlight ? 5 : 3;
+  const retryDelayMs = options?.suspectedInFlight ? 4000 : 2500;
+  let sawMissingPin = false;
+  let sawUnusedPin = false;
+  let sawConsumedPinWithoutUser = false;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await Database.forceRemoteSyncKeysNow(Database.getRegistrationFreshDataKeys(), {
+        force: true,
+        timeoutMs: options?.suspectedInFlight ? 15000 : 12000,
+        maxAttempts: 2,
+        retryDelayMs: 800
+      });
+    } catch {
+      // Best-effort sync only. Continue reconciliation with locally available state.
+    }
+
+    const pin = Database.getPinByCode(normalizedPinCode);
+    if (!pin) {
+      sawMissingPin = true;
+    } else if (String(pin.status || '').toLowerCase() === 'unused') {
+      sawUnusedPin = true;
+    } else {
+      const candidateRefs = [
+        String(pin.registrationUserId || '').trim(),
+        String(pin.usedById || '').trim()
+      ].filter((value) => value.length > 0);
+
+      for (const ref of candidateRefs) {
+        const linkedUser = Database.getUserById(ref) || Database.getUserByUserId(ref);
+        const linkedUserCode = String(linkedUser?.userId || '').trim();
+        if (/^\d{7}$/.test(linkedUserCode)) {
+          return {
+            recovered: true,
+            userId: linkedUserCode,
+            warning: 'Registration was already committed on server and has been recovered after a temporary network error.'
+          };
+        }
+      }
+
+      sawConsumedPinWithoutUser = true;
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
   }
 
-  const pin = Database.getPinByCode(normalizedPinCode);
-  if (!pin) {
+  if (sawConsumedPinWithoutUser) {
+    return {
+      recovered: false,
+      blockingMessage: 'PIN is already consumed and registration may already be committed. Please wait 20-30 seconds, refresh, and do not retry with another PIN.'
+    };
+  }
+
+  if (options?.suspectedInFlight && (sawMissingPin || sawUnusedPin)) {
+    return {
+      recovered: false,
+      blockingMessage: 'Registration request is still being verified. Please wait 30-60 seconds, refresh, and do not submit again with another PIN yet.'
+    };
+  }
+
+  if (sawMissingPin) {
     return {
       recovered: false,
       blockingMessage: 'Registration status could not be verified yet. Please refresh once and check before retrying.'
     };
   }
 
-  if (String(pin.status || '').toLowerCase() === 'unused') {
-    return { recovered: false };
-  }
-
-  const candidateRefs = [
-    String(pin.registrationUserId || '').trim(),
-    String(pin.usedById || '').trim()
-  ].filter((value) => value.length > 0);
-
-  for (const ref of candidateRefs) {
-    const linkedUser = Database.getUserById(ref) || Database.getUserByUserId(ref);
-    const linkedUserCode = String(linkedUser?.userId || '').trim();
-    if (/^\d{7}$/.test(linkedUserCode)) {
-      return {
-        recovered: true,
-        userId: linkedUserCode,
-        warning: 'Registration was already committed on server and has been recovered after a temporary network error.'
-      };
-    }
-  }
-
-  return {
-    recovered: false,
-    blockingMessage: 'PIN is already consumed and registration may already be committed. Please wait 20-30 seconds, refresh, and do not retry with another PIN.'
-  };
+  return { recovered: false };
 }
 
 const POST_REGISTRATION_RETRY_QUEUE_STORAGE_KEY = 'v2_post_registration_retry_queue';
@@ -1618,7 +1641,7 @@ function getPostRegistrationRetryQueueStatusSnapshot(): PostRegistrationRetryQue
   };
 }
 
-export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 60000): PostRegistrationRetryQueueStatus {
+export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 15000): PostRegistrationRetryQueueStatus {
   const [status, setStatus] = useState<PostRegistrationRetryQueueStatus>(() => getPostRegistrationRetryQueueStatusSnapshot());
 
   useEffect(() => {
@@ -1629,7 +1652,7 @@ export function usePostRegistrationRetryQueueStatus(pollIntervalMs = 60000): Pos
     updateStatus();
     const intervalMs = Number.isFinite(pollIntervalMs)
       ? Math.max(5000, Math.min(60000, Math.trunc(pollIntervalMs)))
-      : 60000;
+      : 15000;
     const intervalId = setInterval(updateStatus, intervalMs);
 
     const handleVisibilityChange = () => {
@@ -1706,7 +1729,7 @@ async function createServerStateBackup(params?: {
   reason?: string;
 }): Promise<{ fileName: string; filePath: string; createdAt: string; updatedAt: string | null; keys: string[] }> {
   const apiBase = getBackendApiBase();
-  const response = await v2FetchWithTimeout(`${apiBase}/api/backups/create`, {
+  const response = await fetch(`${apiBase}/api/backups/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1723,7 +1746,7 @@ async function createServerStateBackup(params?: {
   const deadline = Date.now() + (30 * 60 * 1000);
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 2500));
-    const statusResponse = await v2FetchWithTimeout(`${apiBase}/api/backups/status?t=${Date.now()}`, {
+    const statusResponse = await fetch(`${apiBase}/api/backups/status?t=${Date.now()}`, {
       method: 'GET'
     });
     const statusPayload = await statusResponse.json().catch(() => ({} as Record<string, unknown>));
@@ -1823,7 +1846,7 @@ async function dispatchSystemEmail(params: {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timeout = setTimeout(() => controller?.abort(), requestTimeoutMs);
     try {
-      const response = await v2FetchWithTimeout(apiUrl, {
+      const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: controller?.signal,
@@ -1929,19 +1952,6 @@ interface AuthState {
 function evaluateUserAccess(user: User): { allowed: boolean; user: User; message?: string } {
   let resolvedUser = Database.getUserByUserId(user.userId) || Database.getUserById(user.id) || user;
 
-  // If the passed 'user' object has fresh data (e.g. from backend login), use its state as truth
-  // This prevents locally-stale 'reactivatedAt' timestamps from immediately re-deactivating the user
-  if (user) {
-    resolvedUser = {
-      ...resolvedUser,
-      isActive: user.isActive,
-      deactivationReason: user.deactivationReason,
-      reactivatedAt: user.reactivatedAt,
-      accountStatus: user.accountStatus,
-      blockedUntil: user.blockedUntil,
-      blockedReason: user.blockedReason
-    };
-  }
   if (AUTH_MAINTENANCE_ENABLED && !resolvedUser.isAdmin) {
     return {
       allowed: false,
@@ -2155,7 +2165,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await Database.ensureFreshData({
       keys: Database.getStartupRemoteSyncBatches().flat(),
-      timeoutMs: 60000,
+      timeoutMs: 10000,
       maxAttempts: 2,
       retryDelayMs: 700
     });
@@ -2201,7 +2211,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       await Database.forceRemoteSyncKeysNow([DB_KEYS.IMPERSONATION], {
         force: true,
-        timeoutMs: 60000,
+        timeoutMs: 15000,
         maxAttempts: 2,
         retryDelayMs: 600
       });
@@ -2220,7 +2230,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Persist end-session quickly so background hydration does not re-introduce stale active sessions.
       void Database.forceRemoteSyncKeysNow([DB_KEYS.IMPERSONATION], {
         force: true,
-        timeoutMs: 60000,
+        timeoutMs: 15000,
         maxAttempts: 2,
         retryDelayMs: 600
       }).catch(() => {
@@ -2238,7 +2248,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     await Database.ensureFreshData({
       keys: Database.getRegistrationFreshDataKeys(),
-      timeoutMs: 60000,
+      timeoutMs: 10000,
       maxAttempts: 2,
       retryDelayMs: 700
     });
@@ -2341,7 +2351,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const shouldTryRecovery = !nonRecoverableCodes.has(String(backendRegistration.code || '').trim());
 
       if (shouldTryRecovery) {
-        const recoveredRegistration = await reconcileCommittedRegistrationFromPin(normalizedPinCode);
+        const backendFailureMessage = String(backendRegistration.message || '').toLowerCase();
+        const recoveredRegistration = await reconcileCommittedRegistrationFromPin(normalizedPinCode, {
+          suspectedInFlight:
+            backendRegistration.status === undefined
+            || backendFailureMessage.includes('server limit reached')
+            || backendFailureMessage.includes('request might still be processing')
+            || backendFailureMessage.includes('request timed out')
+            || backendFailureMessage.includes('network request error')
+            || backendFailureMessage.includes('connection interrupted')
+        });
         if (recoveredRegistration.recovered && recoveredRegistration.userId) {
           backendRegistration = {
             success: true,
@@ -2632,7 +2651,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           keys: Database.getRegistrationFreshDataKeys(),
           strict: false,
           maxAttempts: 2,
-          timeoutMs: 60000,
+          timeoutMs: 30000,
           retryDelayMs: 1000
         });
       } catch {
@@ -2756,7 +2775,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         void Database.forceRemoteSyncNowWithOptions({
           full: false,
           force: true,
-          timeoutMs: 60000,
+          timeoutMs: 30000,
           maxAttempts: 2,
           retryDelayMs: 1000
         }).catch(() => {
@@ -2788,7 +2807,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             await Database.forceRemoteSyncNowWithOptions({
               full: false,
               force: true,
-              timeoutMs: 60000,
+              timeoutMs: 30000,
               maxAttempts: 2,
               retryDelayMs: 1000
             });
@@ -2796,7 +2815,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               keys: [DB_KEYS.USERS, DB_KEYS.WALLETS, DB_KEYS.TRANSACTIONS],
               strict: true,
               maxAttempts: 2,
-              timeoutMs: 60000,
+              timeoutMs: 15000,
               retryDelayMs: 800
             });
             referralResult = await submitV2ReferralCreditBySourceRef({
@@ -2843,7 +2862,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             await Database.forceRemoteSyncNowWithOptions({
               full: false,
               force: true,
-              timeoutMs: 60000,
+              timeoutMs: 30000,
               maxAttempts: 2,
               retryDelayMs: 1000
             });
@@ -2851,7 +2870,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
               keys: [DB_KEYS.USERS, DB_KEYS.MATRIX],
               strict: true,
               maxAttempts: 2,
-              timeoutMs: 60000,
+              timeoutMs: 15000,
               retryDelayMs: 800
             });
             helpEventResult = await submitV2HelpEventBySourceRef({
@@ -2941,7 +2960,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           keys: ['mlm_users', 'mlm_settings'],
           strict: false,
           maxAttempts: 1,
-          timeoutMs: 60000,
+          timeoutMs: 10000,
           retryDelayMs: 600
         });
       } catch {
@@ -3049,7 +3068,11 @@ interface WalletState {
     userId: string,
     amount: number,
     walletAddress: string,
-    payoutQrCode?: string
+    payoutQrCode?: string,
+    security?: {
+      transactionPassword?: string;
+      otp?: string;
+    }
   ) => Promise<{ success: boolean; message: string }>;
   refreshTransactions: (userId: string, options?: { v2Only?: boolean }) => void;
 }
@@ -3251,7 +3274,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     }
     const headers = resolvedHeaders.headers;
 
-    const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/fund-transfers`, {
+    const response = await fetch(`${getBackendApiBase()}/api/v2/fund-transfers`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -3260,6 +3283,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         sourceWallet,
         destinationWallet,
         amountCents,
+        transactionPassword: txPasswordForV2,
+        otp: otpForV2,
         referenceId: `ui_fund_transfer_${requestId}`,
         description: `${sourceWallet === 'income' ? 'Income' : 'Fund'} wallet transfer from ${fromUser.userId} to ${toUserForV2.userId}`
       })
@@ -3310,7 +3335,16 @@ export const useWalletStore = create<WalletState>((set, get) => ({
     };
   },
 
-  withdraw: async (userId: string, amount: number, walletAddress: string, payoutQrCode?: string) => {
+  withdraw: async (
+    userId: string,
+    amount: number,
+    walletAddress: string,
+    payoutQrCode?: string,
+    security?: {
+      transactionPassword?: string;
+      otp?: string;
+    }
+  ) => {
     try {
       await Database.ensureFreshData();
 
@@ -3350,6 +3384,16 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
       const resolvedPayoutQrCode = String(payoutQrCode || '').trim();
 
+      const txPasswordForV2 = (security?.transactionPassword || '').trim();
+      if (!txPasswordForV2 || user.transactionPassword !== txPasswordForV2) {
+        return { success: false, message: 'Invalid transaction password' };
+      }
+
+      const otpForV2 = (security?.otp || '').trim();
+      if (!otpForV2 || !Database.verifyOtp(user.userId, otpForV2, 'withdrawal', false)) {
+        return { success: false, message: 'Invalid or expired OTP' };
+      }
+
       // Use income wallet for withdrawals
       const availableWithdrawableBalance = computeSpendableIncomeBalance(wallet, {
         lockedAlreadyExcluded: get().v2ReadHealthy
@@ -3374,11 +3418,13 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         return { success: false, message: 'Invalid withdrawal amount' };
       }
 
-      const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/withdrawals`, {
+      const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals`, {
         method: 'POST',
         headers: resolvedHeaders.headers,
         body: JSON.stringify({
           amountCents,
+          transactionPassword: txPasswordForV2,
+          otp: otpForV2,
           destinationType: 'wallet',
           destinationRef: resolvedWalletAddress,
           referenceId: `ui_withdrawal_${requestId}`,
@@ -3393,6 +3439,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         const errorMessage = normalizeV2ApiErrorMessage(response.status, payload, 'Withdrawal failed');
         return { success: false, message: errorMessage };
       }
+
+      void Database.verifyOtp(user.userId, otpForV2, 'withdrawal', true);
 
       const refreshedSnapshot = await fetchV2WalletAndTransactionsSnapshotForUser(user).catch(() => null);
       if (refreshedSnapshot) {
@@ -3503,8 +3551,18 @@ interface PinState {
   transfers: PinTransfer[];
   purchaseRequests: PinPurchaseRequest[];
   loadPins: (userId: string) => void;
-  transferPin: (pinId: string, fromUserId: string, toUserId: string) => Promise<{ success: boolean; message: string }>;
-  transferPinsBulk: (pinIds: string[], fromUserId: string, toUserId: string) => Promise<{ success: boolean; message: string }>;
+  transferPin: (
+    pinId: string,
+    fromUserId: string,
+    toUserId: string,
+    security?: { transactionPassword?: string; otp?: string }
+  ) => Promise<{ success: boolean; message: string }>;
+  transferPinsBulk: (
+    pinIds: string[],
+    fromUserId: string,
+    toUserId: string,
+    security?: { transactionPassword?: string; otp?: string }
+  ) => Promise<{ success: boolean; message: string }>;
   requestPinPurchase: (
     userId: string,
     quantity: number,
@@ -3559,7 +3617,12 @@ export const usePinStore = create<PinState>((set, get) => ({
     })();
   },
 
-  transferPin: async (pinId: string, fromUserId: string, toUserId: string) => {
+  transferPin: async (
+    pinId: string,
+    fromUserId: string,
+    toUserId: string,
+    security?: { transactionPassword?: string; otp?: string }
+  ) => {
     try {
       await Database.ensureFreshData();
 
@@ -3584,7 +3647,9 @@ export const usePinStore = create<PinState>((set, get) => ({
         fromUserCode: fromUser.userId,
         toUserCode: toUser.userId,
         pinId,
-        pinCode: pin?.pinCode
+        pinCode: pin?.pinCode,
+        transactionPassword: String(security?.transactionPassword || ''),
+        otp: String(security?.otp || '').trim()
       });
 
       if (backendTransfer.success) {
@@ -3618,7 +3683,7 @@ export const usePinStore = create<PinState>((set, get) => ({
       get().loadPins(fromUserId);
 
       try {
-        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 60000, maxAttempts: 2, retryDelayMs: 1200 });
+        await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
         await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
         get().loadPins(fromUserId);
       } catch {
@@ -3632,7 +3697,12 @@ export const usePinStore = create<PinState>((set, get) => ({
     }
   },
 
-  transferPinsBulk: async (pinIds: string[], fromUserId: string, toUserId: string) => {
+  transferPinsBulk: async (
+    pinIds: string[],
+    fromUserId: string,
+    toUserId: string,
+    security?: { transactionPassword?: string; otp?: string }
+  ) => {
     if (pinIds.length === 0) {
       return { success: false, message: 'No PINs selected' };
     }
@@ -3662,7 +3732,9 @@ export const usePinStore = create<PinState>((set, get) => ({
             fromUserCode: fromUser.userId,
             toUserCode: toUser.userId,
             pinId,
-            pinCode: pin?.pinCode
+            pinCode: pin?.pinCode,
+            transactionPassword: String(security?.transactionPassword || ''),
+            otp: String(security?.otp || '').trim()
           });
 
           if (backendTransfer.success) {
@@ -3756,17 +3828,17 @@ export const usePinStore = create<PinState>((set, get) => ({
           });
         }
 
-        Database.createTransaction({
-          id: `tx_${Date.now()}_pin_request`,
-          userId: effectiveUserId,
-          type: 'pin_purchase',
-          amount: paidFromWallet ? -amount : 0,
-          status: 'pending',
-          description: paidFromWallet
-            ? `PIN purchase request from fund wallet (${quantity} PINs)`
-            : `PIN purchase request with manual payment proof (${quantity} PINs)`,
-          createdAt: new Date().toISOString()
-        });
+        if (paidFromWallet) {
+          Database.createTransaction({
+            id: `tx_${Date.now()}_pin_request`,
+            userId: effectiveUserId,
+            type: 'pin_purchase',
+            amount: -amount,
+            status: 'pending',
+            description: `PIN purchase request from fund wallet (${quantity} PINs)`,
+            createdAt: new Date().toISOString()
+          });
+        }
 
         const request: PinPurchaseRequest = {
           id: `ppr_${Date.now()}`,
@@ -3788,11 +3860,11 @@ export const usePinStore = create<PinState>((set, get) => ({
 
       const syncKeys = paidFromWallet
         ? [DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.TRANSACTIONS, DB_KEYS.WALLETS]
-        : [DB_KEYS.PIN_PURCHASE_REQUESTS, DB_KEYS.TRANSACTIONS];
+        : [DB_KEYS.PIN_PURCHASE_REQUESTS];
 
       const synced = await Database.forceRemoteSyncKeysNow(syncKeys, {
         force: true,
-        timeoutMs: 60000,
+        timeoutMs: 25000,
         maxAttempts: 3,
         retryDelayMs: 1200
       });
@@ -3862,7 +3934,7 @@ export const usePinStore = create<PinState>((set, get) => ({
         return { success: false, message: 'Invalid PIN price configuration' };
       }
 
-      const response = await v2FetchWithTimeout(`${getBackendApiBase()}/api/v2/pins/purchase`, {
+      const response = await fetch(`${getBackendApiBase()}/api/v2/pins/purchase`, {
         method: 'POST',
         headers: resolvedHeaders.headers,
         body: JSON.stringify({
@@ -3928,7 +4000,7 @@ export const usePinStore = create<PinState>((set, get) => ({
           try {
             await Database.forceRemoteSyncKeysNow([DB_KEYS.PINS], {
               force: true,
-              timeoutMs: 60000,
+              timeoutMs: 15000,
               maxAttempts: 2,
               retryDelayMs: 1000
             });
@@ -4220,7 +4292,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     get().loadAllPins();
 
     try {
-      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 60000, maxAttempts: 2, retryDelayMs: 1200 });
+      await Database.forceRemoteSyncNowWithOptions({ full: false, force: true, timeoutMs: 15000, maxAttempts: 2, retryDelayMs: 1200 });
       await Database.hydrateFromServer({ strict: true, maxAttempts: 2, timeoutMs: 12000, retryDelayMs: 800 });
       get().loadPendingPinRequests();
       get().loadAllPinRequests();
@@ -4391,11 +4463,9 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'Only admin can reactivate users' };
     }
 
-    // Fetch fresh data so we have the latest user state before checking/modifying
-    try {
-      await Database.ensureFreshData({ keys: [DB_KEYS.USERS] });
-    } catch {
-      // best-effort; proceed with cached data
+    const syncGate = Database.getSensitiveActionSyncGate();
+    if (!syncGate.allowed) {
+      return { success: false, message: syncGate.message || 'Server sync is not ready. Please wait and retry reactivation.' };
     }
 
     const targetUser = Database.getUserByUserId(targetUserId);
@@ -4403,9 +4473,8 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       return { success: false, message: 'User not found' };
     }
 
-    // Allow admin to reactivate any deactivated user regardless of deactivation reason
-    if (targetUser.isActive) {
-      return { success: false, message: 'User is already active' };
+    if (targetUser.deactivationReason !== 'direct_referral_deadline') {
+      return { success: false, message: 'User was not auto-deactivated for direct referral deadline' };
     }
 
     const result = Database.reactivateUser(targetUser.id);
@@ -4415,7 +4484,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     const synced = await Database.forceRemoteSyncKeysNow([DB_KEYS.USERS], {
       force: true,
-      timeoutMs: 60000,
+      timeoutMs: 15000,
       maxAttempts: 3,
       retryDelayMs: 500
     });
@@ -4431,7 +4500,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     await Database.ensureFreshData({ keys: [DB_KEYS.USERS] });
     get().loadAllUsers();
-    return { success: true, message: `User ${targetUserId} has been successfully reactivated.` };
+    return { success: true, message: `User ${targetUserId} reactivated. 30-day deadline restarted.` };
   },
 
   addFundsToUser: async (userId: string, amount: number, walletType: 'deposit' | 'income' | 'royalty' = 'deposit', note?: string) => {
@@ -4495,7 +4564,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     Database.deductFromSafetyPool(normalizedAmount, adminUser.id, poolReason);
     await Database.forceRemoteSyncKeysNow([DB_KEYS.SAFETY_POOL], {
       force: true,
-      timeoutMs: 60000,
+      timeoutMs: 30000,
       maxAttempts: 3,
       retryDelayMs: 1500
     }).catch(() => false);
@@ -4579,7 +4648,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
     await Database.forceRemoteSyncKeysNow([DB_KEYS.SAFETY_POOL], {
       force: true,
-      timeoutMs: 60000,
+      timeoutMs: 30000,
       maxAttempts: 3,
       retryDelayMs: 1500
     }).catch(() => false);
@@ -4668,7 +4737,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       syncOptions: {
         full: false,
         force: true,
-        timeoutMs: 60000,
+        timeoutMs: 30000,
         maxAttempts: 3,
         retryDelayMs: 1500
       }
@@ -5060,7 +5129,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
       });
       if (!synced) {
         try {
-          await Database.hydrateFromServer({ strict: true, maxAttempts: 3, timeoutMs: 60000, retryDelayMs: 1200 });
+          await Database.hydrateFromServer({ strict: true, maxAttempts: 3, timeoutMs: 15000, retryDelayMs: 1200 });
           const missingAfterHydrate = createdUserIds.filter((uid) => !Database.getUserByUserId(uid));
           if (missingAfterHydrate.length === 0) {
             const baseFailedCount = failed.length;
@@ -5196,7 +5265,7 @@ export const useAdminStore = create<AdminState>((set, get) => ({
     const apiBase = getBackendApiBase();
 
     try {
-      const response = await v2FetchWithTimeout(`${apiBase}/api/audit/missing-matrix-users?limit=${clampedLimit}`, {
+      const response = await fetch(`${apiBase}/api/audit/missing-matrix-users?limit=${clampedLimit}`, {
         method: 'GET'
       });
       const payload = await response.json().catch(() => ({} as Record<string, unknown>));
@@ -5345,7 +5414,12 @@ interface OtpState {
     purpose: 'registration' | 'transaction' | 'withdrawal' | 'profile_update',
     context?: { userId?: string; userName?: string }
   ) => Promise<{ success: boolean; otp?: string; message: string; status: 'sent' | 'pending' | 'failed' }>;
-  verifyOtp: (userId: string, otp: string, purpose: 'registration' | 'transaction' | 'withdrawal' | 'profile_update') => Promise<boolean>;
+  verifyOtp: (
+    userId: string,
+    otp: string,
+    purpose: 'registration' | 'transaction' | 'withdrawal' | 'profile_update',
+    consume?: boolean
+  ) => Promise<boolean>;
 }
 
 export const useOtpStore = create<OtpState>((set) => ({
@@ -5353,6 +5427,49 @@ export const useOtpStore = create<OtpState>((set) => ({
   otpExpiry: null,
 
   sendOtp: async (userId: string, email: string, purpose, context) => {
+    const requiresServerOwnedOtp = purpose === 'registration'
+      || (purpose === 'profile_update' && !Database.getCurrentUser());
+    if (requiresServerOwnedOtp) {
+      try {
+        const response = await fetch(`${getBackendApiBase()}/api/auth/otp/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            identityKey: userId,
+            email,
+            purpose,
+            userName: context?.userName?.trim() || '',
+            resolvedUserId: context?.userId?.trim() || ''
+          })
+        });
+        const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+        if (!response.ok || payload?.ok === false) {
+          return {
+            success: false,
+            status: 'failed',
+            message: typeof payload?.error === 'string' ? payload.error : 'Failed to send OTP'
+          };
+        }
+
+        set({
+          isOtpSent: true,
+          otpExpiry: new Date(Date.now() + 10 * 60 * 1000)
+        });
+
+        return {
+          success: true,
+          status: 'sent',
+          message: typeof payload?.message === 'string' ? payload.message : 'OTP sent to your email'
+        };
+      } catch (error) {
+        return {
+          success: false,
+          status: 'failed',
+          message: error instanceof Error ? error.message : 'Failed to send OTP'
+        };
+      }
+    }
+
     const otpRecord = Database.generateOtp(userId, email, purpose);
     const purposeLabel = purpose === 'withdrawal'
       ? 'withdrawal'
@@ -5369,9 +5486,7 @@ export const useOtpStore = create<OtpState>((set) => ({
     const resolvedName = context?.userName?.trim() || resolvedUser?.fullName || '';
     const userIdLine = resolvedUserId
       ? `User ID: ${resolvedUserId}`
-      : purpose === 'registration'
-        ? 'User ID: Pending (assigned after registration)'
-        : 'User ID: N/A';
+      : 'User ID: N/A';
     const nameLine = resolvedName ? `Name: ${resolvedName}` : 'Name: N/A';
     const otpLines = [
       `Your OTP for ${purposeLabel} is ${otpRecord.otp}.`,
@@ -5404,6 +5519,21 @@ export const useOtpStore = create<OtpState>((set) => ({
       };
     }
 
+    let syncPendingMessage: string | null = null;
+    try {
+      const synced = await Database.forceRemoteSyncKeysNow([DB_KEYS.OTP_RECORDS], {
+        force: true,
+        timeoutMs: 15000,
+        maxAttempts: 2,
+        retryDelayMs: 800
+      });
+      if (!synced) {
+        syncPendingMessage = 'OTP sent, but server sync is still catching up. Please wait a few seconds before verifying.';
+      }
+    } catch {
+      syncPendingMessage = 'OTP sent, but server sync is still catching up. Please wait a few seconds before verifying.';
+    }
+
     set({
       isOtpSent: true,
       otpExpiry: new Date(otpRecord.expiresAt)
@@ -5411,15 +5541,49 @@ export const useOtpStore = create<OtpState>((set) => ({
 
     return {
       success: true,
-      status: emailResult.deliveryState,
-      message: emailResult.deliveryState === 'pending'
-        ? (emailResult.error || 'OTP request timed out, but the email may still arrive. Please check inbox/spam before retrying.')
-        : 'OTP sent to your email'
+      status: syncPendingMessage ? 'pending' : emailResult.deliveryState,
+      message: syncPendingMessage || (
+        emailResult.deliveryState === 'pending'
+          ? (emailResult.error || 'OTP request timed out, but the email may still arrive. Please check inbox/spam before retrying.')
+          : 'OTP sent to your email'
+      )
     };
   },
 
-  verifyOtp: async (userId: string, otp: string, purpose) => {
-    const isValid = Database.verifyOtp(userId, otp, purpose);
+  verifyOtp: async (userId: string, otp: string, purpose, consume = true) => {
+    const requiresServerOwnedOtp = purpose === 'registration'
+      || (purpose === 'profile_update' && !Database.getCurrentUser());
+    if (requiresServerOwnedOtp) {
+      const resolvedEmail = String(
+        Database.getUserById(userId)?.email
+        || Database.getUserByUserId(userId)?.email
+        || Database.getUserByEmail(userId)?.email
+        || userId.replace(/^register_|^createid_/, '')
+      ).trim().toLowerCase();
+      try {
+        const response = await fetch(`${getBackendApiBase()}/api/auth/otp/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            identityKey: userId,
+            email: resolvedEmail,
+            purpose,
+            otp,
+            consume
+          })
+        });
+        const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+        const isValid = response.ok && payload?.ok !== false;
+        if (isValid) {
+          set({ isOtpSent: false, otpExpiry: null });
+        }
+        return isValid;
+      } catch {
+        return false;
+      }
+    }
+
+    const isValid = Database.verifyOtp(userId, otp, purpose, consume);
     if (isValid) {
       set({ isOtpSent: false, otpExpiry: null });
     }

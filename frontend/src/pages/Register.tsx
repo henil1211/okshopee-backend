@@ -172,6 +172,28 @@ export default function Register() {
     pinRefreshInFlight.current = null;
   };
 
+  const resolveSponsorById = async (candidateSponsorId: string) => {
+    const cleanSponsorId = (candidateSponsorId || '').replace(/\D/g, '').slice(0, 7);
+    if (cleanSponsorId.length !== 7) return null;
+
+    const localSponsor = Database.getUserByUserId(cleanSponsorId);
+    if (localSponsor) return localSponsor;
+
+    try {
+      await Database.hydrateFromServer({
+        keys: ['mlm_users'],
+        strict: true,
+        maxAttempts: 2,
+        timeoutMs: 12000,
+        retryDelayMs: 800
+      });
+    } catch {
+      // best-effort refresh
+    }
+
+    return Database.getUserByUserId(cleanSponsorId) || null;
+  };
+
   // Check PIN when entered
   const handlePinChange = async (value: string) => {
     const cleanValue = value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 7);
@@ -286,7 +308,7 @@ export default function Register() {
     }
 
     setIsVerifyingOtp(true);
-    const valid = await verifyOtp(getRegistrationOtpKey(), otpCode.trim(), 'registration');
+    const valid = await verifyOtp(getRegistrationOtpKey(), otpCode.trim(), 'registration', false);
     setIsVerifyingOtp(false);
 
     if (!valid) {
@@ -303,8 +325,6 @@ export default function Register() {
     if (!isEmailValid(formData.email)) return 'Invalid email format';
     if (!formData.sponsorId?.trim()) return 'Sponsor ID is required';
     if (formData.sponsorId.length !== 7) return 'Sponsor ID must be 7 digits';
-    const sponsor = Database.getUserByUserId(formData.sponsorId);
-    if (!sponsor) return 'Invalid Sponsor ID';
     return '';
   };
 
@@ -333,10 +353,18 @@ export default function Register() {
     return '';
   };
 
-  const handleNext = () => {
+  const handleNext = async () => {
     let error = '';
     if (step === 1) {
       error = validateStep1();
+      if (!error) {
+        const sponsor = await resolveSponsorById(formData.sponsorId);
+        if (!sponsor) {
+          error = 'Invalid Sponsor ID';
+        } else {
+          setSponsorName(sponsor.fullName || '');
+        }
+      }
     } else if (step === 2) {
       error = validateStep2();
     }
@@ -390,7 +418,9 @@ export default function Register() {
         phone: normalizePhoneNumber(formData.phone),
         country: formData.country,
         sponsorId: formData.sponsorId || undefined,
-        pinCode: formData.pinCode
+        pinCode: formData.pinCode,
+        registrationOtp: otpCode.trim(),
+        registrationOtpKey: getRegistrationOtpKey()
       });
 
       if (result.success) {

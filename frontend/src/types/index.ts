@@ -305,6 +305,8 @@ export interface RegisterData {
   country: string;
   sponsorId?: string; // 7-digit sponsor ID
   pinCode: string; // PIN for activation (mandatory)
+  registrationOtp?: string;
+  registrationOtpKey?: string;
 }
 
 // OTP Types for Email Verification
