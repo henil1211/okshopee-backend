@@ -2641,7 +2641,7 @@ function resolveEffectiveLockedIncomeCents({
   // represents different eras of help received. We must sum them to show the 
   // correct lifetime locked total.
   if (hasV2LockSignals) {
-    return v2Locked + legacyLocked;
+    return Math.max(v2Locked, legacyLocked);
   }
 
   // Legacy fallback remains only for users not fully represented in V2 lock state yet.
@@ -4488,6 +4488,84 @@ async function lockV2HelpLevelState(connection, userId, levelNo) {
   return state;
 }
 
+async function syncV2StateToLegacyWallets(connection, userId) {
+  try {
+    // 1. Resolve User Source
+    const [userRows] = await connection.execute(
+      'SELECT id, user_code FROM v2_users WHERE id = ? LIMIT 1 FOR UPDATE',
+      [userId]
+    );
+    const user = Array.isArray(userRows) ? userRows[0] : null;
+    if (!user) return;
+
+    const publicUserId = String(user.user_code).trim();
+
+    // 2. Aggregate V2 Balances
+    const [walletRows] = await connection.execute(
+      'SELECT wallet_type, current_amount_cents FROM v2_wallet_accounts WHERE user_id = ?',
+      [userId]
+    );
+    const wallets = Array.isArray(walletRows) ? walletRows : [];
+    
+    let incomeCents = 0;
+    let royaltyCents = 0;
+    let matrixCents = 0;
+
+    for (const w of wallets) {
+      if (w.wallet_type === 'income') incomeCents = Number(w.current_amount_cents || 0);
+      if (w.wallet_type === 'royalty') royaltyCents = Number(w.current_amount_cents || 0);
+      if (w.wallet_type === 'fund') matrixCents = Number(w.current_amount_cents || 0);
+    }
+
+    // 3. Aggregate V2 Locks
+    const [stateRows] = await connection.execute(
+      'SELECT SUM(locked_qualification_cents) as locked_total, SUM(pending_give_cents) as pending_give FROM v2_help_level_state WHERE user_id = ?',
+      [userId]
+    );
+    const state = Array.isArray(stateRows) ? stateRows[0] : null;
+    const lockedIncomeCents = Number(state?.locked_total || 0);
+    const giveHelpLockedCents = Number(state?.pending_give || 0);
+
+    // 4. Update state_store atomically
+    const [storeRows] = await connection.execute(
+      'SELECT state_key, state_value FROM state_store WHERE state_key IN ("mlm_wallets", "mlm_users") FOR UPDATE'
+    );
+    if (storeRows.length < 2) return;
+
+    const mlmWalletsRaw = storeRows.find(r => r.state_key === 'mlm_wallets')?.state_value;
+    const mlmUsersRaw = storeRows.find(r => r.state_key === 'mlm_users')?.state_value;
+    if (!mlmWalletsRaw || !mlmUsersRaw) return;
+
+    const mlmWallets = JSON.parse(mlmWalletsRaw);
+    const mlmUsers = JSON.parse(mlmUsersRaw);
+
+    // Find legacy user by: 1. user_code match, 2. email match
+    const legacyUser = mlmUsers.find(u => 
+      String(u.userId).trim() === publicUserId || 
+      (user.email && String(u.email).toLowerCase().trim() === String(user.email).toLowerCase().trim())
+    );
+
+    if (!legacyUser) return;
+
+    const walletIdx = mlmWallets.findIndex(w => String(w.userId).trim() === legacyUser.id);
+    
+    if (walletIdx !== -1) {
+      mlmWallets[walletIdx].incomeWallet = incomeCents / 100;
+      mlmWallets[walletIdx].royaltyWallet = royaltyCents / 100;
+      mlmWallets[walletIdx].matrixWallet = matrixCents / 100;
+      mlmWallets[walletIdx].lockedIncomeWallet = lockedIncomeCents / 100;
+      mlmWallets[walletIdx].giveHelpLocked = giveHelpLockedCents / 100;
+
+      await connection.execute(
+        'UPDATE state_store SET state_value = ?, updated_at = NOW(3) WHERE state_key = "mlm_wallets"',
+        [JSON.stringify(mlmWallets)]
+      );
+    }
+  } catch (err) {
+    console.warn(`[syncV2StateToLegacyWallets] Failed for user ${userId}:`, err.message);
+  }
+}
+
 async function consumeV2HelpPendingGiveForContribution(connection, {
   sourceUserId,
   levelNo,
@@ -4708,13 +4786,14 @@ async function applyV2HelpContributionSettlement(connection, {
         (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
        VALUES
         (?, 1, ?, NULL, NULL, 'debit', ?),
-        (?, 2, ?, NULL, NULL, 'credit', ?)`,
+        (?, 2, ?, ?, 'income', 'credit', ?)`,
       [
         ledgerTxnId,
         helpExpenseAccount.id,
         amountCents,
         ledgerTxnId,
         settlementAccount.id,
+        beneficiaryUser.id,
         amountCents
       ]
     );
@@ -4724,13 +4803,14 @@ async function applyV2HelpContributionSettlement(connection, {
         (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
        VALUES
         (?, 1, ?, NULL, NULL, 'debit', ?),
-        (?, 2, ?, NULL, NULL, 'credit', ?)`,
+        (?, 2, ?, ?, 'income', 'credit', ?)`,
       [
         ledgerTxnId,
         helpExpenseAccount.id,
         amountCents,
         ledgerTxnId,
         safetyPoolAccount.id,
+        beneficiaryUser.id,
         amountCents
       ]
     );
@@ -4739,18 +4819,19 @@ async function applyV2HelpContributionSettlement(connection, {
 
     if (qualificationReleaseCents > 0) {
       await connection.execute(
-        `INSERT INTO v2_ledger_entries
-          (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
-         VALUES
-          (?, 1, ?, NULL, NULL, 'debit', ?),
-          (?, 2, ?, NULL, NULL, 'debit', ?),
-          (?, 3, ?, ?, 'income', 'credit', ?)`,
+          `INSERT INTO v2_ledger_entries
+            (ledger_txn_id, line_no, gl_account_id, user_id, wallet_type, entry_side, amount_cents)
+           VALUES
+            (?, 1, ?, NULL, NULL, 'debit', ?),
+            (?, 2, ?, ?, 'income', 'credit', ?),
+            (?, 3, ?, ?, 'income', 'credit', ?)`,
         [
           ledgerTxnId,
           helpExpenseAccount.id,
           amountCents,
           ledgerTxnId,
           settlementAccount.id,
+          beneficiaryUser.id,
           qualificationReleaseCents,
           ledgerTxnId,
           beneficiaryWallet.gl_account_id,
