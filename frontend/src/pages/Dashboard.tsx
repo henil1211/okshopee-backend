@@ -161,7 +161,16 @@ export default function Dashboard() {
     }
 
     setIsLoading(true);
-    const result = await withdraw(displayUser.id, amount, payoutAddress, withdrawData.qrCode || undefined);
+    const result = await withdraw(
+      displayUser.id,
+      amount,
+      payoutAddress,
+      withdrawData.qrCode || undefined,
+      {
+        transactionPassword: withdrawTransactionPassword,
+        otp: withdrawOtp
+      }
+    );
     setIsLoading(false);
 
     if (result.success) {

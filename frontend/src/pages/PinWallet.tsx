@@ -33,7 +33,7 @@ export default function PinWallet() {
     loadPurchaseRequests,
     copyPinToClipboard 
   } = usePinStore();
-  const { sendOtp } = useOtpStore();
+  const { sendOtp, verifyOtp } = useOtpStore();
   const { wallet, loadWallet, refreshTransactions } = useWalletStore();
   const syncKey = useSyncRefreshKey();
   const displayUser = useMemo(() => {
@@ -220,7 +220,7 @@ export default function PinWallet() {
       return;
     }
 
-    const otpValid = Database.verifyOtp(displayUser.userId, transferOtp, 'transaction', false);
+    const otpValid = await verifyOtp(displayUser.userId, transferOtp, 'transaction', false);
     if (!otpValid) {
       toast.error('Invalid or expired OTP');
       return;
@@ -246,7 +246,6 @@ export default function PinWallet() {
       });
     
     if (result.success) {
-      void Database.verifyOtp(displayUser.userId, transferOtp, 'transaction', true);
       toast.success(result.message);
       setShowPasswordModal(false);
       setTransactionPassword('');

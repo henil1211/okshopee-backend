@@ -7786,6 +7786,8 @@ const server = createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/auth/otp/verify') {
+    let connection;
+    let transactionOpen = false;
     try {
       const body = await getRequestBody(req);
       const parsed = body ? JSON.parse(body) : {};
@@ -7793,6 +7795,7 @@ const server = createServer(async (req, res) => {
       const email = String(parsed?.email || '').trim().toLowerCase();
       const purpose = String(parsed?.purpose || '').trim();
       const otp = normalizeOtpCode(parsed?.otp);
+      const consume = parsed?.consume !== false;
 
       if (!identityKey) {
         sendJson(res, 400, { ok: false, error: 'identityKey is required', code: 'IDENTITY_KEY_REQUIRED' });
@@ -7807,20 +7810,86 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const otpRecords = safeParseJSON(await readStateKeyValue('mlm_otp_records')) || [];
-      const otpMatch = findLatestValidOtpRecord(Array.isArray(otpRecords) ? otpRecords : [], {
-        identityKeys: [identityKey],
-        email,
-        otp,
-        purpose
-      });
-      if (!otpMatch.record) {
-        sendJson(res, 400, { ok: false, error: 'Invalid or expired OTP', code: 'INVALID_OTP' });
-        return;
+      if (!consume) {
+        const otpRecords = safeParseJSON(await readStateKeyValue('mlm_otp_records')) || [];
+        const otpMatch = findLatestValidOtpRecord(Array.isArray(otpRecords) ? otpRecords : [], {
+          identityKeys: [identityKey],
+          email,
+          otp,
+          purpose
+        });
+        if (!otpMatch.record) {
+          sendJson(res, 400, { ok: false, error: 'Invalid or expired OTP', code: 'INVALID_OTP' });
+          return;
+        }
+      } else if (STORAGE_MODE === 'file') {
+        const otpRecords = safeParseJSON(await readStateKeyValue('mlm_otp_records')) || [];
+        const otpMatch = findLatestValidOtpRecord(Array.isArray(otpRecords) ? otpRecords : [], {
+          identityKeys: [identityKey],
+          email,
+          otp,
+          purpose
+        });
+        if (!otpMatch.record || otpMatch.index < 0) {
+          sendJson(res, 400, { ok: false, error: 'Invalid or expired OTP', code: 'INVALID_OTP' });
+          return;
+        }
+
+        const updatedOtpRecords = markOtpRecordUsed(otpRecords, otpMatch.index);
+        await writeStateToDB({
+          mlm_otp_records: JSON.stringify(updatedOtpRecords)
+        }, false);
+      } else {
+        if (!pool) {
+          sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+          return;
+        }
+        connection = await pool.getConnection();
+        await connection.beginTransaction();
+        transactionOpen = true;
+
+        const [rows] = await connection.execute(
+          `SELECT state_value
+           FROM state_store
+           WHERE state_key = 'mlm_otp_records'
+           FOR UPDATE`
+        );
+        const otpRecordsRaw = Array.isArray(rows) && rows.length > 0 ? rows[0]?.state_value : '[]';
+        const otpRecords = safeParseJSON(otpRecordsRaw);
+        const otpMatch = findLatestValidOtpRecord(Array.isArray(otpRecords) ? otpRecords : [], {
+          identityKeys: [identityKey],
+          email,
+          otp,
+          purpose
+        });
+        if (!otpMatch.record || otpMatch.index < 0) {
+          await connection.rollback();
+          transactionOpen = false;
+          sendJson(res, 400, { ok: false, error: 'Invalid or expired OTP', code: 'INVALID_OTP' });
+          return;
+        }
+
+        const updatedOtpRecords = markOtpRecordUsed(otpRecords, otpMatch.index);
+        await connection.execute(
+          `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+          ['mlm_otp_records', JSON.stringify(updatedOtpRecords), toMySQLDatetime(new Date().toISOString())]
+        );
+
+        await connection.commit();
+        transactionOpen = false;
+        invalidateStateSnapshotCache();
       }
 
       sendJson(res, 200, { ok: true, message: 'OTP verified' });
     } catch (error) {
+      if (transactionOpen && connection) {
+        try {
+          await connection.rollback();
+        } catch {
+          // ignore rollback secondary error
+        }
+      }
       const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
       const message = getErrorMessage(error, 'Failed to verify OTP');
       sendJson(res, status, {
@@ -7828,6 +7897,10 @@ const server = createServer(async (req, res) => {
         error: message,
         code: error?.code || (typeof error === 'object' && error.code) || 'OTP_VERIFY_FAILED'
       });
+    } finally {
+      if (connection) {
+        connection.release();
+      }
     }
     return;
   }
