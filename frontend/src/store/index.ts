@@ -306,6 +306,12 @@ function mapV2ReadTypeToTransactionType(
     if (signedAmountCents >= 0 && normalizedWalletType === 'royalty') return 'royalty_income';
     return signedAmountCents >= 0 ? 'admin_credit' : 'admin_debit';
   }
+  if (normalizedTxType === 'give_help') {
+    return signedAmountCents >= 0 ? 'receive_help' : 'give_help';
+  }
+  if (normalizedTxType === 'receive_help') {
+    return signedAmountCents >= 0 ? 'receive_help' : 'give_help';
+  }
 
   return signedAmountCents >= 0 ? 'admin_credit' : 'admin_debit';
 }
