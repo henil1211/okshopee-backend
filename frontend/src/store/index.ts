@@ -529,8 +529,7 @@ async function ensureLegacyWithdrawalRequestsFromV2(params: {
   legacyTransactions: Transaction[];
 }): Promise<Transaction[]> {
   const candidateRows = params.v2Transactions.filter((tx) => (
-    tx.type === 'withdrawal'
-    && Number(tx.amount || 0) < 0
+    Number(tx.amount || 0) < 0
     && isWithdrawalSubmissionDescription(tx.description || '')
   ));
   if (candidateRows.length === 0) {
@@ -572,16 +571,30 @@ async function ensureLegacyWithdrawalRequestsFromV2(params: {
   }
 
   try {
-    await Database.commitCriticalAction(() => {
-      for (const transaction of toCreate) {
-        Database.createTransaction(transaction);
-      }
-    }, {
-      full: false,
-      force: true,
-      timeoutMs: 30000,
+    const resolvedHeaders = resolveV2RequestHeaders({
+      idempotencyKey: generateClientIdempotencyKey(),
+      requestId: generateClientRequestId('withdrawal_recover'),
+      impersonationReason: 'withdrawal_recovery'
+    });
+    if (!('headers' in resolvedHeaders)) {
+      return params.legacyTransactions;
+    }
+
+    const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals/recover-missing`, {
+      method: 'POST',
+      headers: resolvedHeaders.headers
+    });
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    if (!response.ok || payload?.ok === false) {
+      return params.legacyTransactions;
+    }
+
+    await Database.hydrateFromServer({
+      strict: true,
       maxAttempts: 2,
-      retryDelayMs: 1000
+      timeoutMs: 20000,
+      retryDelayMs: 1000,
+      keys: Database.getTransactionFreshDataKeys()
     });
     return Database.getUserTransactions(params.internalUserId);
   } catch {

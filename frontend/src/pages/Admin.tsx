@@ -1340,12 +1340,14 @@ export default function Admin() {
         loadAllPinRequests();
         loadPendingPinRequests();
         loadPayments();
+        void loadWithdrawalRequests();
         void syncPaymentMethodsFromServer(true);
         loadMarketplaceData();
         void loadAnnouncementHistory();
       });
     } else {
       loadAllTransactions();
+      void loadWithdrawalRequests();
     }
     toast.success('Data refreshed');
   }, [
@@ -1488,13 +1490,32 @@ export default function Admin() {
 
   useEffect(() => {
     if (!isPaymentsTabActive) return;
+    let cancelled = false;
     const timer = window.setTimeout(() => {
-      loadAllTransactions();
-      loadPayments();
-      loadDepositHistory();
-      setWithdrawalRequests(Database.getWithdrawalTransactions());
+      void (async () => {
+        try {
+          await Database.hydrateFromServer({
+            strict: true,
+            maxAttempts: 2,
+            timeoutMs: 20000,
+            retryDelayMs: 1000,
+            keys: Database.getTransactionFreshDataKeys()
+          });
+        } catch (error) {
+          console.warn('Payments-tab transaction hydrate failed:', error);
+        } finally {
+          if (cancelled) return;
+          loadAllTransactions();
+          loadPayments();
+          loadDepositHistory();
+          void loadWithdrawalRequests();
+        }
+      })();
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [isPaymentsTabActive, loadAllTransactions]);
 
   useEffect(() => {
@@ -1527,7 +1548,20 @@ export default function Admin() {
     setDepositHistory(rows);
   }
 
-  function loadWithdrawalRequests() {
+  async function loadWithdrawalRequests(syncFromServer = false) {
+    if (syncFromServer) {
+      try {
+        await Database.hydrateFromServer({
+          strict: true,
+          maxAttempts: 2,
+          timeoutMs: 20000,
+          retryDelayMs: 1000,
+          keys: Database.getTransactionFreshDataKeys()
+        });
+      } catch (error) {
+        console.warn('Withdrawal requests hydrate failed:', error);
+      }
+    }
     const requests = Database.getWithdrawalTransactions();
     setWithdrawalRequests(requests);
   }
@@ -11659,7 +11693,5 @@ function AlertDescription({ children, className }: { children: React.ReactNode; 
     </p>
   );
 }
-
-
 
 

@@ -3523,7 +3523,7 @@ async function processV2WithdrawalDebit({
     const [legacyStateRows] = await connection.execute(
       `SELECT state_key, state_value
        FROM state_store
-       WHERE state_key IN ('mlm_users', 'mlm_transactions')
+       WHERE state_key IN ('mlm_users', 'mlm_transactions', 'mlm_settings')
        FOR UPDATE`
     );
     const legacyStateByKey = new Map();
@@ -3532,10 +3532,15 @@ async function processV2WithdrawalDebit({
     }
     const legacyUsers = safeParseJSON(legacyStateByKey.get('mlm_users'));
     const legacyTransactionsRaw = safeParseJSON(legacyStateByKey.get('mlm_transactions'));
+    const legacySettings = safeParseJSON(legacyStateByKey.get('mlm_settings'));
     const legacyTransactions = Array.isArray(legacyTransactionsRaw) ? legacyTransactionsRaw : [];
     const legacyUser = Array.isArray(legacyUsers)
       ? legacyUsers.find((candidate) => String(candidate?.userId || '').trim() === actorUserCode)
       : null;
+    const withdrawalFeePercent = Math.max(0, Number(legacySettings?.withdrawalFeePercent || 0));
+    const feeCents = Math.max(0, Math.round((amountCents * withdrawalFeePercent) / 100));
+    const feeAmount = feeCents / 100;
+    const netAmount = Math.max(0, (amountCents - feeCents) / 100);
 
     if (legacyUser) {
       const legacyWithdrawalId = `v2wd_${txUuid}`;
@@ -3556,8 +3561,8 @@ async function processV2WithdrawalDebit({
           requesterName: String(legacyUser?.fullName || actorUserCode),
           walletAddress: String(destinationRef || ''),
           payoutQrCode: null,
-          fee: 0,
-          netAmount: amountCents / 100,
+          fee: feeAmount,
+          netAmount,
           v2TxUuid: txUuid,
           referenceId: String(computedReferenceId).slice(0, 80),
           mirroredFromV2At: nowIso
@@ -9306,6 +9311,159 @@ const server = createServer(async (req, res) => {
         error: message,
         code: error?.code || (typeof error === 'object' && error.code) || 'V2_WITHDRAWAL_FAILED'
       });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v2/withdrawals/recover-missing') {
+    let connection;
+    let transactionOpen = false;
+    try {
+      if (STORAGE_MODE !== 'mysql') {
+        sendJson(res, 503, { ok: false, error: 'V2 financial APIs require STORAGE_MODE=mysql', code: 'V2_REQUIRES_MYSQL' });
+        return;
+      }
+      if (FINANCE_ENGINE_MODE !== 'v2') {
+        sendJson(res, 409, { ok: false, error: 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/withdrawals/recover-missing', code: 'FINANCE_MODE_MISMATCH' });
+        return;
+      }
+      if (!pool) {
+        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+        return;
+      }
+
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: `${V2_WITHDRAWAL_ENDPOINT_NAME}_recover_missing`,
+        requiredRole: 'user',
+        allowImpersonation: true
+      });
+      const actorUserCode = authContext.actorUserCode;
+
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+      transactionOpen = true;
+
+      const [ledgerRows] = await connection.execute(
+        `SELECT
+           lt.tx_uuid,
+           lt.description,
+           lt.reference_id,
+           ABS(le.amount_cents) AS amount_cents
+         FROM v2_ledger_entries le
+         INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
+         INNER JOIN v2_users u ON u.id = le.user_id
+         WHERE u.user_code = ?
+           AND lt.tx_type = 'withdrawal_debit'
+           AND le.wallet_type = 'income'
+           AND le.entry_side = 'debit'
+         ORDER BY lt.id DESC
+         LIMIT 50`,
+        [actorUserCode]
+      );
+
+      const [legacyStateRows] = await connection.execute(
+        `SELECT state_key, state_value
+         FROM state_store
+         WHERE state_key IN ('mlm_users', 'mlm_transactions', 'mlm_settings')
+         FOR UPDATE`
+      );
+      const legacyStateByKey = new Map();
+      for (const row of Array.isArray(legacyStateRows) ? legacyStateRows : []) {
+        legacyStateByKey.set(String(row?.state_key || ''), String(row?.state_value || ''));
+      }
+      const legacyUsers = safeParseJSON(legacyStateByKey.get('mlm_users'));
+      const legacyTransactionsRaw = safeParseJSON(legacyStateByKey.get('mlm_transactions'));
+      const legacySettings = safeParseJSON(legacyStateByKey.get('mlm_settings'));
+      const legacyTransactions = Array.isArray(legacyTransactionsRaw) ? legacyTransactionsRaw : [];
+      const legacyUser = Array.isArray(legacyUsers)
+        ? legacyUsers.find((candidate) => String(candidate?.userId || '').trim() === actorUserCode)
+        : null;
+      const withdrawalFeePercent = Math.max(0, Number(legacySettings?.withdrawalFeePercent || 0));
+
+      if (!legacyUser) {
+        await connection.commit();
+        transactionOpen = false;
+        sendJson(res, 200, { ok: true, recoveredCount: 0, message: 'No matching legacy user found for recovery.' });
+        return;
+      }
+
+      let recoveredCount = 0;
+      for (const row of Array.isArray(ledgerRows) ? ledgerRows : []) {
+        const txUuid = String(row?.tx_uuid || '').trim();
+        if (!txUuid) continue;
+
+        const legacyWithdrawalId = `v2wd_${txUuid}`;
+        const alreadyMirrored = legacyTransactions.some((tx) => String(tx?.id || '').trim() === legacyWithdrawalId);
+        if (alreadyMirrored) continue;
+
+        const grossAmountCents = Math.max(0, Number(row?.amount_cents || 0));
+        if (!grossAmountCents) continue;
+
+        const feeCents = Math.max(0, Math.round((grossAmountCents * withdrawalFeePercent) / 100));
+        const feeAmount = feeCents / 100;
+        const netAmount = Math.max(0, (grossAmountCents - feeCents) / 100);
+        const nowIso = new Date().toISOString();
+
+        legacyTransactions.push({
+          id: legacyWithdrawalId,
+          userId: String(legacyUser?.id || actorUserCode),
+          type: 'withdrawal',
+          amount: -(grossAmountCents / 100),
+          status: 'pending',
+          description: String(row?.description || '').trim() || `Withdrawal to wallet submitted by ${legacyUser.fullName} (${actorUserCode})`,
+          createdAt: nowIso,
+          requesterUserId: actorUserCode,
+          requesterName: String(legacyUser?.fullName || actorUserCode),
+          walletAddress: String(legacyUser?.usdtAddress || '').trim(),
+          payoutQrCode: null,
+          fee: feeAmount,
+          netAmount,
+          v2TxUuid: txUuid,
+          referenceId: String(row?.reference_id || '').trim(),
+          mirroredFromV2At: nowIso
+        });
+        recoveredCount += 1;
+      }
+
+      if (recoveredCount > 0) {
+        const nowIso = new Date().toISOString();
+        await connection.execute(
+          `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+          ['mlm_transactions', JSON.stringify(legacyTransactions), toMySQLDatetime(nowIso)]
+        );
+      }
+
+      await connection.commit();
+      transactionOpen = false;
+      invalidateStateSnapshotCache();
+      sendJson(res, 200, {
+        ok: true,
+        recoveredCount,
+        message: recoveredCount > 0
+          ? `Recovered ${recoveredCount} missing withdrawal request(s).`
+          : 'No missing withdrawal requests were found.'
+      });
+    } catch (error) {
+      if (transactionOpen && connection) {
+        try {
+          await connection.rollback();
+        } catch {
+          // ignore rollback secondary error
+        }
+      }
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to recover missing withdrawals');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_WITHDRAWAL_RECOVERY_FAILED'
+      });
+    } finally {
+      if (connection) {
+        connection.release();
+      }
     }
     return;
   }
