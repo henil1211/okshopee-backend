@@ -3520,6 +3520,57 @@ async function processV2WithdrawalDebit({
       throw createApiError(409, 'Insufficient income wallet balance', 'INSUFFICIENT_FUNDS');
     }
 
+    const [legacyStateRows] = await connection.execute(
+      `SELECT state_key, state_value
+       FROM state_store
+       WHERE state_key IN ('mlm_users', 'mlm_transactions')
+       FOR UPDATE`
+    );
+    const legacyStateByKey = new Map();
+    for (const row of Array.isArray(legacyStateRows) ? legacyStateRows : []) {
+      legacyStateByKey.set(String(row?.state_key || ''), String(row?.state_value || ''));
+    }
+    const legacyUsers = safeParseJSON(legacyStateByKey.get('mlm_users'));
+    const legacyTransactionsRaw = safeParseJSON(legacyStateByKey.get('mlm_transactions'));
+    const legacyTransactions = Array.isArray(legacyTransactionsRaw) ? legacyTransactionsRaw : [];
+    const legacyUser = Array.isArray(legacyUsers)
+      ? legacyUsers.find((candidate) => String(candidate?.userId || '').trim() === actorUserCode)
+      : null;
+
+    if (legacyUser) {
+      const legacyWithdrawalId = `v2wd_${txUuid}`;
+      const alreadyMirrored = legacyTransactions.some((tx) => String(tx?.id || '').trim() === legacyWithdrawalId);
+      if (!alreadyMirrored) {
+        const nowIso = new Date().toISOString();
+        legacyTransactions.push({
+          id: legacyWithdrawalId,
+          userId: String(legacyUser?.id || actorUserCode),
+          type: 'withdrawal',
+          amount: -(amountCents / 100),
+          status: 'pending',
+          description: description && /with qr/i.test(description)
+            ? `Withdrawal to wallet with QR submitted by ${legacyUser.fullName} (${actorUserCode})`
+            : `Withdrawal to wallet submitted by ${legacyUser.fullName} (${actorUserCode})`,
+          createdAt: nowIso,
+          requesterUserId: actorUserCode,
+          requesterName: String(legacyUser?.fullName || actorUserCode),
+          walletAddress: String(destinationRef || ''),
+          payoutQrCode: null,
+          fee: 0,
+          netAmount: amountCents / 100,
+          v2TxUuid: txUuid,
+          referenceId: String(computedReferenceId).slice(0, 80),
+          mirroredFromV2At: nowIso
+        });
+
+        await connection.execute(
+          `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+          ['mlm_transactions', JSON.stringify(legacyTransactions), toMySQLDatetime(nowIso)]
+        );
+      }
+    }
+
     const responsePayload = {
       ok: true,
       txUuid,

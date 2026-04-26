@@ -471,10 +471,122 @@ export function mergeTransactionsForDisplay(params: {
     merged.push(tx);
   };
 
-  for (const tx of params.v2Transactions) pushIfUnique(tx);
-  for (const tx of params.legacyTransactions) pushIfUnique(tx);
+  const prioritizedLegacyWithdrawals = params.legacyTransactions.filter((tx) => tx.type === 'withdrawal');
+  const remainingLegacyTransactions = params.legacyTransactions.filter((tx) => tx.type !== 'withdrawal');
 
-  return merged.sort((left, right) => getTransactionTimestampForDisplayMerge(right) - getTransactionTimestampForDisplayMerge(left));
+  for (const tx of prioritizedLegacyWithdrawals) pushIfUnique(tx);
+  for (const tx of params.v2Transactions) pushIfUnique(tx);
+  for (const tx of remainingLegacyTransactions) pushIfUnique(tx);
+
+  return filterWithdrawalDisplayArtifacts(
+    merged.sort((left, right) => getTransactionTimestampForDisplayMerge(right) - getTransactionTimestampForDisplayMerge(left))
+  );
+}
+
+function isWithdrawalSubmissionDescription(description: string): boolean {
+  const normalized = String(description || '').trim().toLowerCase();
+  return normalized.includes('withdrawal to wallet submitted by')
+    || normalized.includes('withdrawal to wallet with qr submitted by');
+}
+
+function extractTxUuidFromMergedV2Id(transactionId: string): string {
+  const match = String(transactionId || '').match(/^v2_(.+)_[^_]+$/);
+  return match ? String(match[1] || '').trim() : '';
+}
+
+function buildWithdrawalArtifactSignature(tx: Transaction): string {
+  const bucket = Math.floor(getTransactionTimestampForDisplayMerge(tx) / 1000);
+  return [
+    String(tx.userId || '').trim(),
+    Math.round(Math.abs(Number(tx.amount || 0)) * 100),
+    bucket,
+    String(tx.description || '').trim().toLowerCase()
+  ].join('|');
+}
+
+function filterWithdrawalDisplayArtifacts(transactions: Transaction[]): Transaction[] {
+  const canonicalWithdrawalSignatures = new Set(
+    transactions
+      .filter((tx) => tx.type === 'withdrawal' && isWithdrawalSubmissionDescription(tx.description || ''))
+      .map((tx) => buildWithdrawalArtifactSignature(tx))
+  );
+
+  if (canonicalWithdrawalSignatures.size === 0) {
+    return transactions;
+  }
+
+  return transactions.filter((tx) => {
+    if (tx.type === 'withdrawal') return true;
+    if (!isWithdrawalSubmissionDescription(tx.description || '')) return true;
+    return !canonicalWithdrawalSignatures.has(buildWithdrawalArtifactSignature(tx));
+  });
+}
+
+async function ensureLegacyWithdrawalRequestsFromV2(params: {
+  internalUserId: string;
+  user: User;
+  v2Transactions: Transaction[];
+  legacyTransactions: Transaction[];
+}): Promise<Transaction[]> {
+  const candidateRows = params.v2Transactions.filter((tx) => (
+    tx.type === 'withdrawal'
+    && Number(tx.amount || 0) < 0
+    && isWithdrawalSubmissionDescription(tx.description || '')
+  ));
+  if (candidateRows.length === 0) {
+    return params.legacyTransactions;
+  }
+
+  const toCreate: Transaction[] = [];
+  for (const tx of candidateRows) {
+    const txUuid = extractTxUuidFromMergedV2Id(tx.id);
+    const mirroredId = txUuid ? `v2wd_${txUuid}` : '';
+    const alreadyExists = params.legacyTransactions.some((legacyTx) => {
+      if (mirroredId && legacyTx.id === mirroredId) return true;
+      if (legacyTx.type !== 'withdrawal') return false;
+      if (Math.abs(Number(legacyTx.amount || 0)) !== Math.abs(Number(tx.amount || 0))) return false;
+      if (String(legacyTx.description || '').trim() !== String(tx.description || '').trim()) return false;
+      const timeGap = Math.abs(getTransactionTimestampForDisplayMerge(legacyTx) - getTransactionTimestampForDisplayMerge(tx));
+      return timeGap <= 60_000;
+    });
+    if (alreadyExists) continue;
+
+    toCreate.push({
+      id: mirroredId || `v2wd_fallback_${tx.id}`,
+      userId: params.internalUserId,
+      type: 'withdrawal',
+      amount: -Math.abs(Number(tx.amount || 0)),
+      status: 'pending',
+      description: String(tx.description || '').trim() || `Withdrawal to wallet submitted by ${params.user.fullName} (${params.user.userId})`,
+      createdAt: tx.createdAt,
+      requesterUserId: params.user.userId,
+      requesterName: params.user.fullName,
+      walletAddress: String(params.user.usdtAddress || '').trim() || undefined,
+      fee: 0,
+      netAmount: Math.abs(Number(tx.amount || 0))
+    });
+  }
+
+  if (toCreate.length === 0) {
+    return params.legacyTransactions;
+  }
+
+  try {
+    await Database.commitCriticalAction(() => {
+      for (const transaction of toCreate) {
+        Database.createTransaction(transaction);
+      }
+    }, {
+      full: false,
+      force: true,
+      timeoutMs: 30000,
+      maxAttempts: 2,
+      retryDelayMs: 1000
+    });
+    return Database.getUserTransactions(params.internalUserId);
+  } catch {
+    return params.legacyTransactions;
+  }
 }
 
 type V2WalletReadOptions = {
@@ -843,10 +955,20 @@ async function fetchV2WalletAndTransactionsSnapshotForUserWithStatus(
     wallet.totalGiven = totalGivenCentsFromWallet / 100;
   }
 
+  let legacyTransactions = Database.getUserTransactions(internalUserId);
+  if (options?.includeLegacyTransactions !== false) {
+    legacyTransactions = await ensureLegacyWithdrawalRequestsFromV2({
+      internalUserId,
+      user,
+      v2Transactions,
+      legacyTransactions
+    });
+  }
+
   const transactions = options?.includeLegacyTransactions === false
     ? v2Transactions
     : mergeTransactionsForDisplay({
-      legacyTransactions: Database.getUserTransactions(internalUserId),
+      legacyTransactions,
       v2Transactions
     });
 
