@@ -57,6 +57,7 @@ import type {
 } from '@/types';
 import MobileBottomNav from '@/components/MobileBottomNav';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
 
 interface MemberReportRow {
   id: string;
@@ -1131,6 +1132,22 @@ export default function Admin() {
   const [historicalAutoRecoveryDetails, setHistoricalAutoRecoveryDetails] = useState<HistoricalAutoRecoveryDetail[]>([]);
   const [historicalAutoRecoveryRunAt, setHistoricalAutoRecoveryRunAt] = useState<string | null>(null);
 
+  const getBackendApiBase = useCallback(() => {
+    const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
+    const configured = typeof env.VITE_BACKEND_URL === 'string' ? env.VITE_BACKEND_URL.trim() : '';
+    return resolveBackendBaseUrl(configured);
+  }, []);
+
+  const generateClientIdempotencyKey = useCallback(() => (
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `idem_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+  ), []);
+
+  const generateClientRequestId = useCallback((prefix: string) => (
+    `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  ), []);
+
   const [memberFilters, setMemberFilters] = useState({
     dateFrom: '',
     dateTo: '',
@@ -2092,15 +2109,78 @@ export default function Admin() {
 
   const handleScanMissingPendingWithdrawals = async () => {
     try {
-      await Database.ensureFreshData();
+      await Database.hydrateFromServer({
+        strict: true,
+        maxAttempts: 2,
+        timeoutMs: 20000,
+        retryDelayMs: 1000,
+        keys: [DB_KEYS.TRANSACTIONS, DB_KEYS.OTP_RECORDS]
+      });
+
       const findings = Database.scanSuspiciousWithdrawalSubmissions(20);
-      setWithdrawalGapScanResults(findings);
+      const uniqueUserCodes = Array.from(new Set(
+        findings
+          .map((item) => String(item.userId || '').trim())
+          .filter((value) => /^\d{7}$/.test(value))
+      ));
+
+      let recoveredCount = 0;
+      if (user?.isAdmin && uniqueUserCodes.length > 0) {
+        const session = Database.getV2AuthSession();
+        const accessToken = String(session?.accessToken || '').trim();
+        if (!accessToken) {
+          throw new Error('Admin V2 session is missing. Please logout and login again.');
+        }
+
+        for (const targetUserCode of uniqueUserCodes) {
+          const requestId = generateClientRequestId('admin_withdrawal_recover');
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`,
+            'Idempotency-Key': generateClientIdempotencyKey(),
+            'X-System-Version': 'v2',
+            'X-Request-Id': requestId
+          };
+
+          const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals/recover-missing`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              targetUserCode
+            })
+          });
+          const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+          if (!response.ok || payload?.ok === false) {
+            throw new Error(typeof payload?.error === 'string' ? payload.error : `Failed to recover withdrawal for ${targetUserCode}`);
+          }
+          recoveredCount += Number(payload?.recoveredCount || 0) + Number(payload?.updatedCount || 0);
+        }
+      }
+
+      await Database.hydrateFromServer({
+        strict: true,
+        maxAttempts: 2,
+        timeoutMs: 20000,
+        retryDelayMs: 1000,
+        keys: Database.getTransactionFreshDataKeys()
+      });
+      loadAllTransactions();
+      await loadWithdrawalRequests();
+      loadStats();
+
+      const refreshedFindings = Database.scanSuspiciousWithdrawalSubmissions(20);
+      setWithdrawalGapScanResults(refreshedFindings);
       setShowWithdrawalGapDialog(true);
-      if (findings.length === 0) {
+
+      if (recoveredCount > 0) {
+        toast.success(`Recovered ${recoveredCount} missing pending withdrawal request${recoveredCount === 1 ? '' : 's'}.`);
+      }
+
+      if (refreshedFindings.length === 0) {
         toast.success('No suspicious missing pending withdrawals found.');
         return;
       }
-      toast.warning(`Found ${findings.length} suspicious withdrawal submission${findings.length === 1 ? '' : 's'}.`);
+      toast.warning(`Found ${refreshedFindings.length} suspicious withdrawal submission${refreshedFindings.length === 1 ? '' : 's'}.`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to scan withdrawal gaps');
     }
@@ -11693,5 +11773,3 @@ function AlertDescription({ children, className }: { children: React.ReactNode; 
     </p>
   );
 }
-
-

@@ -9332,13 +9332,27 @@ const server = createServer(async (req, res) => {
         return;
       }
 
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+
       const authContext = await resolveV2RequestAuthContext({
         req,
         endpointName: `${V2_WITHDRAWAL_ENDPOINT_NAME}_recover_missing`,
         requiredRole: 'user',
-        allowImpersonation: true
+        allowImpersonation: false
       });
       const actorUserCode = authContext.actorUserCode;
+      const requestedTargetUserCode = normalizeV2UserCode(parsed?.targetUserCode);
+      const recoveryUserCode = requestedTargetUserCode || actorUserCode;
+
+      if (requestedTargetUserCode && requestedTargetUserCode !== actorUserCode && !authContext.authSubjectIsAdmin) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Only admin users may recover missing withdrawals for another user',
+          code: 'ADMIN_ROLE_REQUIRED'
+        });
+        return;
+      }
 
       connection = await pool.getConnection();
       await connection.beginTransaction();
@@ -9359,7 +9373,7 @@ const server = createServer(async (req, res) => {
            AND le.entry_side = 'debit'
          ORDER BY lt.id DESC
          LIMIT 50`,
-        [actorUserCode]
+        [recoveryUserCode]
       );
 
       const [legacyStateRows] = await connection.execute(
@@ -9377,26 +9391,30 @@ const server = createServer(async (req, res) => {
       const legacySettings = safeParseJSON(legacyStateByKey.get('mlm_settings'));
       const legacyTransactions = Array.isArray(legacyTransactionsRaw) ? legacyTransactionsRaw : [];
       const legacyUser = Array.isArray(legacyUsers)
-        ? legacyUsers.find((candidate) => String(candidate?.userId || '').trim() === actorUserCode)
+        ? legacyUsers.find((candidate) => String(candidate?.userId || '').trim() === recoveryUserCode)
         : null;
       const withdrawalFeePercent = Math.max(0, Number(legacySettings?.withdrawalFeePercent || 0));
 
       if (!legacyUser) {
         await connection.commit();
         transactionOpen = false;
-        sendJson(res, 200, { ok: true, recoveredCount: 0, message: 'No matching legacy user found for recovery.' });
+        sendJson(res, 200, {
+          ok: true,
+          recoveredCount: 0,
+          updatedCount: 0,
+          targetUserCode: recoveryUserCode,
+          message: 'No matching legacy user found for recovery.'
+        });
         return;
       }
 
       let recoveredCount = 0;
+      let updatedCount = 0;
       for (const row of Array.isArray(ledgerRows) ? ledgerRows : []) {
         const txUuid = String(row?.tx_uuid || '').trim();
         if (!txUuid) continue;
 
         const legacyWithdrawalId = `v2wd_${txUuid}`;
-        const alreadyMirrored = legacyTransactions.some((tx) => String(tx?.id || '').trim() === legacyWithdrawalId);
-        if (alreadyMirrored) continue;
-
         const grossAmountCents = Math.max(0, Number(row?.amount_cents || 0));
         if (!grossAmountCents) continue;
 
@@ -9404,17 +9422,45 @@ const server = createServer(async (req, res) => {
         const feeAmount = feeCents / 100;
         const netAmount = Math.max(0, (grossAmountCents - feeCents) / 100);
         const nowIso = new Date().toISOString();
+        const expectedDescription = String(row?.description || '').trim() || `Withdrawal to wallet submitted by ${legacyUser.fullName} (${recoveryUserCode})`;
+        const existingIndex = legacyTransactions.findIndex((tx) => String(tx?.id || '').trim() === legacyWithdrawalId);
+
+        if (existingIndex >= 0) {
+          const currentTx = legacyTransactions[existingIndex] || {};
+          const nextTx = {
+            ...currentTx,
+            userId: String(legacyUser?.id || recoveryUserCode),
+            type: 'withdrawal',
+            amount: -Math.abs(grossAmountCents / 100),
+            status: String(currentTx?.status || '').trim() || 'pending',
+            description: expectedDescription,
+            requesterUserId: recoveryUserCode,
+            requesterName: String(legacyUser?.fullName || recoveryUserCode),
+            walletAddress: String(legacyUser?.usdtAddress || '').trim(),
+            payoutQrCode: currentTx?.payoutQrCode || null,
+            fee: feeAmount,
+            netAmount,
+            v2TxUuid: txUuid,
+            referenceId: String(row?.reference_id || '').trim(),
+            mirroredFromV2At: currentTx?.mirroredFromV2At || nowIso
+          };
+          if (JSON.stringify(nextTx) !== JSON.stringify(currentTx)) {
+            legacyTransactions[existingIndex] = nextTx;
+            updatedCount += 1;
+          }
+          continue;
+        }
 
         legacyTransactions.push({
           id: legacyWithdrawalId,
-          userId: String(legacyUser?.id || actorUserCode),
+          userId: String(legacyUser?.id || recoveryUserCode),
           type: 'withdrawal',
           amount: -(grossAmountCents / 100),
           status: 'pending',
-          description: String(row?.description || '').trim() || `Withdrawal to wallet submitted by ${legacyUser.fullName} (${actorUserCode})`,
+          description: expectedDescription,
           createdAt: nowIso,
-          requesterUserId: actorUserCode,
-          requesterName: String(legacyUser?.fullName || actorUserCode),
+          requesterUserId: recoveryUserCode,
+          requesterName: String(legacyUser?.fullName || recoveryUserCode),
           walletAddress: String(legacyUser?.usdtAddress || '').trim(),
           payoutQrCode: null,
           fee: feeAmount,
@@ -9426,7 +9472,7 @@ const server = createServer(async (req, res) => {
         recoveredCount += 1;
       }
 
-      if (recoveredCount > 0) {
+      if (recoveredCount > 0 || updatedCount > 0) {
         const nowIso = new Date().toISOString();
         await connection.execute(
           `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
@@ -9441,8 +9487,10 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         recoveredCount,
-        message: recoveredCount > 0
-          ? `Recovered ${recoveredCount} missing withdrawal request(s).`
+        updatedCount,
+        targetUserCode: recoveryUserCode,
+        message: (recoveredCount > 0 || updatedCount > 0)
+          ? `Recovered ${recoveredCount} and updated ${updatedCount} withdrawal request(s).`
           : 'No missing withdrawal requests were found.'
       });
     } catch (error) {
