@@ -3740,6 +3740,272 @@ async function mirrorV2WithdrawalIntoLegacyState({
   }
 }
 
+async function recoverMissingLegacyWithdrawalRequests({
+  actorUserCode,
+  targetUserCode = null,
+  recoverAll = false
+}) {
+  if (!pool) {
+    throw createApiError(503, 'MySQL pool not initialized', 'MYSQL_POOL_NOT_READY');
+  }
+
+  let connection;
+  let transactionOpen = false;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    transactionOpen = true;
+
+    const effectiveTargetUserCode = normalizeV2UserCode(targetUserCode) || normalizeV2UserCode(actorUserCode);
+    const ledgerQuery = recoverAll
+      ? `SELECT
+           u.user_code,
+           lt.tx_uuid,
+           lt.description,
+           lt.reference_id,
+           lt.created_at,
+           ABS(le.amount_cents) AS amount_cents
+         FROM v2_ledger_entries le
+         INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
+         INNER JOIN v2_users u ON u.id = le.user_id
+         WHERE lt.tx_type = 'withdrawal_debit'
+           AND le.wallet_type = 'income'
+           AND le.entry_side = 'debit'
+         ORDER BY lt.id DESC
+         LIMIT 1000`
+      : `SELECT
+           u.user_code,
+           lt.tx_uuid,
+           lt.description,
+           lt.reference_id,
+           lt.created_at,
+           ABS(le.amount_cents) AS amount_cents
+         FROM v2_ledger_entries le
+         INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
+         INNER JOIN v2_users u ON u.id = le.user_id
+         WHERE u.user_code = ?
+           AND lt.tx_type = 'withdrawal_debit'
+           AND le.wallet_type = 'income'
+           AND le.entry_side = 'debit'
+         ORDER BY lt.id DESC
+         LIMIT 100`;
+    const ledgerParams = recoverAll ? [] : [effectiveTargetUserCode];
+    const [ledgerRows] = await connection.execute(ledgerQuery, ledgerParams);
+
+    const [legacyStateRows] = await connection.execute(
+      `SELECT state_key, state_value
+       FROM state_store
+       WHERE state_key IN ('mlm_users', 'mlm_transactions', 'mlm_settings')
+       FOR UPDATE`
+    );
+    const legacyStateByKey = new Map();
+    for (const row of Array.isArray(legacyStateRows) ? legacyStateRows : []) {
+      legacyStateByKey.set(String(row?.state_key || ''), String(row?.state_value || ''));
+    }
+
+    const legacyUsers = safeParseJSON(legacyStateByKey.get('mlm_users'));
+    const legacyTransactionsRaw = safeParseJSON(legacyStateByKey.get('mlm_transactions'));
+    const legacySettings = safeParseJSON(legacyStateByKey.get('mlm_settings'));
+    const legacyTransactions = Array.isArray(legacyTransactionsRaw) ? legacyTransactionsRaw : [];
+    const withdrawalFeePercent = Math.max(0, Number(legacySettings?.withdrawalFeePercent || 0));
+    const legacyUsersByCode = new Map(
+      Array.isArray(legacyUsers)
+        ? legacyUsers
+            .map((candidate) => [String(candidate?.userId || '').trim(), candidate])
+            .filter(([userCode]) => !!userCode)
+        : []
+    );
+
+    const isWithdrawalSubmissionDescription = (description) => {
+      const normalized = String(description || '').trim().toLowerCase();
+      return normalized.includes('withdrawal to wallet submitted by')
+        || normalized.includes('withdrawal to wallet with qr submitted by');
+    };
+
+    let recoveredCount = 0;
+    let updatedCount = 0;
+    let changed = false;
+    const touchedUserCodes = new Set();
+
+    const upsertCanonicalWithdrawal = ({
+      userCode,
+      description,
+      grossAmount,
+      createdAt,
+      txUuid = '',
+      referenceId = '',
+      walletAddress = ''
+    }) => {
+      const legacyUser = legacyUsersByCode.get(userCode) || null;
+      if (!legacyUser) return false;
+
+      const internalUserId = String(legacyUser?.id || userCode).trim();
+      const feeAmount = Math.max(0, Math.round(grossAmount * withdrawalFeePercent) / 100);
+      const netAmount = Math.max(0, Math.round((grossAmount - feeAmount) * 100) / 100);
+      const createdAtIso = createdAt ? new Date(createdAt).toISOString() : new Date().toISOString();
+      const canonicalId = txUuid ? `v2wd_${txUuid}` : '';
+
+      const artifactIndexes = [];
+      legacyTransactions.forEach((tx, index) => {
+        const normalizedType = String(tx?.type || '').trim().toLowerCase();
+        if (normalizedType === 'withdrawal') return;
+        if (!isWithdrawalSubmissionDescription(tx?.description)) return;
+        if (String(tx?.description || '').trim() !== description) return;
+        const sameUser =
+          String(tx?.userId || '').trim() === internalUserId
+          || String(tx?.requesterUserId || '').trim() === userCode
+          || String(tx?.requesterUserId || '').trim() === internalUserId;
+        if (!sameUser) return;
+        if (Math.abs(Math.abs(Number(tx?.amount || 0)) - grossAmount) > 0.009) return;
+        const candidateTime = new Date(String(tx?.createdAt || '')).getTime();
+        const baseTime = new Date(createdAtIso).getTime();
+        if (Number.isFinite(baseTime) && Number.isFinite(candidateTime) && Math.abs(candidateTime - baseTime) > 60_000) return;
+        artifactIndexes.push(index);
+      });
+
+      let existingIndex = -1;
+      if (canonicalId) {
+        existingIndex = legacyTransactions.findIndex((tx) => String(tx?.id || '').trim() === canonicalId);
+      }
+      if (existingIndex === -1) {
+        existingIndex = legacyTransactions.findIndex((tx) => {
+          if (String(tx?.type || '').trim().toLowerCase() !== 'withdrawal') return false;
+          const sameUser =
+            String(tx?.userId || '').trim() === internalUserId
+            || String(tx?.requesterUserId || '').trim() === userCode;
+          if (!sameUser) return false;
+          if (String(tx?.description || '').trim() !== description) return false;
+          if (Math.abs(Math.abs(Number(tx?.amount || 0)) - grossAmount) > 0.009) return false;
+          const txTime = new Date(String(tx?.createdAt || '')).getTime();
+          const baseTime = new Date(createdAtIso).getTime();
+          return !Number.isFinite(baseTime) || !Number.isFinite(txTime) || Math.abs(txTime - baseTime) <= 60_000;
+        });
+      }
+
+      for (const index of artifactIndexes.sort((left, right) => right - left)) {
+        if (index !== existingIndex) {
+          legacyTransactions.splice(index, 1);
+          changed = true;
+        }
+      }
+
+      const nextTx = {
+        ...(existingIndex >= 0 ? legacyTransactions[existingIndex] : {}),
+        id: canonicalId || String((existingIndex >= 0 && legacyTransactions[existingIndex]?.id) || `legacywd_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`),
+        userId: internalUserId,
+        type: 'withdrawal',
+        amount: -grossAmount,
+        status: String((existingIndex >= 0 && legacyTransactions[existingIndex]?.status) || '').trim() || 'pending',
+        description,
+        createdAt: createdAtIso,
+        requesterUserId: userCode,
+        requesterName: String(legacyUser?.fullName || userCode),
+        walletAddress: String(walletAddress || legacyUser?.usdtAddress || '').trim(),
+        payoutQrCode: null,
+        fee: feeAmount,
+        netAmount,
+        v2TxUuid: txUuid || undefined,
+        referenceId: referenceId || undefined,
+        mirroredFromV2At: txUuid ? new Date().toISOString() : undefined,
+        mirroredFromLegacyArtifactsAt: txUuid ? undefined : new Date().toISOString()
+      };
+
+      if (existingIndex >= 0) {
+        if (JSON.stringify(nextTx) !== JSON.stringify(legacyTransactions[existingIndex])) {
+          legacyTransactions[existingIndex] = nextTx;
+          updatedCount += 1;
+          changed = true;
+        }
+      } else {
+        legacyTransactions.push(nextTx);
+        recoveredCount += 1;
+        changed = true;
+      }
+
+      touchedUserCodes.add(userCode);
+      return true;
+    };
+
+    for (const row of Array.isArray(ledgerRows) ? ledgerRows : []) {
+      const rowUserCode = normalizeV2UserCode(row?.user_code);
+      if (!rowUserCode) continue;
+      const description = String(row?.description || '').trim()
+        || `Withdrawal to wallet submitted by ${rowUserCode}`;
+      const grossAmount = Math.max(0, Number(row?.amount_cents || 0) / 100);
+      if (!(grossAmount > 0)) continue;
+      upsertCanonicalWithdrawal({
+        userCode: rowUserCode,
+        description,
+        grossAmount,
+        createdAt: row?.created_at,
+        txUuid: String(row?.tx_uuid || '').trim(),
+        referenceId: String(row?.reference_id || '').trim()
+      });
+    }
+
+    const artifactTargetCodes = recoverAll ? Array.from(legacyUsersByCode.keys()) : [effectiveTargetUserCode];
+    for (const userCode of artifactTargetCodes) {
+      const legacyUser = legacyUsersByCode.get(userCode) || null;
+      if (!legacyUser) continue;
+      const internalUserId = String(legacyUser?.id || '').trim();
+      legacyTransactions
+        .filter((tx) => (
+          String(tx?.type || '').trim().toLowerCase() !== 'withdrawal'
+          && Number(tx?.amount || 0) < 0
+          && isWithdrawalSubmissionDescription(tx?.description)
+          && (
+            String(tx?.userId || '').trim() === internalUserId
+            || String(tx?.requesterUserId || '').trim() === userCode
+            || String(tx?.requesterUserId || '').trim() === internalUserId
+          )
+        ))
+        .forEach((tx) => {
+          const description = String(tx?.description || '').trim();
+          const grossAmount = Math.abs(Number(tx?.amount || 0));
+          if (!(grossAmount > 0)) return;
+          upsertCanonicalWithdrawal({
+            userCode,
+            description,
+            grossAmount,
+            createdAt: tx?.createdAt,
+            walletAddress: String(tx?.walletAddress || legacyUser?.usdtAddress || '').trim()
+          });
+        });
+    }
+
+    if (changed) {
+      const nowIso = new Date().toISOString();
+      await connection.execute(
+        `INSERT INTO state_store (state_key, state_value, updated_at) VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+        ['mlm_transactions', JSON.stringify(legacyTransactions), toMySQLDatetime(nowIso)]
+      );
+    }
+
+    await connection.commit();
+    transactionOpen = false;
+    invalidateStateSnapshotCache();
+    return {
+      recoveredCount,
+      updatedCount,
+      recoveredUserCodes: Array.from(touchedUserCodes)
+    };
+  } catch (error) {
+    if (transactionOpen && connection) {
+      try {
+        await connection.rollback();
+      } catch {
+        // ignore rollback secondary error
+      }
+    }
+    throw error;
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+}
+
 async function processV2PinPurchase({
   idempotencyKey,
   actorUserCode,
@@ -9364,6 +9630,78 @@ const server = createServer(async (req, res) => {
         ok: false,
         error: message,
         code: error?.code || (typeof error === 'object' && error.code) || 'V2_WITHDRAWAL_FAILED'
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v2/withdrawals/recover-missing') {
+    try {
+      if (STORAGE_MODE !== 'mysql') {
+        sendJson(res, 503, { ok: false, error: 'V2 financial APIs require STORAGE_MODE=mysql', code: 'V2_REQUIRES_MYSQL' });
+        return;
+      }
+      if (FINANCE_ENGINE_MODE !== 'v2') {
+        sendJson(res, 409, { ok: false, error: 'FINANCE_ENGINE_MODE must be v2 to use /api/v2/withdrawals/recover-missing', code: 'FINANCE_MODE_MISMATCH' });
+        return;
+      }
+      if (!pool) {
+        sendJson(res, 503, { ok: false, error: 'MySQL pool not initialized', code: 'MYSQL_POOL_NOT_READY' });
+        return;
+      }
+
+      const body = await getRequestBody(req);
+      const parsed = body ? JSON.parse(body) : {};
+      const authContext = await resolveV2RequestAuthContext({
+        req,
+        endpointName: `${V2_WITHDRAWAL_ENDPOINT_NAME}_recover_missing`,
+        requiredRole: 'user',
+        allowImpersonation: false
+      });
+      const actorUserCode = authContext.actorUserCode;
+      const targetUserCode = normalizeV2UserCode(parsed?.targetUserCode);
+      const recoverAll = parsed?.recoverAll === true;
+
+      if (recoverAll && !authContext.authSubjectIsAdmin) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Only admin users may recover missing withdrawals globally',
+          code: 'ADMIN_ROLE_REQUIRED'
+        });
+        return;
+      }
+      if (targetUserCode && targetUserCode !== actorUserCode && !authContext.authSubjectIsAdmin) {
+        sendJson(res, 403, {
+          ok: false,
+          error: 'Only admin users may recover missing withdrawals for another user',
+          code: 'ADMIN_ROLE_REQUIRED'
+        });
+        return;
+      }
+
+      const result = await recoverMissingLegacyWithdrawalRequests({
+        actorUserCode,
+        targetUserCode,
+        recoverAll
+      });
+
+      sendJson(res, 200, {
+        ok: true,
+        recoveredCount: Number(result?.recoveredCount || 0),
+        updatedCount: Number(result?.updatedCount || 0),
+        recoveredUserCodes: Array.isArray(result?.recoveredUserCodes) ? result.recoveredUserCodes : [],
+        targetUserCode: recoverAll ? null : (targetUserCode || actorUserCode),
+        message: (Number(result?.recoveredCount || 0) > 0 || Number(result?.updatedCount || 0) > 0)
+          ? `Recovered ${Number(result?.recoveredCount || 0)} and updated ${Number(result?.updatedCount || 0)} withdrawal request(s).`
+          : 'No missing withdrawal requests were found.'
+      });
+    } catch (error) {
+      const status = Number(error?.status) || (error instanceof SyntaxError ? 400 : 500);
+      const message = getErrorMessage(error, 'Failed to recover missing withdrawals');
+      sendJson(res, status, {
+        ok: false,
+        error: message,
+        code: error?.code || (typeof error === 'object' && error.code) || 'V2_WITHDRAWAL_RECOVERY_FAILED'
       });
     }
     return;

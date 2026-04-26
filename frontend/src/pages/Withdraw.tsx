@@ -1,6 +1,6 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
-import { useAuthStore, useWalletStore, useOtpStore, useSyncRefreshKey } from '@/store';
+import { useAuthStore, useWalletStore, useOtpStore, useSyncRefreshKey, mergeTransactionsForDisplay } from '@/store';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -22,7 +22,7 @@ import { useOtpResend } from '@/hooks/use-otp-resend';
 export default function Withdraw() {
   const navigate = useNavigate();
   const { user, impersonatedUser, isAuthenticated, logout, verifyTransactionPassword } = useAuthStore();
-  const { wallet, loadWallet, withdraw } = useWalletStore();
+  const { wallet, loadWallet, withdraw, transactions: liveTransactions } = useWalletStore();
   const { sendOtp, verifyOtp } = useOtpStore();
   const syncKey = useSyncRefreshKey();
   const displayUser = impersonatedUser || user;
@@ -47,11 +47,14 @@ export default function Withdraw() {
 
   const loadWithdrawalHistory = useCallback(() => {
     if (!displayUser) return;
-    const rows = Database.getUserTransactions(displayUser.id)
+    const rows = mergeTransactionsForDisplay({
+      legacyTransactions: Database.getUserTransactions(displayUser.id),
+      v2Transactions: liveTransactions.filter((tx) => tx.userId === displayUser.id)
+    })
       .filter((tx) => tx.type === 'withdrawal')
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     setWithdrawalHistory(rows);
-  }, [displayUser]);
+  }, [displayUser, liveTransactions]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -67,6 +70,10 @@ export default function Withdraw() {
       }
     }
   }, [address, isAuthenticated, navigate, loadWallet, loadWithdrawalHistory, syncKey, displayUser]);
+
+  useEffect(() => {
+    loadWithdrawalHistory();
+  }, [loadWithdrawalHistory]);
 
   const handleLogout = () => {
     logout();

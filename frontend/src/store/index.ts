@@ -12,7 +12,6 @@ import { resolveBackendBaseUrl } from '@/utils/backendBaseUrl';
 import { isValidPhoneNumberForCountry, normalizePhoneNumber } from '@/utils/helpers';
 
 type SystemEmailPurpose = 'otp' | 'welcome' | 'system';
-type OtpPurpose = 'registration' | 'transaction' | 'withdrawal' | 'profile_update';
 
 function getBackendApiBase(): string {
   const env = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
@@ -71,57 +70,6 @@ function normalizeV2ApiErrorMessage(status: number, payload: Record<string, unkn
 }
 
 const V2_TRANSFER_SYNC_REQUIRED_MESSAGE = 'Live V2 sync is unavailable. Transfer data may be stale. Please refresh and try again.';
-
-function requiresServerOwnedOtp(
-  purpose: OtpPurpose,
-  options?: { currentUserPresent?: boolean }
-): boolean {
-  void purpose;
-  void options;
-  return true;
-}
-
-function resolveOtpVerificationEmail(identityKey: string, explicitEmail?: string): string {
-  const resolvedEmail = String(
-    explicitEmail
-    || Database.getUserById(identityKey)?.email
-    || Database.getUserByUserId(identityKey)?.email
-    || Database.getUserByEmail(identityKey)?.email
-    || identityKey.replace(/^register_|^createid_/, '')
-  ).trim().toLowerCase();
-  return resolvedEmail;
-}
-
-async function verifyOtpAgainstServer(params: {
-  identityKey: string;
-  email?: string;
-  purpose: OtpPurpose;
-  otp: string;
-  consume?: boolean;
-}): Promise<boolean> {
-  const resolvedEmail = resolveOtpVerificationEmail(params.identityKey, params.email);
-  if (!resolvedEmail) {
-    return false;
-  }
-
-  try {
-    const response = await fetch(`${getBackendApiBase()}/api/auth/otp/verify`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        identityKey: params.identityKey,
-        email: resolvedEmail,
-        purpose: params.purpose,
-        otp: params.otp,
-        consume: params.consume ?? true
-      })
-    });
-    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-    return response.ok && payload?.ok !== false;
-  } catch {
-    return false;
-  }
-}
 
 function resolveV2BearerTokenOrError(subjectUser: User): { token: string } | { message: string } {
   const savedAuthSession = Database.getV2AuthSession();
@@ -536,7 +484,7 @@ async function ensureLegacyWithdrawalRequestsFromV2(params: {
     return params.legacyTransactions;
   }
 
-  const toCreate: Transaction[] = [];
+  const synthesizedWithdrawals: Transaction[] = [];
   for (const tx of candidateRows) {
     const txUuid = extractTxUuidFromMergedV2Id(tx.id);
     const mirroredId = txUuid ? `v2wd_${txUuid}` : '';
@@ -550,7 +498,7 @@ async function ensureLegacyWithdrawalRequestsFromV2(params: {
     });
     if (alreadyExists) continue;
 
-    toCreate.push({
+    synthesizedWithdrawals.push({
       id: mirroredId || `v2wd_fallback_${tx.id}`,
       userId: params.internalUserId,
       type: 'withdrawal',
@@ -566,7 +514,7 @@ async function ensureLegacyWithdrawalRequestsFromV2(params: {
     });
   }
 
-  if (toCreate.length === 0) {
+  if (synthesizedWithdrawals.length === 0) {
     return params.legacyTransactions;
   }
 
@@ -576,30 +524,28 @@ async function ensureLegacyWithdrawalRequestsFromV2(params: {
       requestId: generateClientRequestId('withdrawal_recover'),
       impersonationReason: 'withdrawal_recovery'
     });
-    if (!('headers' in resolvedHeaders)) {
-      return params.legacyTransactions;
+    if ('headers' in resolvedHeaders) {
+      const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals/recover-missing`, {
+        method: 'POST',
+        headers: resolvedHeaders.headers
+      });
+      const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+      if (response.ok && payload?.ok !== false) {
+        await Database.hydrateFromServer({
+          strict: true,
+          maxAttempts: 2,
+          timeoutMs: 20000,
+          retryDelayMs: 1000,
+          keys: Database.getTransactionFreshDataKeys()
+        });
+        return Database.getUserTransactions(params.internalUserId);
+      }
     }
-
-    const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals/recover-missing`, {
-      method: 'POST',
-      headers: resolvedHeaders.headers
-    });
-    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-    if (!response.ok || payload?.ok === false) {
-      return params.legacyTransactions;
-    }
-
-    await Database.hydrateFromServer({
-      strict: true,
-      maxAttempts: 2,
-      timeoutMs: 20000,
-      retryDelayMs: 1000,
-      keys: Database.getTransactionFreshDataKeys()
-    });
-    return Database.getUserTransactions(params.internalUserId);
   } catch {
-    return params.legacyTransactions;
+    // Fall through to local synthesized display rows when server recovery is unavailable.
   }
+
+  return [...params.legacyTransactions, ...synthesizedWithdrawals];
 }
 
 type V2WalletReadOptions = {
@@ -1333,12 +1279,7 @@ async function submitV2AtomicRegistration(params: RegisterData): Promise<{
   };
 }
 
-async function reconcileCommittedRegistrationFromPin(
-  pinCode: string,
-  options?: {
-    suspectedInFlight?: boolean;
-  }
-): Promise<{
+async function reconcileCommittedRegistrationFromPin(pinCode: string): Promise<{
   recovered: boolean;
   userId?: string;
   warning?: string;
@@ -1349,77 +1290,50 @@ async function reconcileCommittedRegistrationFromPin(
     return { recovered: false };
   }
 
-  const maxAttempts = options?.suspectedInFlight ? 5 : 3;
-  const retryDelayMs = options?.suspectedInFlight ? 4000 : 2500;
-  let sawMissingPin = false;
-  let sawUnusedPin = false;
-  let sawConsumedPinWithoutUser = false;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      await Database.forceRemoteSyncKeysNow(Database.getRegistrationFreshDataKeys(), {
-        force: true,
-        timeoutMs: options?.suspectedInFlight ? 15000 : 12000,
-        maxAttempts: 2,
-        retryDelayMs: 800
-      });
-    } catch {
-      // Best-effort sync only. Continue reconciliation with locally available state.
-    }
-
-    const pin = Database.getPinByCode(normalizedPinCode);
-    if (!pin) {
-      sawMissingPin = true;
-    } else if (String(pin.status || '').toLowerCase() === 'unused') {
-      sawUnusedPin = true;
-    } else {
-      const candidateRefs = [
-        String(pin.registrationUserId || '').trim(),
-        String(pin.usedById || '').trim()
-      ].filter((value) => value.length > 0);
-
-      for (const ref of candidateRefs) {
-        const linkedUser = Database.getUserById(ref) || Database.getUserByUserId(ref);
-        const linkedUserCode = String(linkedUser?.userId || '').trim();
-        if (/^\d{7}$/.test(linkedUserCode)) {
-          return {
-            recovered: true,
-            userId: linkedUserCode,
-            warning: 'Registration was already committed on server and has been recovered after a temporary network error.'
-          };
-        }
-      }
-
-      sawConsumedPinWithoutUser = true;
-    }
-
-    if (attempt < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-    }
+  try {
+    await Database.forceRemoteSyncKeysNow(Database.getRegistrationFreshDataKeys(), {
+      force: true,
+      timeoutMs: 45000,
+      maxAttempts: 2,
+      retryDelayMs: 1000
+    });
+  } catch {
+    // Best-effort sync only. Continue reconciliation with locally available state.
   }
 
-  if (sawConsumedPinWithoutUser) {
-    return {
-      recovered: false,
-      blockingMessage: 'PIN is already consumed and registration may already be committed. Please wait 20-30 seconds, refresh, and do not retry with another PIN.'
-    };
-  }
-
-  if (options?.suspectedInFlight && (sawMissingPin || sawUnusedPin)) {
-    return {
-      recovered: false,
-      blockingMessage: 'Registration request is still being verified. Please wait 30-60 seconds, refresh, and do not submit again with another PIN yet.'
-    };
-  }
-
-  if (sawMissingPin) {
+  const pin = Database.getPinByCode(normalizedPinCode);
+  if (!pin) {
     return {
       recovered: false,
       blockingMessage: 'Registration status could not be verified yet. Please refresh once and check before retrying.'
     };
   }
 
-  return { recovered: false };
+  if (String(pin.status || '').toLowerCase() === 'unused') {
+    return { recovered: false };
+  }
+
+  const candidateRefs = [
+    String(pin.registrationUserId || '').trim(),
+    String(pin.usedById || '').trim()
+  ].filter((value) => value.length > 0);
+
+  for (const ref of candidateRefs) {
+    const linkedUser = Database.getUserById(ref) || Database.getUserByUserId(ref);
+    const linkedUserCode = String(linkedUser?.userId || '').trim();
+    if (/^\d{7}$/.test(linkedUserCode)) {
+      return {
+        recovered: true,
+        userId: linkedUserCode,
+        warning: 'Registration was already committed on server and has been recovered after a temporary network error.'
+      };
+    }
+  }
+
+  return {
+    recovered: false,
+    blockingMessage: 'PIN is already consumed and registration may already be committed. Please wait 20-30 seconds, refresh, and do not retry with another PIN.'
+  };
 }
 
 const POST_REGISTRATION_RETRY_QUEUE_STORAGE_KEY = 'v2_post_registration_retry_queue';
@@ -2538,16 +2452,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const shouldTryRecovery = !nonRecoverableCodes.has(String(backendRegistration.code || '').trim());
 
       if (shouldTryRecovery) {
-        const backendFailureMessage = String(backendRegistration.message || '').toLowerCase();
-        const recoveredRegistration = await reconcileCommittedRegistrationFromPin(normalizedPinCode, {
-          suspectedInFlight:
-            backendRegistration.status === undefined
-            || backendFailureMessage.includes('server limit reached')
-            || backendFailureMessage.includes('request might still be processing')
-            || backendFailureMessage.includes('request timed out')
-            || backendFailureMessage.includes('network request error')
-            || backendFailureMessage.includes('connection interrupted')
-        });
+        const recoveredRegistration = await reconcileCommittedRegistrationFromPin(normalizedPinCode);
         if (recoveredRegistration.recovered && recoveredRegistration.userId) {
           backendRegistration = {
             success: true,
@@ -3440,16 +3345,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
 
     const otpForV2 = (security?.otp || '').trim();
     const otpVerificationUserKey = String(fromUser.userId || effectiveFromUserId || '').trim();
-    const otpVerified = otpForV2
-      ? await verifyOtpAgainstServer({
-        identityKey: otpVerificationUserKey,
-        email: fromUser.email,
-        purpose: 'transaction',
-        otp: otpForV2,
-        consume: false
-      })
-      : false;
-    if (!otpVerified) {
+    if (!otpForV2 || !Database.verifyOtp(otpVerificationUserKey, otpForV2, 'transaction', false)) {
       return { success: false, message: 'Invalid or expired OTP' };
     }
 
@@ -3497,6 +3393,9 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       }
       return { success: false, message: errorMessage };
     }
+
+    // Consume OTP only after the transfer is successfully accepted.
+    void Database.verifyOtp(otpVerificationUserKey, otpForV2, 'transaction', true);
 
     const refreshedV2Read = await fetchV2WalletAndTransactionsSnapshotForUserWithStatus(fromUser, {
       includeLegacyTransactions: false
@@ -3583,16 +3482,7 @@ export const useWalletStore = create<WalletState>((set, get) => ({
       }
 
       const otpForV2 = (security?.otp || '').trim();
-      const otpVerified = otpForV2
-        ? await verifyOtpAgainstServer({
-          identityKey: user.userId,
-          email: user.email,
-          purpose: 'withdrawal',
-          otp: otpForV2,
-          consume: false
-        })
-        : false;
-      if (!otpVerified) {
+      if (!otpForV2 || !Database.verifyOtp(user.userId, otpForV2, 'withdrawal', false)) {
         return { success: false, message: 'Invalid or expired OTP' };
       }
 
@@ -3641,6 +3531,8 @@ export const useWalletStore = create<WalletState>((set, get) => ({
         const errorMessage = normalizeV2ApiErrorMessage(response.status, payload, 'Withdrawal failed');
         return { success: false, message: errorMessage };
       }
+
+      void Database.verifyOtp(user.userId, otpForV2, 'withdrawal', true);
 
       const refreshedSnapshot = await fetchV2WalletAndTransactionsSnapshotForUser(user).catch(() => null);
       if (refreshedSnapshot) {
@@ -5627,7 +5519,9 @@ export const useOtpStore = create<OtpState>((set) => ({
   otpExpiry: null,
 
   sendOtp: async (userId: string, email: string, purpose, context) => {
-    if (requiresServerOwnedOtp(purpose, { currentUserPresent: !!Database.getCurrentUser() })) {
+    const requiresServerOwnedOtp = purpose === 'registration'
+      || (purpose === 'profile_update' && !Database.getCurrentUser());
+    if (requiresServerOwnedOtp) {
       try {
         const response = await fetch(`${getBackendApiBase()}/api/auth/otp/send`, {
           method: 'POST',
@@ -5749,17 +5643,36 @@ export const useOtpStore = create<OtpState>((set) => ({
   },
 
   verifyOtp: async (userId: string, otp: string, purpose, consume = true) => {
-    if (requiresServerOwnedOtp(purpose, { currentUserPresent: !!Database.getCurrentUser() })) {
-      const isValid = await verifyOtpAgainstServer({
-        identityKey: userId,
-        purpose,
-        otp,
-        consume
-      });
-      if (isValid) {
-        set({ isOtpSent: false, otpExpiry: null });
+    const requiresServerOwnedOtp = purpose === 'registration'
+      || (purpose === 'profile_update' && !Database.getCurrentUser());
+    if (requiresServerOwnedOtp) {
+      const resolvedEmail = String(
+        Database.getUserById(userId)?.email
+        || Database.getUserByUserId(userId)?.email
+        || Database.getUserByEmail(userId)?.email
+        || userId.replace(/^register_|^createid_/, '')
+      ).trim().toLowerCase();
+      try {
+        const response = await fetch(`${getBackendApiBase()}/api/auth/otp/verify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            identityKey: userId,
+            email: resolvedEmail,
+            purpose,
+            otp,
+            consume
+          })
+        });
+        const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+        const isValid = response.ok && payload?.ok !== false;
+        if (isValid) {
+          set({ isOtpSent: false, otpExpiry: null });
+        }
+        return isValid;
+      } catch {
+        return false;
       }
-      return isValid;
     }
 
     const isValid = Database.verifyOtp(userId, otp, purpose, consume);
