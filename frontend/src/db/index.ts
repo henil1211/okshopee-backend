@@ -11161,9 +11161,112 @@ class Database {
     return nextTx;
   }
 
+  private static isWithdrawalSubmissionDescription(description: unknown): boolean {
+    const normalized = String(description || '').trim().toLowerCase();
+    return normalized.includes('withdrawal to wallet submitted by')
+      || normalized.includes('withdrawal to wallet with qr submitted by');
+  }
+
+  private static repairLegacyWithdrawalArtifactPairs(transactions: Transaction[]): boolean {
+    if (!Array.isArray(transactions) || transactions.length === 0) {
+      return false;
+    }
+
+    const settings = this.getSettings();
+    const withdrawalFeePercent = Math.max(0, Number(settings?.withdrawalFeePercent || 0));
+    let changed = false;
+    const artifactIndexesToRemove = new Set<number>();
+    const syntheticWithdrawals: Transaction[] = [];
+
+    const hasCanonicalWithdrawal = (userRef: string, description: string, grossAmount: number, createdAt: string) => {
+      const canonicalTime = new Date(createdAt).getTime();
+      return transactions.some((tx) => {
+        if (tx.type !== 'withdrawal') return false;
+        const sameUser = String(tx.userId || '').trim() === userRef.trim()
+          || String(tx.requesterUserId || '').trim() === userRef.trim();
+        if (!sameUser) return false;
+        if (String(tx.description || '').trim() !== description) return false;
+        if (Math.abs(Math.abs(Number(tx.amount || 0)) - grossAmount) > 0.009) return false;
+        const txTime = new Date(String(tx.createdAt || '')).getTime();
+        return !Number.isFinite(canonicalTime) || !Number.isFinite(txTime) || Math.abs(txTime - canonicalTime) <= 60_000;
+      });
+    };
+
+    transactions.forEach((tx, index) => {
+      if (tx.type === 'withdrawal') return;
+      if (!(Number(tx.amount || 0) < 0)) return;
+      if (!this.isWithdrawalSubmissionDescription(tx.description)) return;
+      if (artifactIndexesToRemove.has(index)) return;
+
+      const description = String(tx.description || '').trim();
+      const grossAmount = Math.abs(Number(tx.amount || 0));
+      if (!(grossAmount > 0)) return;
+
+      const requesterUserId = String(tx.requesterUserId || '').trim();
+      const userRef = requesterUserId || String(tx.userId || '').trim();
+      const resolvedUser = this.resolveUserByRef(userRef) || this.resolveUserByRef(String(tx.userId || '').trim());
+      const internalUserId = String(resolvedUser?.id || tx.userId || '').trim();
+      const publicUserId = String(resolvedUser?.userId || requesterUserId || '').trim();
+      if (!internalUserId) return;
+
+      if (hasCanonicalWithdrawal(internalUserId, description, grossAmount, String(tx.createdAt || ''))) {
+        artifactIndexesToRemove.add(index);
+        changed = true;
+        return;
+      }
+
+      const txTime = new Date(String(tx.createdAt || '')).getTime();
+      transactions.forEach((candidate, candidateIndex) => {
+        if (candidateIndex === index) return;
+        if (candidate.type === 'withdrawal') return;
+        if (!this.isWithdrawalSubmissionDescription(candidate.description)) return;
+        if (String(candidate.description || '').trim() !== description) return;
+        const candidateUserMatch = String(candidate.userId || '').trim() === internalUserId
+          || String(candidate.requesterUserId || '').trim() === publicUserId
+          || String(candidate.requesterUserId || '').trim() === internalUserId;
+        if (!candidateUserMatch) return;
+        if (Math.abs(Math.abs(Number(candidate.amount || 0)) - grossAmount) > 0.009) return;
+        const candidateTime = new Date(String(candidate.createdAt || '')).getTime();
+        if (Number.isFinite(txTime) && Number.isFinite(candidateTime) && Math.abs(candidateTime - txTime) > 60_000) return;
+        artifactIndexesToRemove.add(candidateIndex);
+      });
+
+      artifactIndexesToRemove.add(index);
+      const feeAmount = Math.max(0, Math.round(grossAmount * withdrawalFeePercent) / 100);
+      const netAmount = Math.max(0, Math.round((grossAmount - feeAmount) * 100) / 100);
+      syntheticWithdrawals.push(this.normalizeTransactionRecord({
+        ...tx,
+        id: `legacywd_${String(tx.id || `fallback_${index}`)}`,
+        userId: internalUserId,
+        type: 'withdrawal',
+        amount: -grossAmount,
+        status: 'pending',
+        requesterUserId: publicUserId || requesterUserId || undefined,
+        requesterName: String(resolvedUser?.fullName || tx.requesterName || publicUserId || '').trim() || undefined,
+        walletAddress: String((resolvedUser as any)?.usdtAddress || (tx as any).walletAddress || '').trim() || undefined,
+        fee: feeAmount,
+        netAmount,
+        payoutQrCode: (tx as any).payoutQrCode || null
+      } as Transaction));
+      changed = true;
+    });
+
+    if (!changed) {
+      return false;
+    }
+
+    const nextTransactions = transactions.filter((_, index) => !artifactIndexesToRemove.has(index));
+    nextTransactions.push(...syntheticWithdrawals);
+    transactions.splice(0, transactions.length, ...nextTransactions);
+    return true;
+  }
+
   static getTransactions(): Transaction[] {
     const transactions: Transaction[] = this.getCached<Transaction[]>(DB_KEYS.TRANSACTIONS, []);
     let changed = false;
+    if (this.repairLegacyWithdrawalArtifactPairs(transactions)) {
+      changed = true;
+    }
     const duplicateGiveMismatchRows = this.buildDuplicateLockedGiveHelpMismatchRows(transactions);
     const referralMismatchRows = this.buildReferralIncomeMismatchRowsFromTransactions(transactions);
 
@@ -14134,6 +14237,5 @@ interface LevelWiseReport {
   directCount: number;
   date: string;
 }
-
 
 

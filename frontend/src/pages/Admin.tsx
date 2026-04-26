@@ -2117,44 +2117,35 @@ export default function Admin() {
         keys: [DB_KEYS.TRANSACTIONS, DB_KEYS.OTP_RECORDS]
       });
 
-      const findings = Database.scanSuspiciousWithdrawalSubmissions(20);
-      const uniqueUserCodes = Array.from(new Set(
-        findings
-          .map((item) => String(item.userId || '').trim())
-          .filter((value) => /^\d{7}$/.test(value))
-      ));
-
       let recoveredCount = 0;
-      if (user?.isAdmin && uniqueUserCodes.length > 0) {
+      if (user?.isAdmin) {
         const session = Database.getV2AuthSession();
         const accessToken = String(session?.accessToken || '').trim();
         if (!accessToken) {
           throw new Error('Admin V2 session is missing. Please logout and login again.');
         }
 
-        for (const targetUserCode of uniqueUserCodes) {
-          const requestId = generateClientRequestId('admin_withdrawal_recover');
-          const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`,
-            'Idempotency-Key': generateClientIdempotencyKey(),
-            'X-System-Version': 'v2',
-            'X-Request-Id': requestId
-          };
+        const requestId = generateClientRequestId('admin_withdrawal_recover_all');
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'Idempotency-Key': generateClientIdempotencyKey(),
+          'X-System-Version': 'v2',
+          'X-Request-Id': requestId
+        };
 
-          const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals/recover-missing`, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-              targetUserCode
-            })
-          });
-          const payload = await response.json().catch(() => ({} as Record<string, unknown>));
-          if (!response.ok || payload?.ok === false) {
-            throw new Error(typeof payload?.error === 'string' ? payload.error : `Failed to recover withdrawal for ${targetUserCode}`);
-          }
-          recoveredCount += Number(payload?.recoveredCount || 0) + Number(payload?.updatedCount || 0);
+        const response = await fetch(`${getBackendApiBase()}/api/v2/withdrawals/recover-missing`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            recoverAll: true
+          })
+        });
+        const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+        if (!response.ok || payload?.ok === false) {
+          throw new Error(typeof payload?.error === 'string' ? payload.error : 'Failed to recover missing withdrawals');
         }
+        recoveredCount += Number(payload?.recoveredCount || 0) + Number(payload?.updatedCount || 0);
       }
 
       await Database.hydrateFromServer({
