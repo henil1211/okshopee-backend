@@ -22,3 +22,7 @@ build/
 
 # OS
 .DS_Store
+
+# local repair scratch space
+backend/1
+backend/scratch/*
