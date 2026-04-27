@@ -39,47 +39,34 @@ function safeParseJson(value, fallback) {
   }
 }
 
-async function resolveAncestorUserCode(connection, sourceUserCode, ancestorDepth) {
-  const depth = Math.max(1, Number(ancestorDepth || 1));
-
-  // Try resolving from v2 matrix rows first.
-  let currentCode = sourceUserCode;
-  let resolvedDepth = 0;
-  while (resolvedDepth < depth) {
-    const [matrixRows] = await connection.execute(
-      `SELECT parent_user_code
-       FROM v2_matrix_nodes
-       WHERE user_code = ?
-       LIMIT 1
-       FOR UPDATE`,
-      [currentCode]
-    );
-    const parentCode = normalizeUserCode(
-      Array.isArray(matrixRows) && matrixRows[0] ? matrixRows[0].parent_user_code : ''
-    );
-    if (!parentCode) {
-      break;
-    }
-    currentCode = parentCode;
-    resolvedDepth += 1;
-  }
-
-  if (resolvedDepth === depth) {
+async function resolveImmediateUplineUserCode(connection, sourceUserCode) {
+  const [stateRows] = await connection.execute(
+    `SELECT parent_user_code
+     FROM v2_matrix_nodes
+     WHERE user_code = ?
+     LIMIT 1
+     FOR UPDATE`,
+    [sourceUserCode]
+  );
+  const v2ParentCode = normalizeUserCode(
+    Array.isArray(stateRows) && stateRows[0] ? stateRows[0].parent_user_code : ''
+  );
+  if (v2ParentCode) {
     return {
-      ancestorUserCode: currentCode,
+      ancestorUserCode: v2ParentCode,
       resolvedFrom: 'v2_matrix_nodes',
-      depth
+      depth: 1
     };
   }
 
-  const [stateRows] = await connection.execute(
+  const [legacyStateRows] = await connection.execute(
     `SELECT state_value
      FROM state_store
      WHERE state_key = 'mlm_matrix'
      LIMIT 1
      FOR UPDATE`
   );
-  const matrixRaw = Array.isArray(stateRows) && stateRows[0] ? stateRows[0].state_value : null;
+  const matrixRaw = Array.isArray(legacyStateRows) && legacyStateRows[0] ? legacyStateRows[0].state_value : null;
   const matrix = safeParseJson(matrixRaw, []);
 
   if (Array.isArray(matrix) && matrix.length > 0) {
@@ -90,20 +77,12 @@ async function resolveAncestorUserCode(connection, sourceUserCode, ancestorDepth
       parentByCode.set(userCode, normalizeUserCode(node?.parentId));
     }
 
-    currentCode = sourceUserCode;
-    resolvedDepth = 0;
-    while (resolvedDepth < depth) {
-      const parentCode = normalizeUserCode(parentByCode.get(currentCode));
-      if (!parentCode) break;
-      currentCode = parentCode;
-      resolvedDepth += 1;
-    }
-
-    if (resolvedDepth === depth) {
+    const parentCode = normalizeUserCode(parentByCode.get(sourceUserCode));
+    if (parentCode) {
       return {
-        ancestorUserCode: currentCode,
+        ancestorUserCode: parentCode,
         resolvedFrom: 'legacy_matrix_state',
-        depth
+        depth: 1
       };
     }
   }
@@ -111,7 +90,7 @@ async function resolveAncestorUserCode(connection, sourceUserCode, ancestorDepth
   return {
     ancestorUserCode: '',
     resolvedFrom: 'unresolved',
-    depth
+    depth: 1
   };
 }
 
@@ -223,7 +202,7 @@ async function loadActualGivenCents(connection, sourceUserId, contributionLevelN
      FROM v2_help_pending_contributions
      WHERE source_user_id = ?
        AND level_no = ?
-       AND status IN ('processed', 'pending')
+       AND status = 'processed'
      FOR UPDATE`,
     [sourceUserId, contributionLevelNo]
   );
@@ -292,6 +271,116 @@ async function loadLegacyHelpQualificationContext(connection) {
     directCountByUserCode: buildLegacyDirectCountMap(Array.isArray(legacyUsers) ? legacyUsers : []),
     incrementalDirectRequirements: extractIncrementalDirectRequirementsFromLegacySettings(legacySettings, 10)
   };
+}
+
+async function syncLegacyWalletProjection(connection, userCodes) {
+  const targetUserCodes = [...new Set((Array.isArray(userCodes) ? userCodes : []).map((code) => normalizeUserCode(code)).filter(Boolean))];
+  if (targetUserCodes.length === 0) {
+    return { updatedLegacyWallets: 0 };
+  }
+
+  const [stateRows] = await connection.execute(
+    `SELECT state_key, state_value
+     FROM state_store
+     WHERE state_key IN ('mlm_users', 'mlm_wallets')
+     FOR UPDATE`
+  );
+  const byKey = new Map((Array.isArray(stateRows) ? stateRows : []).map((row) => [String(row.state_key || ''), row.state_value]));
+  const legacyUsers = safeParseJson(byKey.get('mlm_users'), []);
+  const legacyWallets = safeParseJson(byKey.get('mlm_wallets'), []);
+  const legacyUsersByInternalId = new Map();
+  for (const legacyUser of Array.isArray(legacyUsers) ? legacyUsers : []) {
+    const internalId = String(legacyUser?.id || '').trim();
+    if (internalId) {
+      legacyUsersByInternalId.set(internalId, legacyUser);
+    }
+  }
+
+  const placeholders = targetUserCodes.map(() => '?').join(', ');
+  const [walletRows] = await connection.execute(
+    `SELECT u.user_code, wa.wallet_type, wa.current_amount_cents
+     FROM v2_wallet_accounts wa
+     INNER JOIN v2_users u ON u.id = wa.user_id
+     WHERE u.user_code IN (${placeholders})`,
+    targetUserCodes
+  );
+  const [levelRows] = await connection.execute(
+    `SELECT u.user_code,
+            COALESCE(SUM(hs.locked_qualification_cents), 0) AS locked_qualification_cents,
+            COALESCE(SUM(hs.pending_give_cents), 0) AS pending_give_cents
+     FROM v2_users u
+     LEFT JOIN v2_help_level_state hs ON hs.user_id = u.id
+     WHERE u.user_code IN (${placeholders})
+     GROUP BY u.user_code`,
+    targetUserCodes
+  );
+
+  const walletByCode = new Map();
+  for (const row of Array.isArray(walletRows) ? walletRows : []) {
+    const userCode = normalizeUserCode(row?.user_code);
+    if (!userCode) continue;
+    if (!walletByCode.has(userCode)) walletByCode.set(userCode, {});
+    walletByCode.get(userCode)[String(row?.wallet_type || '')] = Number(row?.current_amount_cents || 0);
+  }
+
+  const levelByCode = new Map();
+  for (const row of Array.isArray(levelRows) ? levelRows : []) {
+    const userCode = normalizeUserCode(row?.user_code);
+    if (!userCode) continue;
+    levelByCode.set(userCode, {
+      lockedQualificationCents: Number(row?.locked_qualification_cents || 0),
+      pendingGiveCents: Number(row?.pending_give_cents || 0)
+    });
+  }
+
+  let updatedLegacyWallets = 0;
+  const nextLegacyWallets = (Array.isArray(legacyWallets) ? legacyWallets : []).map((wallet) => {
+    const internalId = String(wallet?.userId || '').trim();
+    const legacyUser = legacyUsersByInternalId.get(internalId) || null;
+    const userCode = normalizeUserCode(legacyUser?.userId);
+    if (!userCode || !targetUserCodes.includes(userCode)) {
+      return wallet;
+    }
+
+    const v2Wallets = walletByCode.get(userCode) || {};
+    const levelState = levelByCode.get(userCode) || { lockedQualificationCents: 0, pendingGiveCents: 0 };
+    const nextDepositWallet = Math.max(0, Number(v2Wallets.fund || 0)) / 100;
+    const nextIncomeWallet = Math.max(0, Number(v2Wallets.income || 0)) / 100;
+    const nextRoyaltyWallet = Math.max(0, Number(v2Wallets.royalty || 0)) / 100;
+    const nextLockedIncomeWallet = Math.max(0, Number(levelState.lockedQualificationCents || 0)) / 100;
+    const nextGiveHelpLocked = Math.max(0, Number(levelState.pendingGiveCents || 0)) / 100;
+
+    if (
+      Number(wallet?.depositWallet || 0) === nextDepositWallet
+      && Number(wallet?.incomeWallet || 0) === nextIncomeWallet
+      && Number(wallet?.royaltyWallet || 0) === nextRoyaltyWallet
+      && Number(wallet?.lockedIncomeWallet || 0) === nextLockedIncomeWallet
+      && Number(wallet?.giveHelpLocked || 0) === nextGiveHelpLocked
+    ) {
+      return wallet;
+    }
+
+    updatedLegacyWallets += 1;
+    return {
+      ...wallet,
+      depositWallet: nextDepositWallet,
+      incomeWallet: nextIncomeWallet,
+      royaltyWallet: nextRoyaltyWallet,
+      lockedIncomeWallet: nextLockedIncomeWallet,
+      giveHelpLocked: nextGiveHelpLocked
+    };
+  });
+
+  if (updatedLegacyWallets > 0) {
+    await connection.execute(
+      `INSERT INTO state_store (state_key, state_value, updated_at)
+       VALUES ('mlm_wallets', ?, NOW(3))
+       ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+      [JSON.stringify(nextLegacyWallets)]
+    );
+  }
+
+  return { updatedLegacyWallets };
 }
 
 function isQualifiedForLevel(qualificationContext, userCode, levelNo) {
@@ -401,6 +490,7 @@ async function main() {
     skippedDueToSuspiciousFirstTwo: false,
     settlementMode: null,
     ledgerTransactionId: null,
+    updatedLegacyWallets: 0,
     notes: []
   };
 
@@ -439,8 +529,6 @@ async function main() {
     summary.sourceLevel1DedupedLockedCents = Number(levelProfile.dedupedLockedCents || 0);
 
     const contributionLevelNo = sourceLevelNo + 1;
-    const targetLevelState = await lockHelpLevelState(connection, Number(sourceUser.id), contributionLevelNo);
-    const stateGivenCents = Number(targetLevelState?.given_cents || 0);
     const historyGivenCents = await loadActualGivenCents(connection, Number(sourceUser.id), contributionLevelNo);
 
     if (summary.sourceLevel1DistinctContributors < 2 && contributionLevelNo > 1) {
@@ -460,7 +548,7 @@ async function main() {
 
     const safePendingGiveCents = Math.max(
       0,
-      Number(levelProfile.dedupedLockedCents || 0) - stateGivenCents
+      Number(levelProfile.dedupedLockedCents || 0) - historyGivenCents
     );
     const effectivePendingGiveCents = safePendingGiveCents;
     summary.pendingAmountCents = effectivePendingGiveCents;
@@ -489,17 +577,17 @@ async function main() {
       return;
     }
 
-    const beneficiaryResolution = await resolveAncestorUserCode(connection, sourceUserCode, contributionLevelNo);
+    const beneficiaryResolution = await resolveImmediateUplineUserCode(connection, sourceUserCode);
     const beneficiaryUserCode = beneficiaryResolution.ancestorUserCode;
     if (!beneficiaryUserCode) {
       throw new Error(
-        `Beneficiary user code unresolved at level ${contributionLevelNo} for ${sourceUserCode} `
+        `Immediate upline user code unresolved for ${sourceUserCode} `
         + '(checked v2_matrix_nodes and legacy matrix state)'
       );
     }
     if (beneficiaryResolution.resolvedFrom !== 'v2_matrix_nodes') {
       summary.notes.push(
-        `Level ${contributionLevelNo} beneficiary resolved from ${beneficiaryResolution.resolvedFrom}: ${beneficiaryUserCode}`
+        `Immediate upline beneficiary resolved from ${beneficiaryResolution.resolvedFrom}: ${beneficiaryUserCode}`
       );
     }
 
@@ -588,6 +676,9 @@ async function main() {
     }
 
     summary.pendingContributionId = Number(pendingContribution.id || 0) || null;
+    const sourceAlreadyConsumed = /^processing:/i.test(String(pendingContribution.reason || ''))
+      || (pendingGiveCents < contributionAmountCents
+        && Number(sourceLevelState.given_cents || 0) >= contributionAmountCents);
 
     if (effectivePendingGiveCents < contributionAmountCents) {
       summary.notes.push(
@@ -612,27 +703,23 @@ async function main() {
     }
 
     // Consume pending give from source level for target level contribution.
-    const nextSourceEventSeq = Number(sourceLevelState.last_event_seq || 0) + 1;
-    const nextSourcePending = Math.max(0, pendingGiveCents - contributionAmountCents);
-    // given_cents for upgrade levels is tracked in the target level state.
-    const nextTargetGiven = stateGivenCents + contributionAmountCents;
+    if (!sourceAlreadyConsumed) {
+      const nextSourceEventSeq = Number(sourceLevelState.last_event_seq || 0) + 1;
+      const nextSourcePending = Math.max(0, pendingGiveCents - contributionAmountCents);
+      const nextSourceGiven = Number(sourceLevelState.given_cents || 0) + contributionAmountCents;
 
-    await connection.execute(
-      `UPDATE v2_help_level_state
-       SET pending_give_cents = ?,
-           last_event_seq = ?,
-           updated_at = NOW(3)
-       WHERE id = ?`,
-      [nextSourcePending, nextSourceEventSeq, sourceLevelState.id]
-    );
-
-    await connection.execute(
-      `UPDATE v2_help_level_state
-       SET given_cents = ?,
-           updated_at = NOW(3)
-       WHERE id = ?`,
-      [nextTargetGiven, targetLevelState.id]
-    );
+      await connection.execute(
+        `UPDATE v2_help_level_state
+         SET pending_give_cents = ?,
+             given_cents = ?,
+             last_event_seq = ?,
+             updated_at = NOW(3)
+         WHERE id = ?`,
+        [nextSourcePending, nextSourceGiven, nextSourceEventSeq, sourceLevelState.id]
+      );
+    } else {
+      summary.notes.push('Source pending give was already consumed by a stuck claim; reusing that state during repair.');
+    }
 
     const qualificationContext = await loadLegacyHelpQualificationContext(connection);
     const beneficiaryLevelState = await lockHelpLevelState(connection, Number(beneficiaryUser.id), contributionLevelNo);
@@ -834,6 +921,11 @@ async function main() {
     summary.processedContribution = true;
     summary.settlementMode = settlementMode;
     summary.ledgerTransactionId = ledgerTxnId;
+    const walletSync = await syncLegacyWalletProjection(connection, [
+      String(sourceUser.user_code || ''),
+      String(beneficiaryUser.user_code || '')
+    ]);
+    summary.updatedLegacyWallets = Number(walletSync?.updatedLegacyWallets || 0);
 
     await connection.commit();
     txOpen = false;

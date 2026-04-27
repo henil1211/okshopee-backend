@@ -196,7 +196,10 @@ export async function claimPendingContributionForProcessing(connection, {
   const [claimResult] = await connection.execute(
     `UPDATE v2_help_pending_contributions
      SET reason = ?
-     WHERE id = ? AND status = 'pending' AND reason IS NULL`,
+     WHERE id = ?
+       AND status = 'pending'
+       AND processed_txn_id IS NULL
+       AND (reason IS NULL OR reason LIKE 'processing:%')`,
     [claimReason, normalizedId]
   );
 

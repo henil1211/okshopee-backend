@@ -2757,12 +2757,35 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
          cp.user_code AS counterparty_user_code
        FROM v2_ledger_entries le
        INNER JOIN v2_ledger_transactions lt ON lt.id = le.ledger_txn_id
+       LEFT JOIN v2_help_pending_contributions ben_pc
+         ON ben_pc.processed_txn_id = lt.id
+        AND ben_pc.beneficiary_user_id = le.user_id
+       LEFT JOIN v2_help_pending_contributions src_pc
+         ON src_pc.processed_txn_id = lt.id
+        AND src_pc.source_user_id = le.user_id
        LEFT JOIN v2_ledger_entries cp_le
          ON cp_le.ledger_txn_id = le.ledger_txn_id
         AND cp_le.id <> le.id
         AND cp_le.user_id IS NOT NULL
        LEFT JOIN v2_users cp ON cp.id = cp_le.user_id
        WHERE le.user_id = ?
+         AND NOT (
+           lt.tx_type = 'referral_credit'
+           AND (
+             (
+               ben_pc.id IS NOT NULL
+               AND ben_pc.reason IN ('locked_for_give', 'locked_for_qualification', 'safety_pool_diversion')
+             )
+             OR (
+               src_pc.id IS NOT NULL
+               AND src_pc.level_no > 1
+             )
+           )
+         )
+         AND NOT (
+           lt.tx_type = 'admin_adjustment'
+           AND LOWER(COALESCE(lt.description, '')) LIKE 'legacy level %auto-give upgrade%'
+         )
        ORDER BY lt.id DESC, le.id DESC
        LIMIT ?`,
       [userId, safeLimit]
@@ -2805,7 +2828,10 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
        WHERE pc.beneficiary_user_id = ?
          AND pc.status = 'processed'
          AND pc.processed_txn_id IS NOT NULL
-         AND income_le.id IS NULL
+         AND (
+           pc.reason IN ('locked_for_give', 'locked_for_qualification', 'safety_pool_diversion')
+           OR income_le.id IS NULL
+         )
        ORDER BY lt.id DESC, pc.id DESC
        LIMIT ?`,
       [userId, safeLimit]
@@ -2832,15 +2858,10 @@ async function readV2LedgerEntriesByUserId(userId, limit = 100) {
        FROM v2_help_pending_contributions pc
        INNER JOIN v2_ledger_transactions lt ON lt.id = pc.processed_txn_id
        INNER JOIN v2_users ben ON ben.id = pc.beneficiary_user_id
-       LEFT JOIN v2_ledger_entries src_le
-         ON src_le.ledger_txn_id = pc.processed_txn_id
-        AND src_le.user_id = pc.source_user_id
-        AND src_le.entry_side = 'debit'
        WHERE pc.source_user_id = ?
          AND pc.level_no > 1
          AND pc.status = 'processed'
          AND pc.processed_txn_id IS NOT NULL
-         AND src_le.id IS NULL
        ORDER BY lt.id DESC, pc.id DESC
        LIMIT ?`,
       [userId, safeLimit]
@@ -5297,8 +5318,13 @@ async function resolveV2ImmediateUplineForAutoGive(connection, sourceUserCode) {
   const parentUser = Array.isArray(parentRows) ? parentRows[0] : null;
   if (!parentUser || String(parentUser.status) !== 'active') return null;
 
-  const position = Number(matrixNode?.position);
-  const side = position === 0 ? 'left' : position === 1 ? 'right' : 'unknown';
+  const rawPosition = String(matrixNode?.position ?? '').trim().toLowerCase();
+  const numericPosition = Number(rawPosition);
+  const side = rawPosition === 'left' || numericPosition === 0
+    ? 'left'
+    : rawPosition === 'right' || numericPosition === 1
+      ? 'right'
+      : 'unknown';
 
   return {
     beneficiaryUserId: Number(parentUser.id),
@@ -5931,15 +5957,6 @@ async function processV2HelpContributionCascade(connection, {
       const levelNo = Number(pendingContribution.level_no || 0);
       const amountCents = Number(pendingContribution.amount_cents || 0);
 
-      const consumption = await consumeV2HelpPendingGiveForContribution(connection, {
-        sourceUserId,
-        levelNo,
-        amountCents
-      });
-      if (!consumption.consumed) {
-        continue;
-      }
-
       const claimed = await claimPendingContributionForProcessing(connection, {
         pendingContributionId: pendingContribution.id,
         claimToken: `${eventKey}:${sourceUserId}`
@@ -5954,6 +5971,21 @@ async function processV2HelpContributionCascade(connection, {
           side: String(pendingContribution.side || 'unknown'),
           reason: 'claim_conflict'
         });
+        continue;
+      }
+
+      const consumption = await consumeV2HelpPendingGiveForContribution(connection, {
+        sourceUserId,
+        levelNo,
+        amountCents
+      });
+      if (!consumption.consumed) {
+        await connection.execute(
+          `UPDATE v2_help_pending_contributions
+           SET reason = NULL
+           WHERE id = ? AND status = 'pending' AND processed_txn_id IS NULL`,
+          [pendingContribution.id]
+        );
         continue;
       }
 
