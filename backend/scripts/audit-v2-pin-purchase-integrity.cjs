@@ -225,6 +225,28 @@ async function fetchV2PinsForUser(conn, userCode) {
   return Array.isArray(rows) ? rows : [];
 }
 
+async function fetchAllV2Pins(conn) {
+  const [rows] = await conn.execute(
+    `SELECT
+       p.id,
+       p.pin_code,
+       p.price_cents,
+       p.status,
+       p.created_at,
+       p.used_at,
+       buyer.user_code AS buyer_user_code,
+       used_user.user_code AS used_by_user_code
+     FROM v2_pins p
+     INNER JOIN v2_users buyer
+       ON buyer.id = p.buyer_user_id
+     LEFT JOIN v2_users used_user
+       ON used_user.id = p.used_by_user_id
+     ORDER BY p.id ASC`
+  );
+
+  return Array.isArray(rows) ? rows : [];
+}
+
 async function loadLegacyUsersAndPins(conn, { forUpdate = false } = {}) {
   const lockClause = forUpdate ? ' FOR UPDATE' : '';
   const [rows] = await conn.execute(
@@ -280,9 +302,32 @@ function inspectLegacyProjectionForUser({ userCode, v2Pins, legacyUsers, legacyP
 async function inspectLegacyProjectionMismatch(conn, userCode) {
   const normalizedUserCode = normalizeUserCode(userCode);
   if (!normalizedUserCode) {
+    const [v2Pins, legacy] = await Promise.all([
+      fetchAllV2Pins(conn),
+      loadLegacyUsersAndPins(conn)
+    ]);
+
+    const legacyPinCodeSet = new Set(
+      legacy.pins
+        .map((pin) => String(pin?.pinCode || '').trim().toUpperCase())
+        .filter(Boolean)
+    );
+    const missingV2PinsInLegacy = v2Pins.filter((pin) => {
+      const code = String(pin?.pin_code || '').trim().toUpperCase();
+      return !!code && !legacyPinCodeSet.has(code);
+    });
+
     return {
-      checked: false,
-      reason: '--user-code is required to audit legacy projection mismatch'
+      checked: true,
+      scope: 'global',
+      legacyUserFound: null,
+      legacyOwnerId: null,
+      v2PinCount: v2Pins.length,
+      legacyPinCountForOwner: legacy.pins.length,
+      missingInLegacyCount: missingV2PinsInLegacy.length,
+      missingInLegacyPinCodes: missingV2PinsInLegacy.map((pin) => String(pin.pin_code || '').trim().toUpperCase()),
+      projectionMismatch: missingV2PinsInLegacy.length > 0,
+      missingV2PinsInLegacy
     };
   }
 
@@ -307,11 +352,76 @@ async function inspectLegacyProjectionMismatch(conn, userCode) {
 async function repairLegacyProjectionMismatch(conn, userCode) {
   const normalizedUserCode = normalizeUserCode(userCode);
   if (!normalizedUserCode) {
-    return {
-      action: 'skipped',
-      reason: '--user-code is required for projection repair',
-      insertedPins: 0
-    };
+    const v2Pins = await fetchAllV2Pins(conn);
+
+    await conn.beginTransaction();
+    try {
+      const legacy = await loadLegacyUsersAndPins(conn, { forUpdate: true });
+      const legacyPinCodeSet = new Set(
+        legacy.pins
+          .map((pin) => String(pin?.pinCode || '').trim().toUpperCase())
+          .filter(Boolean)
+      );
+      const userByCode = new Map();
+      for (const user of legacy.users) {
+        const code = normalizeUserCode(user?.userId);
+        if (code) userByCode.set(code, user);
+      }
+
+      const additions = [];
+      for (const pin of v2Pins) {
+        const code = String(pin?.pin_code || '').trim().toUpperCase();
+        if (!code || legacyPinCodeSet.has(code)) continue;
+
+        const legacyBuyer = userByCode.get(normalizeUserCode(pin?.buyer_user_code)) || null;
+        if (!legacyBuyer) continue;
+        const legacyUsedBy = userByCode.get(normalizeUserCode(pin?.used_by_user_code)) || null;
+        const projected = buildLegacyProjectionPinFromV2({
+          v2Pin: pin,
+          legacyBuyer,
+          legacyUsedBy
+        });
+        if (!projected) continue;
+
+        additions.push(projected);
+        legacyPinCodeSet.add(code);
+      }
+
+      if (additions.length === 0) {
+        await conn.rollback();
+        return {
+          action: 'skipped',
+          reason: 'already_reconciled',
+          insertedPins: 0,
+          scope: 'global'
+        };
+      }
+
+      const now = new Date().toISOString().replace('T', ' ').replace('Z', '');
+      await conn.execute(
+        `INSERT INTO state_store (state_key, state_value, updated_at)
+         VALUES ('mlm_pins', ?, ?)
+         ON DUPLICATE KEY UPDATE state_value = VALUES(state_value), updated_at = VALUES(updated_at)`,
+        [JSON.stringify([...legacy.pins, ...additions]), now]
+      );
+
+      await conn.commit();
+      return {
+        action: 'repaired',
+        reason: null,
+        insertedPins: additions.length,
+        scope: 'global',
+        insertedPinCodes: additions.map((pin) => pin.pinCode)
+      };
+    } catch (error) {
+      await conn.rollback();
+      return {
+        action: 'failed',
+        reason: error instanceof Error ? error.message : String(error),
+        insertedPins: 0,
+        scope: 'global'
+      };
+    }
   }
 
   const v2Pins = await fetchV2PinsForUser(conn, normalizedUserCode);
